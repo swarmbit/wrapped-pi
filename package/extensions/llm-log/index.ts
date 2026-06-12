@@ -30,7 +30,7 @@
 //   │  at the time of the LLM call.                        │
 //   └──────────────────────────────────────────────────────┘
 //
-// Log file: <session-dir>/llm-log.md for sessions,
+// Log file: <session-dir>/llm-log-<session-id>.md for sessions,
 //           ~/.pi/agent/logs/llm-log-<timestamp>.md for ephemeral.
 //
 // Long system prompts and tool results go in <details> blocks
@@ -77,8 +77,9 @@ function writeIfMissing(filePath: string, content: string): void {
 
 function getLogFilePath(sessionFile: string | null): string {
 	if (sessionFile) {
-		// Log sits next to the session file. Findable, per-session, easy to clean up.
-		return path.join(path.dirname(sessionFile), "llm-log.md");
+		const sessionId = getSessionId(sessionFile);
+		// One log per session, sitting next to the session .jsonl file.
+		return path.join(path.dirname(sessionFile), `llm-log-${sessionId}.md`);
 	}
 	// Ephemeral: use a timestamped file in the global log dir
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
