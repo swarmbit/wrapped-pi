@@ -29,7 +29,7 @@ function runCli(args: string, options: { cwd: string; env?: Record<string, strin
 describe("CLI", () => {
   it("prints help with --help", () => {
     const output = execSync(`node ${CLI_PATH} --help`, { encoding: "utf-8" });
-    expect(output).toContain("pi-container [command]");
+    expect(output).toContain("wpi [command]");
     expect(output).toContain("build");
     expect(output).toContain("shell [id]");
     expect(output).toContain("dry-run");
@@ -37,12 +37,12 @@ describe("CLI", () => {
 
   it("prints version with --version", () => {
     const output = execSync(`node ${CLI_PATH} --version`, { encoding: "utf-8" });
-    expect(output).toContain("pi-container");
+    expect(output).toContain("wpi");
   });
 
   it("prints help with -h", () => {
     const output = execSync(`node ${CLI_PATH} -h`, { encoding: "utf-8" });
-    expect(output).toContain("pi-container [command]");
+    expect(output).toContain("wpi [command]");
   });
 
   it("exits with error for unknown arguments", () => {
@@ -114,7 +114,9 @@ describe("CLI dry-run", () => {
 
     const basename = path.basename(tmpDir);
     expect(output).toContain(`/${basename}:cached`);
-    expect(output).toContain("/.pi:/home/pi-user/.pi");
+    // The config dir is mounted into the container under the host home dir (passed via HOME)
+    // e.g., /tmp/.../.pi:/tmp/.../.pi
+    expect(output).toContain(`/.pi:${tmpDir}/.pi`);
   });
 
   it("shows config sources in dry-run output", () => {
@@ -126,12 +128,12 @@ describe("CLI dry-run", () => {
     expect(output).toContain("Project config:");
   });
 
-  it("shows env from pi-container.yml", () => {
+  it("shows env from wpi.yml", () => {
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "env:\n  ANTHROPIC_API_KEY: sk-test"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  env:\n    ANTHROPIC_API_KEY: sk-test"
     );
     const output = runCli("dry-run", { cwd: tmpDir });
 
@@ -143,8 +145,8 @@ describe("CLI dry-run", () => {
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "mounts:\n  - /var/run/docker.sock:/var/run/docker.sock\n  - /host/ssh:/container/ssh:ro"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  mounts:\n    - /var/run/docker.sock:/var/run/docker.sock\n    - /host/ssh:/container/ssh:ro"
     );
     const output = runCli("dry-run", { cwd: tmpDir });
     expect(output).toContain("/var/run/docker.sock:/var/run/docker.sock");
@@ -157,12 +159,12 @@ describe("CLI dry-run", () => {
     expect(output).toContain("(none)");
   });
 
-  it("shows ports from pi-container.yml", () => {
+  it("shows ports from wpi.yml", () => {
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "ports:\n  - 3000\n  - 8080:80"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  ports:\n    - 3000\n    - 8080:80"
     );
 
     const output = runCli("dry-run", { cwd: tmpDir });

@@ -13,7 +13,7 @@ let origCwd: string;
 
 beforeEach(() => {
   origCwd = process.cwd();
-  tmpDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-test-")));
+  tmpDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-test-")));
 });
 
 afterEach(() => {
@@ -30,10 +30,12 @@ describe("PI_VERSION and PI_IMAGE constants", () => {
     expect(PI_IMAGE).toBe(`pi-agent:${PI_VERSION}`);
   });
 
-  it("loadConfig uses these constants", () => {
+  it("loadConfig uses these constants as defaults", () => {
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir: tmpDir });
-    // Config no longer has version/image — they're constants
+    // No pi.version set in config — should fall back to the baked-in constant
+    expect(config.piVersion).toBe(PI_VERSION);
+    expect(config.piImage).toBe(PI_IMAGE);
     expect(config.ports).toEqual([]);
     expect(config.mounts).toEqual([]);
   });
@@ -59,8 +61,8 @@ describe("loadConfig", () => {
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "env:\n  ANTHROPIC_API_KEY: sk-test"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  env:\n    ANTHROPIC_API_KEY: sk-test"
     );
     process.chdir(tmpDir);
 
@@ -78,8 +80,8 @@ describe("loadConfig", () => {
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "dockerfileExtension: |\n  RUN apt-get install -y python3"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  extension: |\n    RUN apt-get install -y python3"
     );
     process.chdir(tmpDir);
 
@@ -88,18 +90,18 @@ describe("loadConfig", () => {
   });
 
   it("project dockerfileExtension overrides user config", () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
     fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
     fs.writeFileSync(
-      path.join(homeDir, ".pi", "pi-container.yml"),
-      "dockerfileExtension: |\n  RUN echo user"
+      path.join(homeDir, ".pi", "wpi.yml"),
+      "docker:\n  extension: |\n    RUN echo user"
     );
 
     const containerDir = path.join(tmpDir, ".pi");
     fs.mkdirSync(containerDir, { recursive: true });
     fs.writeFileSync(
-      path.join(containerDir, "pi-container.yml"),
-      "dockerfileExtension: |\n  RUN echo project"
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  extension: |\n    RUN echo project"
     );
 
     process.chdir(tmpDir);
@@ -115,10 +117,10 @@ describe("loadConfig", () => {
     expect(config.projectDir).toBe(tmpDir);
   });
 
-  it("workspaceDir is basename of projectDir with leading slash", () => {
+  it("workspaceDir is absolute path to projectDir", () => {
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir: tmpDir });
-    expect(config.workspaceDir).toBe(`/${path.basename(tmpDir)}`);
+    expect(config.workspaceDir).toBe(tmpDir);
   });
 
   it("configDir is always ~/.pi", () => {
@@ -134,13 +136,13 @@ describe("loadConfig", () => {
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "ports:\n  - 3000"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  ports:\n    - 3000"
       );
-      // User config at ~/.pi/pi-container.yml — same dir since homeDir=tmpDir
+      // User config at ~/.pi/wpi.yml — same dir since homeDir=tmpDir
       fs.writeFileSync(
-        path.join(tmpDir, ".pi", "pi-container.yml"),
-        "ports:\n  - 3000:4000"
+        path.join(tmpDir, ".pi", "wpi.yml"),
+        "docker:\n  ports:\n    - 3000:4000"
       );
 
       process.chdir(tmpDir);
@@ -152,8 +154,8 @@ describe("loadConfig", () => {
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "ports:\n  - 3000"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  ports:\n    - 3000"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir, cliPorts: ["3000:4000"] });
@@ -162,19 +164,19 @@ describe("loadConfig", () => {
 
     it("user env overrides project env on conflict", () => {
       // Use a separate home dir for user config
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
       fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
       fs.writeFileSync(
-        path.join(homeDir, ".pi", "pi-container.yml"),
-        "env:\n  KEY: user-value"
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "docker:\n  env:\n    KEY: user-value"
       );
 
       // Project config
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "env:\n  KEY: project-value\n  PROJECT_ONLY: yes"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  env:\n    KEY: project-value\n    PROJECT_ONLY: yes"
       );
 
       process.chdir(tmpDir);
@@ -202,8 +204,8 @@ describe("loadConfig", () => {
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "mounts:\n  - /var/run/docker.sock:/var/run/docker.sock\n  - /host/ssh:/container/ssh:ro"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  mounts:\n    - /var/run/docker.sock:/var/run/docker.sock\n    - /host/ssh:/container/ssh:ro"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
@@ -214,18 +216,18 @@ describe("loadConfig", () => {
     });
 
     it("user mounts override project mounts on matching container path", () => {
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
       fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
       fs.writeFileSync(
-        path.join(homeDir, ".pi", "pi-container.yml"),
-        "mounts:\n  - /user/socket:/var/run/docker.sock"
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "docker:\n  mounts:\n    - /user/socket:/var/run/docker.sock"
       );
 
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "mounts:\n  - /project/socket:/var/run/docker.sock"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  mounts:\n    - /project/socket:/var/run/docker.sock"
       );
 
       process.chdir(tmpDir);
@@ -238,18 +240,18 @@ describe("loadConfig", () => {
     });
 
     it("user mounts add to project mounts for different container paths", () => {
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
       fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
       fs.writeFileSync(
-        path.join(homeDir, ".pi", "pi-container.yml"),
-        "mounts:\n  - /host/config:/container/config"
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "docker:\n  mounts:\n    - /host/config:/container/config"
       );
 
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "mounts:\n  - /var/run/docker.sock:/var/run/docker.sock"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  mounts:\n    - /var/run/docker.sock:/var/run/docker.sock"
       );
 
       process.chdir(tmpDir);
@@ -259,9 +261,126 @@ describe("loadConfig", () => {
       fs.rmSync(homeDir, { recursive: true, force: true });
     });
 
-    // ── gitUserName / gitUserEmail ──────────────────────
+    // Volumes
+    it("volumes defaults to empty when not configured", () => {
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir: tmpDir });
+      expect(config.volumes).toEqual([]);
+    });
 
-    it("gitUserName defaults to undefined when not configured", () => {
+    it("reads volumes from project config", () => {
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  volumes:\n    - wpi-m2:/home/pi-user/.m2\n    - wpi-gradle:/home/pi-user/.gradle:rw"
+      );
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir: tmpDir });
+      expect(config.volumes).toEqual([
+        { name: "wpi-m2", container: "/home/pi-user/.m2" },
+        { name: "wpi-gradle", container: "/home/pi-user/.gradle", mode: "rw" },
+      ]);
+    });
+
+    it("user volumes override project on matching container path", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
+      fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
+      fs.writeFileSync(
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "docker:\n  volumes:\n    - user-m2:/home/pi-user/.m2"
+      );
+
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  volumes:\n    - project-m2:/home/pi-user/.m2"
+      );
+
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir });
+      expect(config.volumes).toEqual([
+        { name: "user-m2", container: "/home/pi-user/.m2" },
+      ]);
+
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    it("reads memory settings from project config", () => {
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  memory: 4g\n  memorySwap: 4g"
+      );
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir: tmpDir });
+      expect(config.memory).toBe("4g");
+      expect(config.memorySwap).toBe("4g");
+    });
+
+    // ── pi.version ─────────────────────────────────
+
+    it("piVersion defaults to PI_VERSION constant when not configured", () => {
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir: tmpDir });
+      expect(config.piVersion).toBe(PI_VERSION);
+      expect(config.piImage).toBe(PI_IMAGE);
+    });
+
+    it("reads pi.version from project config", () => {
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(containerDir, "wpi.yml"),
+        "pi:\n  version: 0.50.0"
+      );
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir: tmpDir });
+      expect(config.piVersion).toBe("0.50.0");
+      expect(config.piImage).toBe("pi-agent:0.50.0");
+    });
+
+    it("reads pi.version from user config", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
+      fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
+      fs.writeFileSync(
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "pi:\n  version: 0.60.0"
+      );
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir });
+      expect(config.piVersion).toBe("0.60.0");
+      expect(config.piImage).toBe("pi-agent:0.60.0");
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    it("project pi.version overrides user pi.version", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
+      fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
+      fs.writeFileSync(
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "pi:\n  version: 0.60.0"
+      );
+
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(containerDir, "wpi.yml"),
+        "pi:\n  version: 0.50.0"
+      );
+
+      process.chdir(tmpDir);
+      const config = loadConfig({ homeDir });
+      expect(config.piVersion).toBe("0.50.0");
+      expect(config.piImage).toBe("pi-agent:0.50.0");
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    // ── git.user ──────────────────────────────────────────
+
+    it("git.user.name defaults to undefined when not configured", () => {
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
       // No git config set up in test env, so should be undefined
@@ -270,12 +389,12 @@ describe("loadConfig", () => {
       expect(config.gitUserEmail).toBeUndefined();
     });
 
-    it("reads gitUserName from project config", () => {
+    it("reads git.user.name from project config", () => {
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "gitUserName: Alice\ngitUserEmail: alice@example.com"
+        path.join(containerDir, "wpi.yml"),
+        "git:\n  user:\n    name: Alice\n    email: alice@example.com"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
@@ -283,12 +402,12 @@ describe("loadConfig", () => {
       expect(config.gitUserEmail).toBe("alice@example.com");
     });
 
-    it("reads gitUserName from user config", () => {
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+    it("reads git.user.name from user config", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
       fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
       fs.writeFileSync(
-        path.join(homeDir, ".pi", "pi-container.yml"),
-        "gitUserName: Bob"
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "git:\n  user:\n    name: Bob"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir });
@@ -297,25 +416,25 @@ describe("loadConfig", () => {
       fs.rmSync(homeDir, { recursive: true, force: true });
     });
 
-    it("project gitUserName overrides user gitUserName", () => {
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-home-"));
+    it("project git.user.name overrides user git.user.name", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-home-"));
       fs.mkdirSync(path.join(homeDir, ".pi"), { recursive: true });
       fs.writeFileSync(
-        path.join(homeDir, ".pi", "pi-container.yml"),
-        "gitUserName: UserBob\ngitUserEmail: user@bob.com"
+        path.join(homeDir, ".pi", "wpi.yml"),
+        "git:\n  user:\n    name: UserBob\n    email: user@bob.com"
       );
 
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "gitUserName: ProjectAlice"
+        path.join(containerDir, "wpi.yml"),
+        "git:\n  user:\n    name: ProjectAlice"
       );
 
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir });
       expect(config.gitUserName).toBe("ProjectAlice");
-      // User gitUserEmail not overridden by project (project doesn't set it)
+      // User git.user.email not overridden by project (project doesn't set it)
       expect(config.gitUserEmail).toBe("user@bob.com");
 
       fs.rmSync(homeDir, { recursive: true, force: true });
@@ -335,8 +454,8 @@ describe("loadConfig", () => {
       const containerDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(containerDir, { recursive: true });
       fs.writeFileSync(
-        path.join(containerDir, "pi-container.yml"),
-        "ports:\n  - 3000\n  - 8080:80"
+        path.join(containerDir, "wpi.yml"),
+        "docker:\n  ports:\n    - 3000\n    - 8080:80"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
@@ -350,8 +469,8 @@ describe("loadConfig", () => {
       const userPiDir = path.join(tmpDir, ".pi");
       fs.mkdirSync(userPiDir, { recursive: true });
       fs.writeFileSync(
-        path.join(userPiDir, "pi-container.yml"),
-        "ports:\n  - 4000"
+        path.join(userPiDir, "wpi.yml"),
+        "docker:\n  ports:\n    - 4000"
       );
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
@@ -441,12 +560,12 @@ describe("parsePortsString", () => {
 describe("getUserConfigPath", () => {
   it("returns path under ~/.pi/", () => {
     const configPath = getUserConfigPath("/home/testuser");
-    expect(configPath).toBe("/home/testuser/.pi/pi-container.yml");
+    expect(configPath).toBe("/home/testuser/.pi/wpi.yml");
   });
 
   it("uses default home dir when no argument", () => {
     const configPath = getUserConfigPath();
-    expect(configPath).toMatch(/\.pi.pi-container\.yml$/);
+    expect(configPath).toMatch(/\.pi.wpi\.yml$/);
   });
 });
 

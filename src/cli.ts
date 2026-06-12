@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 // ============================================================
-// pi-container — Run Pi Coding Agent in Docker
+// wpi — Run Pi Coding Agent in Docker
 // ============================================================
 // Usage:
-//   pi-container                          # interactive session
-//   pi-container -- -p "Summarize this"   # print mode
-//   pi-container -- -r                     # resume session
-//   pi-container build                    # build/rebuild image
-//   pi-container shell                    # drop into container shell
-//   pi-container shell <container-id>     # exec into an existing container
+//   wpi                          # interactive session
+//   wpi -- -p "Summarize this"   # print mode
+//   wpi -- -r                     # resume session
+//   wpi build                    # build/rebuild image
+//   wpi shell                    # drop into container shell
+//   wpi shell <container-id>     # exec into an existing container
 //
 // Port config precedence (highest wins):
 //   1. CLI flags              (-p, --port)
-//   2. User config            (~/.pi/pi-container.yml)
-//   3. Project config           (.pi/pi-container.yml)
+//   2. User config            (~/.pi/wpi.yml)
+//   3. Project config           (.pi/wpi.yml)
 // ============================================================
 
-import { loadConfig, getUserConfigPath, PI_VERSION, PI_IMAGE, checkPortAvailable, setDebug, debugLog } from "./config";
+import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
 import { buildImage, runContainer, shellInContainer, execInContainer, buildDockerRunArgs } from "./docker";
 import * as fs from "fs";
 import * as path from "path";
@@ -25,7 +25,7 @@ import { execSync } from "child_process";
 function printHelp(): void {
   const userConfigPath = getUserConfigPath();
   console.log(`
-Usage: pi-container [command] [options] [-- PI_ARGS...]
+Usage: wpi [command] [options] [-- PI_ARGS...]
 
 Commands:
   (default)     Run pi in Docker (interactive session)
@@ -42,42 +42,52 @@ Options:
 All arguments after -- are passed to pi.
 
 Examples:
-  pi-container                              # interactive session
-  pi-container -p 3000                      # expose port 3000
-  pi-container -p 8080:3000                # host 8080 → container 3000
-  pi-container -p 3000 -p 6006             # expose multiple ports
-  pi-container -- -p "Summarize"            # print mode
-  pi-container -- -r                        # resume session
-  pi-container build                        # build image
-  pi-container shell                        # container shell
-  pi-container shell my-container           # exec into an existing container
+  wpi                              # interactive session
+  wpi -p 3000                      # expose port 3000
+  wpi -p 8080:3000                # host 8080 → container 3000
+  wpi -p 3000 -p 6006             # expose multiple ports
+  wpi -- -p "Summarize"            # print mode
+  wpi -- -r                        # resume session
+  wpi build                        # build image
+  wpi shell                        # container shell
+  wpi shell my-container           # exec into an existing container
 
 Port config precedence (highest wins):
   1. CLI flags (-p, --port)
   2. User config:    ${userConfigPath}
-  3. Project config: .pi/pi-container.yml
+  3. Project config: .pi/wpi.yml
 
 Config file schema:
-  ports:
-    - 3000        # dev server
-    - 6006        # storybook
-    - 8080:80     # host 8080 → container 80
-  mounts:
-    - /var/run/docker.sock:/var/run/docker.sock  # docker socket
-    - ~/.ssh:/home/pi-user/.ssh:ro                # ssh keys (read-only)
-  env:
-    CUSTOM_ENV: sk-xxx  # passed to the container
-  gitUserName: John Doe     # git user name for commits in container
-  gitUserEmail: john@example.com  # git user email for commits in container
-  dockerfileExtension: |
-    RUN apt-get update && apt-get install -y python3  # extra image steps
+  pi:
+    version: 0.76.0     # override the pi version used (default: baked-in)
+  docker:
+    ports:
+      - 3000        # dev server
+      - 6006        # storybook
+      - 8080:80     # host 8080 → container 80
+    mounts:
+      - /var/run/docker.sock:/var/run/docker.sock  # docker socket
+      - ~/.ssh:/home/pi-user/.ssh:ro                # ssh keys (read-only)
+    env:
+      CUSTOM_ENV: sk-xxx  # passed to the container
+    memory: 4g
+    extension: |
+      RUN apt-get update && apt-get install -y python3  # extra image steps
+  git:
+    user:
+      name: John Doe
+      email: john@example.com
+
+Path placeholders (usable in docker.mounts and docker.volumes):
+  ~ or \${home}          host home directory  (e.g. /Users/alice)
+  \${workspaceDir}        mounted project directory
 `.trim());
 }
 
 function printVersion(): void {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const pkg = require("../package.json");
-  console.log(`pi-container ${pkg.version} (pi v${PI_VERSION})`);
+  console.log(`wpi ${pkg.version} (pi v${PI_VERSION})`);
 }
 
 async function main(): Promise<void> {
@@ -117,7 +127,7 @@ async function main(): Promise<void> {
       const value = ourArgs[i + 1];
       if (!value || value.startsWith("-")) {
         console.error(`Error: ${arg} requires a port argument.`);
-        console.error("Example: pi-container -p 3000 or pi-container -p 8080:3000");
+        console.error("Example: wpi -p 3000 or wpi -p 8080:3000");
         process.exit(1);
       }
       cliPorts.push(value);
@@ -136,7 +146,7 @@ async function main(): Promise<void> {
       command = "dry-run";
     } else {
       console.error(`Unknown argument: ${arg}`);
-      console.error("Run 'pi-container --help' for usage.");
+      console.error("Run 'wpi --help' for usage.");
       process.exit(1);
     }
   }
@@ -205,7 +215,7 @@ async function main(): Promise<void> {
       }
       console.error("");
       console.error("To fix, either:");
-      console.error("  - Change the host port in .pi/pi-container.yml (e.g., \"3001:3000\")");
+      console.error("  - Change the host port in .pi/wpi.yml (e.g., \"3001:3000\")");
       console.error("  - Stop the process using the port");
       process.exit(1);
     }
@@ -215,7 +225,7 @@ async function main(): Promise<void> {
   debugLog(`Dispatching command: ${command}`);
   switch (command) {
     case "build":
-      buildImage(config.dockerfileExtension);
+      buildImage(config);
       break;
     case "shell":
       await shellInContainer(config);
@@ -245,8 +255,8 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
   const userConfigExists = fs.existsSync(userConfigPath);
 
   console.log("Configuration:");
-  console.log(`  version:        ${PI_VERSION}`);
-  console.log(`  image:          ${PI_IMAGE}`);
+  console.log(`  version:        ${config.piVersion}`);
+  console.log(`  image:          ${config.piImage}`);
   console.log(`  projectDir:     ${config.projectDir}`);
   console.log(`  workspaceDir:   ${config.workspaceDir}`);
   console.log(`  configDir:      ${config.configDir}`);
@@ -268,25 +278,25 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
     console.log(`  ports:          (none)`);
   }
   if (config.dockerfileExtension) {
-    console.log("  dockerfileExtension: (present)");
+    console.log("  docker.extension: (present)");
   } else {
-    console.log(`  dockerfileExtension: (none)`);
+    console.log(`  docker.extension: (none)`);
   }
-  console.log(`  gitUserName:     ${config.gitUserName || "(inferred from host)"}`);
-  console.log(`  gitUserEmail:    ${config.gitUserEmail || "(inferred from host)"}`);
+  console.log(`  git.userName:     ${config.gitUserName || "(inferred from host)"}`);
+  console.log(`  git.userEmail:    ${config.gitUserEmail || "(inferred from host)"}`);
   if (config.mounts.length > 0) {
-    console.log("  mounts:");
+    console.log("  docker.mounts:");
     for (const m of config.mounts) {
       const spec = `${m.host}:${m.container}${m.mode ? ":" + m.mode : ""}`;
       console.log(`    ${spec}`);
     }
   } else {
-    console.log(`  mounts:          (none)`);
+    console.log(`  docker.mounts:    (none)`);
   }
   console.log();
   console.log("Config sources:");
   console.log(`  User config:    ${userConfigPath} ${userConfigExists ? "(found)" : "(not found)"}`);
-  console.log(`  Project config: ${config.containerDir ? config.containerDir + "/pi-container.yml" : "(no .pi dir)"}`);
+  console.log(`  Project config: ${config.containerDir ? config.containerDir + "/wpi.yml" : "(no .pi dir)"}`);
   console.log();
   const cmd = piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"];
   const runArgs = buildDockerRunArgs(config, cmd);
@@ -297,9 +307,9 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
     "docker",
     "build",
     "--build-arg",
-    `PI_VERSION=${PI_VERSION}`,
+    `PI_VERSION=${config.piVersion}`,
     "-t",
-    PI_IMAGE,
+    config.piImage,
     ".",
   ];
   console.log("Docker build command (would be run in temp build context):");

@@ -1,5 +1,5 @@
 // ============================================================
-// pi-container — Template loading
+// wpi — Template loading
 // ============================================================
 // Reads Dockerfile and entrypoint.sh from the templates/
 // directory and injects the pi version. The template files
@@ -18,18 +18,19 @@ const TEMPLATES_DIR = path.join(__dirname, "..", "templates");
 
 /**
  * Load and populate the Dockerfile template.
- * {{piVersion}} is injected, and an optional extension block
- * (from .pi/pi-container.yml) is appended at the end.
+ * {{piVersion}} is injected with the given version (defaults to the
+ * baked-in PI_VERSION constant), and an optional extension block
+ * (from .pi/wpi.yml) is appended at the end.
  */
-export function generateDockerfile(extension?: string): string {
+export function generateDockerfile(extension?: string, piVersion: string = PI_VERSION): string {
   const templatePath = path.join(TEMPLATES_DIR, "Dockerfile");
   let content = fs.readFileSync(templatePath, "utf-8");
-  content = content.replace(/\{\{piVersion\}\}/g, PI_VERSION);
+  content = content.replace(/\{\{piVersion\}\}/g, piVersion);
 
   if (extension) {
     content =
       content.trimEnd() +
-      "\n\n# ---------- Extension from .pi/pi-container.yml ----------\n" +
+      "\n\n# ---------- Extension from .pi/wpi.yml ----------\n" +
       extension.trimEnd() +
       "\n";
   }

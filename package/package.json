@@ -1,8 +1,8 @@
 {
-  "name": "pi-container-defaults",
+  "name": "wpi-defaults",
   "version": "1.0.0",
   "private": true,
-  "description": "Default extensions and theme for pi-container",
+  "description": "Default extensions and theme for wpi",
   "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./extensions"],

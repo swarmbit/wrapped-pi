@@ -11,7 +11,7 @@
 import { describe, it, expect, vi } from "vitest";
 
 // Clear env var so the default /workspace is used in tests.
-// In production this is set by pi-container, but tests need the default.
+// In production this is set by wpi, but tests need the default.
 vi.hoisted(() => {
   const orig = process.env.WORKSPACE_DIR;
   delete process.env.WORKSPACE_DIR;
@@ -89,7 +89,7 @@ describe("isPiConfigDir", () => {
 
   it("allows paths under /home/pi-user/.pi/ (full mount point)", () => {
     expect(isPiConfigDir("/home/pi-user/.pi/agent")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/pi-container.yml")).toBe(true);
+    expect(isPiConfigDir("/home/pi-user/.pi/wpi.yml")).toBe(true);
     expect(isPiConfigDir("/home/pi-user/.pi/agent/extensions/my-ext/index.ts")).toBe(true);
   });
 

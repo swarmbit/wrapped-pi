@@ -63,7 +63,7 @@ export function setWorktreeLogToFile(enabled: boolean): void {
  * Convert a container path to the corresponding host path.
  *
  * Inside the container, ~/.pi is volume-mounted from the host's ~/.pi
- * (or wherever the host config dir is). PI_HOST_HOME is set by pi-container
+ * (or wherever the host config dir is). PI_HOST_HOME is set by wpi
  * at container startup and points to the host user's home directory.
  *
  * Returns undefined if PI_HOST_HOME is not set (e.g. running outside a container).

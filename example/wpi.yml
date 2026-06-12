@@ -1,0 +1,48 @@
+docker:
+  env:
+    ORG_GRADLE_PROJECT_artifactoryUser: user
+    ORG_GRADLE_PROJECT_artifactoryPassword: password
+    TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+
+  mounts:
+    - /var/run/docker.sock:/var/run/docker.sock
+
+  # Named Docker volumes (persisted across all wpi containers)
+  # Format: VOLUME_NAME:CONTAINER_PATH[:MODE]
+  volumes:
+    - wpi-m2:${home}/.m2
+    - wpi-gradle:${home}/.gradle
+
+  # Memory limits for the container
+  # even though we give a higher limit here colima still needs more memory to run gradle
+  memory: 6g
+
+  extension: |
+    # ── System prerequisites ────────────────────────────────────────────────────
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget gnupg ca-certificates lsb-release apt-transport-https \
+        unzip cmake build-essential make \
+      && rm -rf /var/lib/apt/lists/*
+
+    # ── Java 21 (Temurin) ───────────────────────────────────────────────────────
+    RUN wget -qO - \
+          https://packages.adoptium.net/artifactory/api/gpg/key/public \
+      | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+      && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
+           > /etc/apt/sources.list.d/adoptium.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends temurin-21-jdk \
+      && rm -rf /var/lib/apt/lists/* \
+      && ln -sfn $(ls -d /usr/lib/jvm/temurin-21-jdk-*) /usr/lib/jvm/temurin-21-jdk
+
+    ENV JAVA_HOME=/usr/lib/jvm/temurin-21-jdk
+    ENV PATH="$JAVA_HOME/bin:$PATH"
+
+    # ── Kotlin 2.2.20 ───────────────────────────────────────────────────────────
+    RUN wget -qO /tmp/kotlin-compiler.zip \
+          "https://github.com/JetBrains/kotlin/releases/download/v2.2.20/kotlin-compiler-2.2.20.zip" \
+      && unzip -q /tmp/kotlin-compiler.zip -d /opt \
+      && rm -f /tmp/kotlin-compiler.zip
+
+    ENV KOTLIN_HOME=/opt/kotlinc
+    ENV PATH="$KOTLIN_HOME/bin:$PATH"

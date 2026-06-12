@@ -1,6 +1,6 @@
 #!/usr/bin/env bash 
 
 npm run build
-npm uninstall -g pi-container
+npm uninstall -g wpi
 npm install -g .
-pi-container build
+wpi build

@@ -12,6 +12,7 @@ import { PiContainerConfig, PI_VERSION, PI_IMAGE } from "./config";
 
 function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConfig {
   return {
+    piVersion: PI_VERSION,
     ports: [],
     env: {},
     mounts: [],
@@ -26,10 +27,14 @@ interface FullConfig extends PiContainerConfig {
   projectDir: string;
   workspaceDir: string;
   debug: boolean;
+  /** Derived from piVersion — not user-configurable. */
+  piImage: string;
 }
 
 function makeFullConfig(overrides: Partial<FullConfig> = {}): FullConfig {
   return {
+    piVersion: PI_VERSION,
+    piImage: PI_IMAGE,
     ports: [],
     env: {},
     mounts: [],
@@ -65,7 +70,8 @@ describe("buildDockerRunArgs", () => {
     const args = buildDockerRunArgs(config, ["pi"]);
 
     const volArgs = args.filter((_, i) => args[i - 1] === "-v");
-    expect(volArgs).toContain("/home/user/.pi:/home/pi-user/.pi");
+    const containerHome = os.homedir();
+    expect(volArgs).toContain(`/home/user/.pi:${containerHome}/.pi`);
   });
 
   it("sets working directory to workspace dir", () => {
@@ -120,7 +126,7 @@ describe("buildDockerRunArgs", () => {
     expect(envEntries).toHaveLength(0);
   });
 
-  it("uses the PI_IMAGE constant", () => {
+  it("uses the PI_IMAGE constant by default", () => {
     const config = makeFullConfig();
     const args = buildDockerRunArgs(config, ["pi"]);
 
@@ -199,7 +205,7 @@ describe("buildDockerRunArgs", () => {
     const args = buildDockerRunArgs(config, ["pi"]);
 
     const pIdx = args.indexOf("-p");
-    const imageIdx = args.indexOf(PI_IMAGE);
+    const imageIdx = args.indexOf(config.piImage);
     expect(pIdx).toBeLessThan(imageIdx);
   });
 
@@ -289,13 +295,51 @@ describe("buildDockerRunArgs", () => {
     expect(hasGitEnv).toBe(false);
   });
 
-  it("does not add custom mounts when none configured", () => {
-    const config = makeFullConfig();
+  it("expands ${home} in mount host path", () => {
+    const config = makeFullConfig({
+      mounts: [{ host: "${home}/.ssh", container: "/home/user/.ssh", mode: "ro" }],
+    });
     const args = buildDockerRunArgs(config, ["pi"]);
-
     const volumeArgs = args.filter((_, i) => args[i - 1] === "-v");
-    const socketVolume = volumeArgs.find((v) => v.includes("docker.sock"));
-    expect(socketVolume).toBeUndefined();
+    const sshMount = volumeArgs.find((v) => v.includes(".ssh"));
+    expect(sshMount).toBeDefined();
+    expect(sshMount).not.toContain("${home}");
+    expect(sshMount).toMatch(/^\/.*\.ssh:\/home\/user\/\.ssh:ro$/);
+  });
+
+  it("expands ~ in mount host path", () => {
+    const config = makeFullConfig({
+      mounts: [{ host: "~/.ssh", container: "/home/user/.ssh", mode: "ro" }],
+    });
+    const args = buildDockerRunArgs(config, ["pi"]);
+    const volumeArgs = args.filter((_, i) => args[i - 1] === "-v");
+    const sshMount = volumeArgs.find((v) => v.includes(".ssh"));
+    expect(sshMount).toBeDefined();
+    expect(sshMount).not.toContain("~");
+    expect(sshMount).toMatch(/^\/.*\.ssh:\/home\/user\/\.ssh:ro$/);
+  });
+
+  it("expands ${workspaceDir} in volume container path", () => {
+    const config = makeFullConfig();
+    const configWithVolume = makeFullConfig({
+      volumes: [{ name: "my-node-modules", container: "${workspaceDir}/node_modules" }],
+    });
+    const args = buildDockerRunArgs(configWithVolume, ["pi"]);
+    const volumeArgs = args.filter((_, i) => args[i - 1] === "-v");
+    const nmVolume = volumeArgs.find((v) => v.includes("node_modules"));
+    expect(nmVolume).toBeDefined();
+    expect(nmVolume).toBe(`my-node-modules:/project/node_modules`);
+  });
+
+  it("expands ~ in mount container path", () => {
+    const config = makeFullConfig({
+      mounts: [{ host: "/host/ssh", container: "~/.ssh", mode: "ro" }],
+    });
+    const args = buildDockerRunArgs(config, ["pi"]);
+    const volumeArgs = args.filter((_, i) => args[i - 1] === "-v");
+    const sshMount = volumeArgs.find((v) => v.includes(".ssh"));
+    expect(sshMount).toBeDefined();
+    expect(sshMount).not.toContain("~");
   });
 });
 
@@ -307,6 +351,6 @@ describe("build context", () => {
     expect(dockerfile).toContain("FROM node:22-bookworm-slim AS builder");
     expect(dockerfile).toContain(`ARG PI_VERSION=${PI_VERSION}`);
     expect(entrypoint).toContain("#!/usr/bin/env bash");
-    expect(entrypoint).toContain('exec gosu pi-user "$@"');
+    expect(entrypoint).toContain('exec gosu "${USERNAME}" "$@"');
   });
 });

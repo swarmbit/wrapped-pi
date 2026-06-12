@@ -1,12 +1,12 @@
 {
-  "name": "pi-container",
+  "name": "wpi",
   "version": "1.0.0",
   "description": "Run Pi Coding Agent in Docker with team-standard extensions and settings",
   "workspaces": [
     "package/extensions/*"
   ],
   "bin": {
-    "pi-container": "./dist/cli.js"
+    "wpi": "./dist/cli.js"
   },
   "files": [
     "dist/",
@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
     "test:watch": "vitest",
     "install-app": "./install.sh"
   },
@@ -25,7 +25,7 @@
     "js-yaml": "^4.1.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.5",
+    "@earendil-works/pi-coding-agent": "^0.79.1",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",

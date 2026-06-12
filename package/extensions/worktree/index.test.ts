@@ -76,7 +76,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 // ── Helpers ──────────────────────────────────────────────────
 
-const TEST_CWD = "/pi-container";
+const TEST_CWD = "/wpi";
 
 function mockPi(gitResults: Array<{ code: number; stdout: string; stderr: string }> = [], opts?: { sessionName?: string }) {
   let callIndex = 0;
@@ -320,7 +320,7 @@ describe("deleteWorktree", () => {
   });
 
   it("returns error if current session is in the worktree", async () => {
-    const path = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const path = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -342,7 +342,7 @@ describe("deleteWorktree", () => {
   });
 
   it("deletes worktree and removes from registry", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -376,7 +376,7 @@ describe("deleteWorktree", () => {
   });
 
   it("handles already-missing worktree directory", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -408,7 +408,7 @@ describe("deleteWorktree", () => {
   });
 
   it("deletes associated sessions by default", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -442,7 +442,7 @@ describe("deleteWorktree", () => {
   });
 
   it("skips session deletion when deleteSessions is false", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -475,7 +475,7 @@ describe("deleteWorktree", () => {
   });
 
   it("handles session list failure gracefully", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {
@@ -503,7 +503,7 @@ describe("deleteWorktree", () => {
   });
 
   it("cleans up empty session directory after deleting sessions", async () => {
-    const worktreePath = "/pi-container/.pi/worktrees/proj/feat-abc123";
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
     mockFsReadFileSync.mockReturnValue(
       JSON.stringify({
         worktrees: {

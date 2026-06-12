@@ -1,26 +1,37 @@
 // ============================================================
-// pi-container — Config discovery and loading
+// wpi — Config discovery and loading
 // ============================================================
 // Configurable settings: ports, env, and mounts.
 // Pi version and image are baked into this npm package.
 //
 // Config precedence (highest wins):
 //   1. CLI flags              (-p, --port)
-//   2. User config            (~/.pi/pi-container.yml)
-//   3. Project config           (.pi/pi-container.yml)
+//   2. User config            (~/.pi/wpi.yml)
+//   3. Project config           (.pi/wpi.yml)
 //   4. (none — no built-in defaults for ports/env/mounts)
 //
 // Config file schema:
-//   ports:
-//     - 3000
-//     - 8080:80
-//   env:
-//     ANTHROPIC_API_KEY: sk-xxx
-//   mounts:
-//     - /var/run/docker.sock:/var/run/docker.sock
-//     - ~/.ssh:/home/pi-user/.ssh:ro
-//   gitUserName: John Doe
-//   gitUserEmail: john@example.com
+//   pi:
+//     version: 0.79.1      # override pi version (default: baked-in)
+//   docker:
+//     ports:
+//       - 3000
+//       - 8080:80
+//     env:
+//       ANTHROPIC_API_KEY: sk-xxx
+//     mounts:
+//       - /var/run/docker.sock:/var/run/docker.sock
+//       - ~/.ssh:/home/pi-user/.ssh:ro
+//     volumes:
+//       - cache-vol:/home/user/.cache
+//     memory: 4g
+//     memorySwap: 4g
+//     extension: |
+//       RUN apt-get install -y python3
+//   git:
+//     user:
+//       name: John Doe
+//       email: john@example.com
 // ============================================================
 
 import * as path from "path";
@@ -48,8 +59,8 @@ export function debugLog(...args: unknown[]): void {
 
 // ── Package constants ──────────────────────────────────────────
 
-/** Pi version shipped by this version of pi-container. */
-export const PI_VERSION = "0.76.0";
+/** Pi version shipped by this version of wpi. */
+export const PI_VERSION = "0.79.1";
 
 /** Docker image tag derived from the pi version. */
 export const PI_IMAGE = `pi-agent:${PI_VERSION}`;
@@ -72,15 +83,33 @@ export interface MountMapping {
   mode?: string;
 }
 
-/** User-configurable settings (from pi-container.yml). */
+export interface VolumeMapping {
+  /** Docker volume name */
+  name: string;
+  /** Container path */
+  container: string;
+  /** Mount mode (e.g. "ro", "rw"). Default: no mode (read-write). */
+  mode?: string;
+}
+
+/** User-configurable settings (from wpi.yml). */
 export interface PiContainerConfig {
+  /** Pi version to use (pi.version). Defaults to the version baked into this wpi release. */
+  piVersion: string;
   ports: PortMapping[];
   env: Record<string, string>;
   mounts: MountMapping[];
+  /** Named Docker volumes that are created and mounted into the container (docker.volumes). */
+  volumes?: VolumeMapping[];
+  /** Maximum memory for the container (docker.memory). Example: "4g". */
+  memory?: string;
+  /** Memory swap limit (docker.memorySwap). Example: "4g". */
+  memorySwap?: string;
+  /** Extra Dockerfile instructions appended during image build (docker.extension). */
   dockerfileExtension?: string;
-  /** Git user name for commits made inside the container. */
+  /** Git user name for commits inside the container (git.user.name). */
   gitUserName?: string;
-  /** Git user email for commits made inside the container. */
+  /** Git user email for commits inside the container (git.user.email). */
   gitUserEmail?: string;
 }
 
@@ -89,8 +118,10 @@ export interface RuntimeContext {
   configDir: string;      // absolute host path (~/.pi)
   containerDir: string;   // absolute path to .pi dir, "" if none
   projectDir: string;     // absolute path — CWD
-  workspaceDir: string;   // container path — e.g. /myproject
+  workspaceDir: string;   // absolute path — CWD - inside container
   debug: boolean;         // debug mode enabled
+  /** Docker image tag derived from piVersion. Not user-configurable. */
+  piImage: string;
 }
 
 export interface LoadConfigOptions {
@@ -105,12 +136,27 @@ export interface LoadConfigOptions {
 // ── Config file schema ────────────────────────────────────────
 
 interface ConfigFile {
-  ports?: (number | string)[];
-  env?: Record<string, string>;
-  mounts?: string[];
-  dockerfileExtension?: string;
-  gitUserName?: string;
-  gitUserEmail?: string;
+  pi?: {
+    /** Override the pi version used to build/run the container. */
+    version?: string;
+  };
+  docker?: {
+    ports?: (number | string)[];
+    env?: Record<string, string>;
+    mounts?: string[];
+    /** Named Docker volumes in the form "volumeName:container/path[:mode]" */
+    volumes?: string[];
+    memory?: string;
+    memorySwap?: string;
+    /** Extra Dockerfile instructions appended at the end of the image build. */
+    extension?: string;
+  };
+  git?: {
+    user?: {
+      name?: string;
+      email?: string;
+    };
+  };
 }
 
 // ── Loading ────────────────────────────────────────────────────
@@ -120,19 +166,19 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
   const containerDir = findContainerDir(projectDir);
   const homeDir = options?.homeDir ?? getHomeDir();
 
-  // Load project config: .pi/pi-container.yml (team-committed)
+  // Load project config: .pi/wpi.yml (team-committed)
   let projectConfig: ConfigFile = {};
   if (containerDir) {
-    const configPath = path.join(containerDir, "pi-container.yml");
+    const configPath = path.join(containerDir, "wpi.yml");
     if (fs.existsSync(configPath)) {
       const raw = fs.readFileSync(configPath, "utf-8");
       projectConfig = (yaml.load(raw) as ConfigFile) || {};
     }
   }
 
-  // Load user config: ~/.pi/pi-container.yml (personal, not committed)
+  // Load user config: ~/.pi/wpi.yml (personal, not committed)
   let userConfig: ConfigFile = {};
-  const userConfigPath = path.join(homeDir, ".pi", "pi-container.yml");
+  const userConfigPath = path.join(homeDir, ".pi", "wpi.yml");
   if (fs.existsSync(userConfigPath)) {
     const raw = fs.readFileSync(userConfigPath, "utf-8");
     userConfig = (yaml.load(raw) as ConfigFile) || {};
@@ -142,50 +188,73 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
 
   // Resolve port mappings: CLI > user config > project config
   const cliPorts: PortMapping[] = (options?.cliPorts ?? []).map(parsePortMapping);
-  const userPorts: PortMapping[] = parseConfigPorts(userConfig.ports);
-  const projectPorts: PortMapping[] = parseConfigPorts(projectConfig.ports);
+  const userPorts: PortMapping[] = parseConfigPorts(userConfig.docker?.ports);
+  const projectPorts: PortMapping[] = parseConfigPorts(projectConfig.docker?.ports);
   const ports = mergePorts(cliPorts, userPorts, projectPorts);
 
   // Resolve env: user config overrides project config
   const env: Record<string, string> = {
-    ...(projectConfig.env ?? {}),
-    ...(userConfig.env ?? {}),
+    ...(projectConfig.docker?.env ?? {}),
+    ...(userConfig.docker?.env ?? {}),
   };
 
   // Dockerfile extension: project config overrides user config
   const dockerfileExtension =
-    (projectConfig.dockerfileExtension ?? userConfig.dockerfileExtension)?.trimEnd();
+    (projectConfig.docker?.extension ?? userConfig.docker?.extension)?.trimEnd();
 
   // Mounts: merge project + user (user can add to project mounts, not replace)
-  const projectMounts: MountMapping[] = parseConfigMounts(projectConfig.mounts);
-  const userMounts: MountMapping[] = parseConfigMounts(userConfig.mounts);
+  const projectMounts: MountMapping[] = parseConfigMounts(projectConfig.docker?.mounts);
+  const userMounts: MountMapping[] = parseConfigMounts(userConfig.docker?.mounts);
   // Merge with later mounts overriding earlier ones on matching container paths
   const mounts = mergeMounts(projectMounts, userMounts);
 
+  // Named volumes: merge project + user (user can add/override)
+  const projectVolumes: VolumeMapping[] = parseConfigVolumes(projectConfig.docker?.volumes);
+  const userVolumes: VolumeMapping[] = parseConfigVolumes(userConfig.docker?.volumes);
+  const volumes = mergeVolumes(projectVolumes, userVolumes);
+
+  // Memory settings: project config overrides user config
+  const memory = projectConfig.docker?.memory ?? userConfig.docker?.memory;
+  const memorySwap = projectConfig.docker?.memorySwap ?? userConfig.docker?.memorySwap;
+
+  // Pi version: project config > user config > baked-in constant
+  const piVersion: string =
+    projectConfig.pi?.version ??
+    userConfig.pi?.version ??
+    PI_VERSION;
+
+  // Docker image tag derived from the resolved pi version (not user-configurable)
+  const piImage = `pi-agent:${piVersion}`;
+
   // Git user name: project config > user config > host git config
   const gitUserName: string | undefined =
-    projectConfig.gitUserName ??
-    userConfig.gitUserName ??
+    projectConfig.git?.user?.name ??
+    userConfig.git?.user?.name ??
     inferGitConfig(homeDir, "user.name");
 
   // Git user email: project config > user config > host git config
   const gitUserEmail: string | undefined =
-    projectConfig.gitUserEmail ??
-    userConfig.gitUserEmail ??
+    projectConfig.git?.user?.email ??
+    userConfig.git?.user?.email ??
     inferGitConfig(homeDir, "user.email");
 
   return {
+    piVersion,
     ports,
     env,
     mounts,
+    volumes,
+    memory,
+    memorySwap,
     dockerfileExtension,
     gitUserName,
     gitUserEmail,
     configDir,
     containerDir,
     projectDir,
-    workspaceDir: `/${path.basename(projectDir)}`,
+    workspaceDir: projectDir,
     debug: options?.debug ?? false,
+    piImage,
   };
 }
 
@@ -210,7 +279,21 @@ function getHomeDir(): string {
  */
 function inferGitConfig(homeDir: string, key: string): string | undefined {
   try {
-    const result = spawnSync("git", ["config", key], {
+    // If loadConfig was given an explicit homeDir (used in tests), prefer to read
+    // only that directory's git config file so tests are deterministic and do not
+    // pick up the machine-global git config.
+    const defaultHome = getHomeDir();
+    let args: string[];
+    if (homeDir && homeDir !== defaultHome) {
+      // Read from specific file under the provided homeDir
+      const cfgPath = path.join(homeDir, '.gitconfig');
+      args = ["config", "--file", cfgPath, "--get", key];
+    } else {
+      // No explicit override — read from host git config (global/system)
+      args = ["config", "--get", key];
+    }
+
+    const result = spawnSync("git", args, {
       cwd: homeDir,
       stdio: "pipe",
       timeout: 5000,
@@ -397,6 +480,53 @@ function mergeMounts(project: MountMapping[], user: MountMapping[]): MountMappin
   return Array.from(seen.values());
 }
 
+/** Parse volume entries from config file (each is a string like "volname:/container/path" or "volname:/container/path:ro"). */
+function parseConfigVolumes(volumes: string[] | undefined): VolumeMapping[] {
+  if (!volumes) return [];
+  const mappings: VolumeMapping[] = [];
+  for (const entry of volumes) {
+    mappings.push(parseVolumeMapping(entry));
+  }
+  return mappings;
+}
+
+/** Parse a single volume string like "volname:/container" or "volname:/container:mode". */
+export function parseVolumeMapping(input: string): VolumeMapping {
+  const trimmed = input.trim();
+  const parts = trimmed.split(":");
+
+  if (parts.length >= 2) {
+    const name = parts[0];
+    const container = parts[1];
+    if (!name || !container) {
+      throw new Error(`Invalid volume mapping: "${input}". Expected VOLUME_NAME:CONTAINER format.`);
+    }
+    if (parts.length === 2) {
+      return { name, container };
+    }
+    // mode may contain additional colons, join the rest
+    const mode = parts.slice(2).join(":");
+    if (!mode) {
+      throw new Error(`Invalid volume mapping: "${input}". Expected VOLUME_NAME:CONTAINER:MODE format.`);
+    }
+    return { name, container, mode };
+  }
+
+  throw new Error(`Invalid volume mapping: "${input}". Expected VOLUME_NAME:CONTAINER or VOLUME_NAME:CONTAINER:MODE format.`);
+}
+
+/** Merge volume lists. Later entries override earlier ones on matching container paths. */
+function mergeVolumes(project: VolumeMapping[], user: VolumeMapping[]): VolumeMapping[] {
+  const seen = new Map<string, VolumeMapping>();
+  for (const v of project) {
+    seen.set(v.container, v);
+  }
+  for (const v of user) {
+    seen.set(v.container, v);
+  }
+  return Array.from(seen.values());
+}
+
 /** Check if a port is available on localhost. Returns true if available. */
 export async function checkPortAvailable(port: number): Promise<boolean> {
   const net = await import("net");
@@ -413,5 +543,5 @@ export async function checkPortAvailable(port: number): Promise<boolean> {
 
 /** Get the user config path for a given home directory. */
 export function getUserConfigPath(homeDir?: string): string {
-  return path.join(homeDir ?? getHomeDir(), ".pi", "pi-container.yml");
+  return path.join(homeDir ?? getHomeDir(), ".pi", "wpi.yml");
 }

@@ -1,15 +1,16 @@
-# pi-container
+# wpi
 
-Run [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) in Docker with a safety extension and default settings baked into the image.
+Run [Pi Coding Agent](https://pi.dev/) in Docker with a safety extension and default settings baked into the image.
 
 ## Why
 
 Running pi in Docker ensures every team member uses the same environment — same pi version, same safety gates.
 
-`pi-container` makes this simple:
+`wpi` makes this simple:
 
 - **CWD-respect mounts**: uses `docker run` directly, so `$(pwd)/` is always mounted as `/<dirname>`
-- **One install**: `npm install -g pi-container` works from any directory
+- **Identity mirroring**: the container user and home directory match the host — paths are the same inside and outside the container
+- **One install**: `npm install -g wpi` works from any directory
 - **Baked-in defaults**: safety extension, github theme, and sensible settings — no setup required
 - **Port forwarding**: expose container ports for web dev with `-p`
 
@@ -18,14 +19,14 @@ Running pi in Docker ensures every team member uses the same environment — sam
 ### From npm (recommended)
 
 ```bash
-npm install -g pi-container
+npm install -g wpi
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/your-org/pi-container.git
-cd pi-container
+git clone https://github.com/swarmbit/wrapped-pi.git
+cd wpi
 
 # Required dependencies:
 #   - Node.js >= 22  (runtime + TypeScript compilation)
@@ -40,7 +41,7 @@ node dist/cli.js
 
 # Or install globally from the local checkout:
 npm install -g .
-pi-container build
+wpi build
 
 # Alternatively, use the quick-install script:
 ./install.sh       # build, uninstall old, install globally, build image
@@ -51,20 +52,20 @@ pi-container build
 ```bash
 # From any project directory:
 cd my-project
-pi-container                    # interactive session
-pi-container -- -p "Summarize"  # print mode
-pi-container -- -r              # resume session
+wpi                    # interactive session
+wpi -- -p "Summarize"  # print mode
+wpi -- -r              # resume session
 
 # With port forwarding for web dev:
-pi-container -p 3000              # expose port 3000
-pi-container -p 3000 -p 6006    # expose multiple ports
-pi-container -p 8080:3000        # host 8080 → container 3000
+wpi -p 3000              # expose port 3000
+wpi -p 3000 -p 6006    # expose multiple ports
+wpi -p 8080:3000        # host 8080 → container 3000
 
 # Management:
-pi-container build              # build/rebuild the image
-pi-container shell              # open a shell in a new container
-pi-container shell <id>         # exec into an existing container
-pi-container dry-run            # print config and docker commands (debugging)
+wpi build              # build/rebuild the image
+wpi shell              # open a shell in a new container
+wpi shell <id>         # exec into an existing container
+wpi dry-run            # print config and docker commands (debugging)
 ```
 
 ## How it works
@@ -86,14 +87,15 @@ pi-container dry-run            # print config and docker commands (debugging)
 │         │ (registers extensions, themes in settings)      │
 │         ▼                                                  │
 │  ┌─────────────────────────────────────────┐             │
-│  │  /home/pi-user/.pi/                ◄── Host mount     │
-│  │    └── agent/                         │             │
-│  │        ├── settings.json   (shared w/ native pi)    │
-│  │        ├── auth.json       (shared w/ native pi)    │
-│  │        ├── sessions/        (shared w/ native pi)    │
-│  │        ├── extensions/                             │
-│  │        ├── npm/                                    │
-│  │        └── skills/                                  │
+│  │  <host-home>/.pi/       ◄── Host mount (path mirrored) │
+│  │  (e.g. /Users/<user>/.pi on macOS)                    │
+│  │    └── agent/                                         │
+│  │        ├── settings.json   (shared w/ native pi)      │
+│  │        ├── auth.json       (shared w/ native pi)      │
+│  │        ├── sessions/       (shared w/ native pi)      │
+│  │        ├── extensions/                                │
+│  │        ├── npm/                                       │
+│  │        └── skills/                                    │
 │  └─────────────────────────────────────────┘             │
 │                                                          │
 │  ┌─────────────────────────────────────────┐             │
@@ -106,98 +108,113 @@ pi-container dry-run            # print config and docker commands (debugging)
 - **Baked into the image**: pi binary (pinned version), default pi package (safety extension, github theme), default settings
 - **Installed on startup**: `pi install /opt/pi-package` registers the built-in package — extensions and themes are discovered by pi automatically
 - **Additional packages**: use `pi install` inside the container to add packages at runtime
-- **Mounted from host** (persists across runs): `~/.pi` (settings, auth, sessions, extensions)
+- **Mounted from host** (persists across runs): `~/.pi` (settings, auth, sessions, extensions) — mounted at `<host-home>/.pi` so the path is identical inside and outside the container
 - **Mounted from CWD** (your project): mounts `$(pwd)` as `/<dirname>` (e.g., `/myproject`)
+- **Identity mirroring**: the container creates a user and home directory that match the host (username, UID/GID, and home path), so all paths are consistent between host and container
 - **Port forwarding** (optional): `-p` flags expose container ports on `localhost`
 
 Each invocation creates a fresh container. Multiple instances can run simultaneously (no `--name` collision).
 
 ## Configuration
 
-Pi-container reads config from two files (both in YAML format) and CLI flags. All settings are optional — zero config works out of the box.
+wpi reads config from two files (both in YAML format) and CLI flags. All settings are optional — zero config works out of the box.
 
 ### Config files
 
 | File | Purpose | Committed? |
 |------|---------|------------|
-| `.pi/pi-container.yml` | Project-level defaults (team-shared) | Yes |
-| `~/.pi/pi-container.yml` | Personal overrides (all projects) | No |
+| `.pi/wpi.yml` | Project-level defaults (team-shared) | Yes |
+| `~/.pi/wpi.yml` | Personal overrides (all projects) | No |
 
 ### Precedence (highest wins)
 
 1. CLI flags (`-p`, `--port`)
-2. User config (`~/.pi/pi-container.yml`)
-3. Project config (`.pi/pi-container.yml`)
+2. User config (`~/.pi/wpi.yml`)
+3. Project config (`.pi/wpi.yml`)
 
-For `env` and `mounts`, user config entries are merged with project config. For `env`, user keys override project keys with the same name; for `mounts`, user mounts override project mounts on matching container paths, and add new mounts for different paths.
+For `docker.env`, user keys override project keys with the same name. For `docker.mounts` and `docker.volumes`, user entries override project entries on matching container paths and add new entries for different paths.
 
 ---
 
 ### Full config reference
 
-Here is every supported key in a `pi-container.yml` file:
+Here is every supported key in a `wpi.yml` file:
 
 ```yaml
-# ── Ports ──────────────────────────────────────────────────
-# Expose container ports on localhost so you can access web
-# apps running inside the container (dev servers, Storybook,
-# etc.) from your browser. All formats supported:
-ports:
-  - 3000            # localhost:3000 → container:3000
-  - 8080:80         # localhost:8080 → container:80
-  - 9000-9010       # port range — expands to 11 entries
+# ── Pi settings ────────────────────────────────────────────
+pi:
+  version: 0.79.1   # pin to a specific pi version (default: baked-in)
 
-# ── Custom mounts ─────────────────────────────────────────
-# Mount arbitrary host paths into the container. Useful for
-# Docker socket, SSH keys, caches, etc. Format:
-#   HOST_PATH:CONTAINER_PATH[:MODE]
-#   Mode is optional (default: read-write). Common modes: ro, rw, cached.
-# User mounts override project mounts on matching container paths,
-# and add new mounts for different paths.
-mounts:
-  - /var/run/docker.sock:/var/run/docker.sock  # Docker-out-of-Docker
-  - ~/.ssh:/home/pi-user/.ssh:ro  # SSH keys (read-only)
+# ── Docker settings ────────────────────────────────────────
+docker:
+  # Expose container ports on localhost so you can access web
+  # apps running inside the container from your browser.
+  # Formats: simple port, host:container, or range.
+  ports:
+    - 3000            # localhost:3000 → container:3000
+    - 8080:80         # localhost:8080 → container:80
+    - 9000-9010       # port range — expands to 11 entries
 
-# ── Environment variables ──────────────────────────────────
-# Inject environment variables into the container at runtime.
-# Useful for passing API keys, feature flags, or other config
-# that pi or your project needs. These are set via docker -e.
-env:
-  CUSTOM_VAR: some-value
-  NODE_ENV: development
+  # Mount arbitrary host paths into the container.
+  # Format: HOST_PATH:CONTAINER_PATH[:MODE]
+  # Supported placeholders: ~ or ${home} (host home dir), ${workspaceDir} (project dir)
+  # User mounts override project mounts on matching container paths.
+  mounts:
+    - /var/run/docker.sock:/var/run/docker.sock  # Docker-out-of-Docker
+    - ~/.ssh:~/.ssh:ro                           # SSH keys (read-only)
 
-# ── Dockerfile extension ───────────────────────────────────
-# Inject extra RUN / COPY / ENV steps into the Docker image
-# at build time. Use this to install system packages or tools
-# that pi needs (python3, ffmpeg, etc.). After changing this,
-# rebuild the image with `pi-container build`.
-dockerfileExtension: |
-  RUN apt-get update && apt-get install -y python3 pip
-  ENV PYTHONUNBUFFERED=1
+  # Named Docker volumes that persist across all wpi containers.
+  # Useful for caching build artifacts (Maven, Gradle, npm, etc.).
+  # Format: VOLUME_NAME:CONTAINER_PATH[:MODE]
+  # Supported placeholders: ~ or ${home} (host home dir), ${workspaceDir} (project dir)
+  volumes:
+    - wpi-m2:${home}/.m2
+    - wpi-gradle:${home}/.gradle
 
-# ── Git user identity ──────────────────────────────────────
-# Set the Git author name and email for commits made inside
-# the container. If not set, pi-container infers them from
-# your host git config (git config user.name / user.email).
+  # Limit container memory (docker run --memory / --memory-swap).
+  memory: 4g
+  memorySwap: 4g
+
+  # Environment variables injected into the container at runtime.
+  env:
+    CUSTOM_VAR: some-value
+    NODE_ENV: development
+
+  # Extra Dockerfile instructions appended at image build time.
+  # Use this to install system packages or tools. After changing
+  # this, rebuild the image with `wpi build`.
+  extension: |
+    RUN apt-get update && apt-get install -y python3 pip
+    ENV PYTHONUNBUFFERED=1
+
+# ── Git settings ───────────────────────────────────────────
+# Set the Git author identity for commits made inside the container.
+# If not set, wpi infers them from the host git config.
 # Precedence: project config > user config > host git config.
-gitUserName: John Doe
-gitUserEmail: john@example.com
+git:
+  user:
+    name: John Doe
+    email: john@example.com
 ```
 
-> **Important:** After changing `dockerfileExtension` or updating pi-container,
-> you must rebuild the image with `pi-container build`. The image is not
+> **Important:** After changing `docker.extension` or updating wpi,
+> you must rebuild the image with `wpi build`. The image is not
 > rebuilt automatically on each run — it's only built when it doesn't exist yet.
 
 ### Settings reference
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `ports` | `list` | `[]` | Container ports to expose on `127.0.0.1`. Accepts simple ports (`3000`), host:container mappings (`8080:80`), and ranges (`9000-9010`). Useful for dev servers, Storybook, etc. |
-| `mounts` | `list` | `[]` | Custom host-to-container volume mounts. Each entry is a string in `HOST:CONTAINER[:MODE]` format (e.g., `/var/run/docker.sock:/var/run/docker.sock` or `~/.ssh:/home/pi-user/.ssh:ro`). User mounts override project mounts on matching container paths. |
-| `env` | `map` | `{}` | Key-value pairs injected as environment variables into the container via `docker run -e`. User config overrides project config per-key. |
-| `dockerfileExtension` | `string` | — | Arbitrary Dockerfile content appended during `pi-container build`. Use it to install extra system packages (`python3`, `ffmpeg`, etc.) or set image-level `ENV` vars. Requires a manual rebuild to take effect. |
-| `gitUserName` | `string` | *(host git config)* | Git author name for commits made inside the container. Falls back to `git config user.name` from the host if not set. |
-| `gitUserEmail` | `string` | *(host git config)* | Git author email for commits made inside the container. Falls back to `git config user.email` from the host if not set. |
+| `pi.version` | `string` | *(baked-in)* | Pin to a specific pi version. Overrides the version bundled with this wpi release. |
+| `docker.ports` | `list` | `[]` | Container ports to expose on `127.0.0.1`. Accepts simple ports (`3000`), host:container mappings (`8080:80`), and ranges (`9000-9010`). |
+| `docker.mounts` | `list` | `[]` | Custom host-to-container volume mounts. Each entry is `HOST:CONTAINER[:MODE]` (e.g., `/var/run/docker.sock:/var/run/docker.sock` or `~/.ssh:~/.ssh:ro`). Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). User mounts override project mounts on matching container paths. |
+| `docker.volumes` | `list` | `[]` | Named Docker volumes created and mounted into the container. Each entry is `VOLUME_NAME:CONTAINER_PATH[:MODE]`. Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). Volumes persist across runs — useful for caches like `.m2`, `.gradle`, or `node_modules`. |
+| `docker.memory` | `string` | — | Maximum memory for the container (`docker run --memory`). Example: `4g`. |
+| `docker.memorySwap` | `string` | — | Memory+swap limit for the container (`docker run --memory-swap`). Example: `4g`. |
+| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables via `docker run -e`. User config overrides project config per-key. |
+| `docker.extension` | `string` | — | Extra Dockerfile content appended during `wpi build`. Use it to install system packages or set image-level `ENV` vars. Requires a manual rebuild. |
+| `git.user.name` | `string` | *(host git config)* | Git author name for commits inside the container. Falls back to `git config user.name` from the host. |
+| `git.user.email` | `string` | *(host git config)* | Git author email for commits inside the container. Falls back to `git config user.email` from the host. |
 
 ### CLI flags
 
@@ -211,58 +228,62 @@ gitUserEmail: john@example.com
 | Command | Description |
 |---------|-------------|
 | *(default)* | Run pi interactively in a new container |
-| `build` | Build or rebuild the Docker image. Run this after changing `dockerfileExtension` or updating pi-container. |
+| `build` | Build or rebuild the Docker image. Run this after changing `docker.extension` or updating wpi. |
 | `shell` | Open a bash shell in a new container (useful for debugging or running arbitrary commands) |
-| `shell <id>` | Exec into an existing running container by ID or name. The container must be running and must have been created by pi-container. |
+| `shell <id>` | Exec into an existing running container by ID or name. |
 | `dry-run` | Print the resolved config and the docker commands that would run, without executing anything. Useful for debugging config resolution. |
 
 ### Port details
 
-All ports bind to `127.0.0.1` (localhost only) for security. Ranges (`9000-9010`) are supported in config files but not via CLI flags. If a host port is already in use, `pi-container` will report the conflict and exit.
+All ports bind to `127.0.0.1` (localhost only) for security. Ranges (`9000-9010`) are supported in config files but not via CLI flags. If a host port is already in use, `wpi` will report the conflict and exit.
 
 ### Example: full project config
 
 ```yaml
-# .pi/pi-container.yml — committed to git, shared by the team
-ports:
-  - 3000            # Next.js dev server
-  - 6006            # Storybook
-  - 8080:80         # Reverse proxy
+# .pi/wpi.yml — committed to git, shared by the team
+docker:
+  ports:
+    - 3000            # Next.js dev server
+    - 6006            # Storybook
+    - 8080:80         # Reverse proxy
 
-mounts:
-  - /var/run/docker.sock:/var/run/docker.sock  # Docker access
+  mounts:
+    - /var/run/docker.sock:/var/run/docker.sock
 
-env:
-  NODE_ENV: development
-  CUSTOM_API_URL: https://api.example.com
+  env:
+    NODE_ENV: development
+    CUSTOM_API_URL: https://api.example.com
 
-dockerfileExtension: |
-  RUN apt-get update && apt-get install -y python3
+  extension: |
+    RUN apt-get update && apt-get install -y python3
 
-gitUserName: Team Bot
-gitUserEmail: bot@example.com
+git:
+  user:
+    name: Team Bot
+    email: bot@example.com
 ```
 
-After adding `dockerfileExtension`, rebuild the image:
+After adding `docker.extension`, rebuild the image:
 
 ```bash
-pi-container build
+wpi build
 ```
 
 ### Example: personal override
 
 ```yaml
-# ~/.pi/pi-container.yml — not committed, personal overrides
-ports:
-  - 3000            # also expose port 3000 everywhere
+# ~/.pi/wpi.yml — not committed, personal overrides
+docker:
+  ports:
+    - 3000
 
-env:
-  CUSTOM_VAR: personal-value
+  env:
+    CUSTOM_VAR: personal-value
 ```
 
 ## Multiple instances
 
-Each `pi-container` invocation creates a new ephemeral container (`docker run --rm`). Containers don't interfere with each other. The pi config directory (`~/.pi`) is shared on the host, so settings and auth persist across runs.
+Each `wpi` invocation creates a new ephemeral container (`docker run --rm`). Containers don't interfere with each other. The pi config directory (`~/.pi`) is shared on the host, so settings and auth persist across runs.
 
 If you need to run two agents on the same project simultaneously, that's a workflow concern (like two editors on the same files), not a container concern.
 
@@ -271,13 +292,15 @@ If you need to run two agents on the same project simultaneously, that's a workf
 | Host path | Container path | Contents |
 |-----------|---------------|----------|
 | `$(pwd)` | `/<basename>` | Your project (CWD mount, named after directory) |
-| `~/.pi` | `/home/pi-user/.pi` | Full pi config (mounted) |
-| `~/.pi/agent/settings.json` | `/home/pi-user/.pi/agent/settings.json` | Model, thinking level, preferences |
-| `~/.pi/agent/auth.json` | `/home/pi-user/.pi/agent/auth.json` | OAuth tokens |
-| `~/.pi/agent/sessions/` | `/home/pi-user/.pi/agent/sessions/` | Conversation history |
-| `~/.pi/agent/extensions/` | `/home/pi-user/.pi/agent/extensions/` | User extensions |
-| `~/.pi/agent/npm/` | `/home/pi-user/.pi/agent/npm/` | Installed package data |
-| `~/.pi/pi-container.yml` | *(not mounted)* | User-level pi-container config |
+| `~/.pi` | `<host-home>/.pi` | Full pi config (mounted at the same path as host) |
+| `~/.pi/agent/settings.json` | `<host-home>/.pi/agent/settings.json` | Model, thinking level, preferences |
+| `~/.pi/agent/auth.json` | `<host-home>/.pi/agent/auth.json` | OAuth tokens |
+| `~/.pi/agent/sessions/` | `<host-home>/.pi/agent/sessions/` | Conversation history |
+| `~/.pi/agent/extensions/` | `<host-home>/.pi/agent/extensions/` | User extensions |
+| `~/.pi/agent/npm/` | `<host-home>/.pi/agent/npm/` | Installed package data |
+| `~/.pi/wpi.yml` | *(not mounted)* | User-level wpi config |
+
+> **Note:** `<host-home>` is the host user's home directory (e.g. `/Users/<user>` on macOS, `/home/<user>` on Linux). The container creates a user with the same username, UID/GID, and home path, so all paths are identical inside and outside the container.
 
 If you use pi both natively and in the container, they share the same config.
 
@@ -290,7 +313,7 @@ The default package includes a safety extension:
 ## Development
 
 ```bash
-cd pi-container
+cd wpi
 npm install
 npm run build          # Compile TypeScript to dist/
 npm test               # Run tests

@@ -1,5 +1,5 @@
 // ============================================================
-// pi-container — Docker operations
+// wpi — Docker operations
 // ============================================================
 // Builds images, runs containers, opens shells. All Docker
 // interaction goes through here.
@@ -19,7 +19,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { spawnSync, spawn, SpawnSyncReturns } from "child_process";
-import { PiContainerConfig, RuntimeContext, PI_VERSION, PI_IMAGE, debugLog, isDebug } from "./config";
+import { PiContainerConfig, RuntimeContext, debugLog, isDebug } from "./config";
 import { generateDockerfile, generateEntrypoint } from "./templates";
 
 // Module root (sibling to dist/)
@@ -37,19 +37,19 @@ export function imageExists(tag: string): boolean {
 
 // ── Build ───────────────────────────────────────────────────
 
-export function buildImage(dockerfileExtension?: string): void {
-  console.log(`🔨 Building ${PI_IMAGE} (pi v${PI_VERSION})...`);
+export function buildImage(config: { piVersion: string; piImage: string; dockerfileExtension?: string }): void {
+  console.log(`🔨 Building ${config.piImage} (pi v${config.piVersion})...`);
 
-  const buildCtx = createBuildContext(dockerfileExtension);
+  const buildCtx = createBuildContext(config.piVersion, config.dockerfileExtension);
   debugLog(`Build context created at: ${buildCtx}`);
 
   try {
     const args = [
       "build",
       "--build-arg",
-      `PI_VERSION=${PI_VERSION}`,
+      `PI_VERSION=${config.piVersion}`,
       "-t",
-      PI_IMAGE,
+      config.piImage,
       ".",
     ];
 
@@ -72,7 +72,7 @@ export function buildImage(dockerfileExtension?: string): void {
       process.exit(result.status);
     }
 
-    console.log(`✅ Built ${PI_IMAGE}`);
+    console.log(`✅ Built ${config.piImage}`);
   } finally {
     // Clean up temp directory
     debugLog(`Cleaning up build context: ${buildCtx}`);
@@ -80,13 +80,13 @@ export function buildImage(dockerfileExtension?: string): void {
   }
 }
 
-export function buildIfNeeded(dockerfileExtension?: string): void {
-  debugLog(`buildIfNeeded: checking for ${PI_IMAGE}`);
-  if (!imageExists(PI_IMAGE)) {
+export function buildIfNeeded(config: { piVersion: string; piImage: string; dockerfileExtension?: string }): void {
+  debugLog(`buildIfNeeded: checking for ${config.piImage}`);
+  if (!imageExists(config.piImage)) {
     console.log("📦 Image not found. Building...");
-    buildImage(dockerfileExtension);
+    buildImage(config);
   } else {
-    debugLog(`Image ${PI_IMAGE} already exists, skipping build`);
+    debugLog(`Image ${config.piImage} already exists, skipping build`);
   }
 }
 
@@ -155,7 +155,26 @@ function spawnDocker(args: string[], debug: boolean): Promise<SpawnSyncReturns<B
 
 export async function runContainer(config: PiContainerConfig & RuntimeContext, piArgs: string[]): Promise<void> {
   debugLog("runContainer called with piArgs:", piArgs);
-  buildIfNeeded(config.dockerfileExtension);
+  buildIfNeeded(config);
+
+  // Ensure named docker volumes exist
+  if (config.volumes && config.volumes.length > 0) {
+    for (const v of config.volumes) {
+      debugLog(`Ensuring docker volume exists: ${v.name}`);
+      try {
+        // `docker volume create` is idempotent — it will succeed if the volume exists
+        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
+        if (isDebug() && res.stdout) {
+          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
+        }
+        if (isDebug() && res.stderr) {
+          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
+        }
+      } catch (e) {
+        debugLog(`Error creating docker volume ${v.name}: ${e}`);
+      }
+    }
+  }
 
   const args = buildDockerRunArgs(config, piArgs);
   debugLog(`Running: docker ${args.join(" ")}`);
@@ -172,7 +191,25 @@ export async function runContainer(config: PiContainerConfig & RuntimeContext, p
 
 export async function shellInContainer(config: PiContainerConfig & RuntimeContext): Promise<void> {
   debugLog("shellInContainer called");
-  buildIfNeeded(config.dockerfileExtension);
+  buildIfNeeded(config);
+
+  // Ensure named docker volumes exist
+  if (config.volumes && config.volumes.length > 0) {
+    for (const v of config.volumes) {
+      debugLog(`Ensuring docker volume exists: ${v.name}`);
+      try {
+        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
+        if (isDebug() && res.stdout) {
+          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
+        }
+        if (isDebug() && res.stderr) {
+          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
+        }
+      } catch (e) {
+        debugLog(`Error creating docker volume ${v.name}: ${e}`);
+      }
+    }
+  }
 
   console.log("🐚 Opening shell in pi container...");
   const args = buildDockerRunArgs(config, ["/bin/bash"]);
@@ -221,7 +258,8 @@ export async function execInContainer(containerId: string): Promise<void> {
   } else {
     args.push("-i");
   }
-  args.push("-u", "pi-user", containerId, "/bin/bash");
+  const containerUser = os.userInfo().username;
+  args.push("-u", containerUser, containerId, "/bin/bash");
 
   debugLog(`Running: docker ${args.join(" ")}`);
   const result = await spawnDocker(args, false);
@@ -233,6 +271,19 @@ export async function execInContainer(containerId: string): Promise<void> {
 }
 
 // ── Docker run arg construction ──────────────────────────────
+
+/**
+ * Expand path variables so config files stay portable across users and machines:
+ *   ~              →  host home directory (e.g. /Users/alice)
+ *   ${home}        →  host home directory (e.g. /Users/alice)
+ *   ${workspaceDir} →  absolute path of the mounted project directory
+ */
+function resolvePath(p: string, homeDir: string, workspaceDir: string): string {
+  return p
+    .replace(/^~/, homeDir)
+    .replace(/\$\{home\}/g, homeDir)
+    .replace(/\$\{workspaceDir\}/g, workspaceDir);
+}
 
 export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, command: string[]): string[] {
   const args: string[] = ["run", "--rm"];
@@ -247,15 +298,17 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
   debugLog(`TTY mode: ${isTTY ? "-it (interactive terminal)" : "-i (non-TTY)"}`);
 
   // No --name flag — docker generates unique names, allowing
-  // multiple pi-container instances to run simultaneously.
+  // multiple wpi instances to run simultaneously.
 
   // Mount project directory (CWD → workspace dir named after the project)
   args.push("-v", `${config.projectDir}:${config.workspaceDir}:cached`);
   debugLog(`Mount: ${config.projectDir} -> ${config.workspaceDir}`);
 
-  // Mount pi config directory (host → container)
-  args.push("-v", `${config.configDir}:/home/pi-user/.pi`);
-  debugLog(`Mount: ${config.configDir} -> /home/pi-user/.pi`);
+  // Mount pi config directory (host → container).
+  // Use the host home path so the in-container path matches (e.g. /Users/<user>/.pi).
+  const containerHome = os.homedir();
+  args.push("-v", `${config.configDir}:${containerHome}/.pi`);
+  debugLog(`Mount: ${config.configDir} -> ${containerHome}/.pi`);
 
   // Environment variables from config
   debugLog(`Environment vars: ${Object.keys(config.env).length > 0 ? Object.keys(config.env).join(", ") : "(none)"}`);
@@ -294,23 +347,66 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
   args.push("-e", `HOST_GID=${gid}`);
   debugLog(`Host UID=${uid}, GID=${gid}`);
 
+  // Pass host username and home so the entrypoint creates a matching Linux user.
+  // On macOS the username is e.g. "<user>" and the home is "/Users/<user>".
+  const hostUsername = os.userInfo().username;
+  const hostHome = os.homedir();
+  args.push("-e", `HOST_USERNAME=${hostUsername}`);
+  args.push("-e", `HOST_HOME=${hostHome}`);
+  debugLog(`Host USERNAME=${hostUsername}, HOME=${hostHome}`);
+
   // Pass host home directory so extensions can resolve host paths
   // (e.g., for worktree paths that live under ~/.pi which is volume-mounted)
-  const hostHome = os.homedir();
   args.push("-e", `PI_HOST_HOME=${hostHome}`);
-  debugLog(`Host HOME=${hostHome}`);
+  debugLog(`PI_HOST_HOME=${hostHome}`);
 
   // Custom volume mounts from config
   if (config.mounts.length > 0) {
     debugLog(`Custom mounts: ${config.mounts.map(m => `${m.host}:${m.container}${m.mode ? ":" + m.mode : ""}`).join(", ")}`);
   }
   for (const mount of config.mounts) {
-    const mountSpec = `${mount.host}:${mount.container}${mount.mode ? ":" + mount.mode : ""}`;
+    const host = resolvePath(mount.host, hostHome, config.workspaceDir);
+    const container = resolvePath(mount.container, hostHome, config.workspaceDir);
+    const mountSpec = `${host}:${container}${mount.mode ? ":" + mount.mode : ""}`;
     args.push("-v", mountSpec);
   }
 
+  // Memory limits
+  if (config.memory) {
+    args.push("--memory", config.memory);
+    debugLog(`Setting container memory limit: ${config.memory}`);
+  }
+  if (config.memorySwap) {
+    args.push("--memory-swap", config.memorySwap);
+    debugLog(`Setting container memory-swap limit: ${config.memorySwap}`);
+  }
+
+  // Named volumes (docker volumes)
+  const mountPaths: string[] = [];
+  if (config.volumes && config.volumes.length > 0) {
+    const vols = config.volumes;
+    debugLog(`Named volumes: ${vols.map(v => `${v.name}:${v.container}${v.mode ? ":" + v.mode : ""}`).join(", ")}`);
+    for (const v of vols) {
+      const container = resolvePath(v.container, hostHome, config.workspaceDir);
+      const spec = `${v.name}:${container}${v.mode ? ":" + v.mode : ""}`;
+      args.push("-v", spec);
+      mountPaths.push(container);
+    }
+  }
+
+  // Collect container paths for custom mounts so the entrypoint can adjust ownership
+  for (const m of config.mounts) {
+    mountPaths.push(m.container);
+  }
+
+  if (mountPaths.length > 0) {
+    // Pass a comma-separated list of mount container paths to the container
+    args.push("-e", `PI_MOUNT_PATHS=${mountPaths.join(",")}`);
+    debugLog(`Passing PI_MOUNT_PATHS: ${mountPaths.join(",")}`);
+  }
+
   // Image
-  args.push(PI_IMAGE);
+  args.push(config.piImage);
 
   // Command (pi or shell)
   args.push(...command);
@@ -326,11 +422,11 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
 //   - package/ (built-in, from installed module)
 //   - settings/ (built-in, from installed module)
 
-function createBuildContext(dockerfileExtension?: string): string {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-container-build-"));
+function createBuildContext(piVersion: string, dockerfileExtension?: string): string {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-build-"));
 
   // Generate Dockerfile
-  const dockerfile = generateDockerfile(dockerfileExtension);
+  const dockerfile = generateDockerfile(dockerfileExtension, piVersion);
   fs.writeFileSync(path.join(tmpDir, "Dockerfile"), dockerfile);
 
   // Generate entrypoint
@@ -365,7 +461,7 @@ function createPlaceholderPackage(tmpDir: string): void {
     path.join(tmpDir, "package", "package.json"),
     JSON.stringify(
       {
-        name: "pi-container-defaults",
+        name: "wpi-defaults",
         version: "1.0.0",
         private: true,
         description: "No customizations",

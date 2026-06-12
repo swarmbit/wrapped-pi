@@ -13,14 +13,14 @@
 // never dangerous regardless of the target path.
 //
 // The workspace directory is determined by the WORKSPACE_DIR
-// environment variable, set by pi-container based on the
+// environment variable, set by wpi based on the
 // project directory name.
 // ============================================================
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
-// Workspace directory — set by pi-container from the CWD basename
+// Workspace directory — set by wpi from the CWD basename
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || "/workspace";
 
 // Paths that are always safe to write to (outside workspace)
