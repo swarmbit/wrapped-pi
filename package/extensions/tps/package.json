@@ -1,0 +1,14 @@
+{
+  "name": "tps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Displays tokens per second (TPS) performance metrics after each agent run",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  }
+}

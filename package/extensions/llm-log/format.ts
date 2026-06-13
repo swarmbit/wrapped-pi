@@ -2,55 +2,39 @@
 // Markdown formatters for the LLM log
 // ============================================================
 // Pure functions that turn structured AgentMessages into a
-// human-readable Markdown log. No I/O, no global state —
-// easy to unit test.
+// human-readable Markdown log. No I/O, no global state.
 //
-// Roles are differentiated by the message structure itself:
-//   - user         → "👤 User"
-//   - assistant    → "🤖 Assistant"
-//   - toolResult   → "🔧 Tool result: <name> (id, status)"
-//   - other custom → "📦 <role>"
+// Design principles:
+//   - Everything is present — nothing is removed or truncated
+//   - Verbose sections collapse in <details> for scanability
+//     in rendered Markdown (GitHub, VS Code, etc.)
+//   - Content-first in RESPONSE (what the LLM said, then stats)
+//   - One-line summary at top of RESPONSE for quick scanning
+//   - Compact tables for usage stats
 //
-// Input vs output is differentiated by the caller (index.ts):
-// input is the full request (system + messages from `context`),
-// output is the final assistant response (from `message_end`).
+// What collapses:
+//   - System prompt (always — long, repeated every turn)
+//   - Tool definitions (always — schemas are verbose)
+//   - Thinking blocks (always — often thousands of chars)
+//   - Tool call arguments (when >300 chars)
+//   - Tool results (when >1000 chars)
+//   - Raw provider payload (always — huge and mostly redundant)
+//   - All HTTP headers (when >5)
 //
-// Content blocks are differentiated by their `type` field:
-//   - text     → plain text
-//   - thinking → italicized
-//   - image    → "[image: mime, N bytes]" (no base64 dump)
-//   - toolCall → code block with JSON arguments
-// ============================================================
+// What stays visible:
+//   - User messages, assistant text, tool call names/ids
+//   - One-line RESPONSE summary (model, stop reason, tokens, cost)
+//   - Usage table
+//   - Notable HTTP headers (rate limits, request ids)
 
 // ── Local type definitions ──────────────────────────────────
-// These mirror the runtime shapes from @earendil-works/pi-ai.
-// We can't import them directly (pi-ai is a transitive dep), so
-// we declare the minimum surface area the formatters need.
 
 export type ModelInfo = { provider: string; id: string; api: string };
 
-interface TextContentBlock {
-	type: "text";
-	text: string;
-}
-
-interface ThinkingContentBlock {
-	type: "thinking";
-	thinking: string;
-}
-
-interface ImageContentBlock {
-	type: "image";
-	data: string;
-	mimeType: string;
-}
-
-interface ToolCallBlock {
-	type: "toolCall";
-	id: string;
-	name: string;
-	arguments: Record<string, unknown>;
-}
+interface TextContentBlock { type: "text"; text: string; }
+interface ThinkingContentBlock { type: "thinking"; thinking: string; }
+interface ImageContentBlock { type: "image"; data: string; mimeType: string; }
+interface ToolCallBlock { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown>; }
 
 export type AssistantMessage = {
 	role: "assistant";
@@ -66,13 +50,7 @@ export type AssistantMessage = {
 		cacheRead: number;
 		cacheWrite: number;
 		totalTokens: number;
-		cost: {
-			input: number;
-			output: number;
-			cacheRead: number;
-			cacheWrite: number;
-			total: number;
-		};
+		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; };
 	};
 	errorMessage?: string;
 };
@@ -91,59 +69,51 @@ export type UserMessage = {
 	timestamp: number;
 };
 
-/**
- * Anything the formatter can accept. We use `any` so the runtime
- * AgentMessage union (which includes custom message types from
- * pi-coding-agent) is structurally assignable without us having
- * to re-declare the entire union here. The formatters handle
- * each role via runtime `role` checks.
- */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type FormattableMessage = any;
 
 // ── Thresholds ───────────────────────────────────────────────
-const LONG_SYSTEM_PROMPT_CHARS = 500;
 const LONG_TOOL_RESULT_CHARS = 1000;
-const LONG_THINKING_CHARS = 2000;
+const LONG_ARGS_CHARS = 300;
 
 // ── Helpers ──────────────────────────────────────────────────
 
 function imageBytes(base64: string): number {
-	// base64 length * 3/4 ≈ decoded bytes (with padding adjustment)
 	return Math.floor((base64.length * 3) / 4);
 }
 
-/** Format a number with thousands separators. */
 function fmtNum(n: number): string {
 	return n.toLocaleString("en-US");
 }
-
-// ── Content block formatters ─────────────────────────────────
 
 function formatImageBlock(image: ImageContentBlock): string {
 	return `*[image: ${image.mimeType}, ${fmtNum(imageBytes(image.data))} bytes]*`;
 }
 
-function formatThinkingInline(thinking: string): string {
-	if (thinking.length <= LONG_THINKING_CHARS) {
-		return thinking;
-	}
-	const truncated = thinking.slice(0, LONG_THINKING_CHARS);
-	return `${truncated}\n\n*[truncated — ${fmtNum(thinking.length - LONG_THINKING_CHARS)} more chars]*`;
+// ── Content block formatters ─────────────────────────────────
+
+function formatThinkingBlock(block: ThinkingContentBlock): string {
+	// Always collapse — thinking is often thousands of chars and
+	// rarely the primary interest
+	return `<details>\n<summary>Thinking (${fmtNum(block.thinking.length)} chars)</summary>\n\n${block.thinking}\n\n</details>`;
 }
 
 function formatToolCallBlock(call: ToolCallBlock): string {
 	const args = JSON.stringify(call.arguments ?? {}, null, 2);
-	return `**Tool call: \`${call.name}\`** (id: \`${call.id}\`)\n\n\`\`\`json\n${args}\n\`\`\``;
+	// Name and id always visible; args collapse when verbose
+	if (args.length <= LONG_ARGS_CHARS) {
+		return `**Tool call: \`${call.name}\`** (id: \`${call.id}\`)\n\n\`\`\`json\n${args}\n\`\`\``;
+	}
+	return `**Tool call: \`${call.name}\`** (id: \`${call.id}\`)\n\n<details>\n<summary>Show arguments (${fmtNum(args.length)} chars)</summary>\n\n\`\`\`json\n${args}\n\`\`\`\n\n</details>`;
 }
 
 function formatAssistantContentBlocks(content: AssistantMessage["content"]): string {
 	const parts: string[] = [];
 	for (const block of content) {
 		if (block.type === "text") {
-			parts.push(`**Text:**\n\n${block.text}`);
+			parts.push(block.text);
 		} else if (block.type === "thinking") {
-			parts.push(`**Thinking:**\n\n${formatThinkingInline(block.thinking)}`);
+			parts.push(formatThinkingBlock(block));
 		} else if (block.type === "toolCall") {
 			parts.push(formatToolCallBlock(block));
 		}
@@ -151,7 +121,8 @@ function formatAssistantContentBlocks(content: AssistantMessage["content"]): str
 	return parts.join("\n\n");
 }
 
-/** Returns just the "Tool result: `name` (id, status)" label, without markdown bold. */
+// ── REQUEST-side formatters ────────────────────────────────────
+
 function toolResultLabel(msg: ToolResultMessage): string {
 	const status = msg.isError ? "✗ error" : "✓ success";
 	return `Tool result: \`${msg.toolName}\` (id: \`${msg.toolCallId}\`, ${status})`;
@@ -160,20 +131,14 @@ function toolResultLabel(msg: ToolResultMessage): string {
 function formatToolResultBody(msg: ToolResultMessage): string {
 	const bodyParts: string[] = [];
 	for (const block of msg.content) {
-		if (block.type === "text") {
-			bodyParts.push(block.text);
-		} else if (block.type === "image") {
-			bodyParts.push(formatImageBlock(block));
-		}
+		if (block.type === "text") bodyParts.push(block.text);
+		else if (block.type === "image") bodyParts.push(formatImageBlock(block));
 	}
 	return bodyParts.join("\n\n");
 }
 
-
 function formatUserContent(content: UserMessage["content"]): string {
-	if (typeof content === "string") {
-		return content;
-	}
+	if (typeof content === "string") return content;
 	return content
 		.map((block) => {
 			if (block.type === "text") return block.text;
@@ -183,12 +148,8 @@ function formatUserContent(content: UserMessage["content"]): string {
 		.join("\n\n");
 }
 
-// ── Per-message formatter ────────────────────────────────────
+// ── Per-message formatter (REQUEST) ────────────────────────────
 
-/**
- * Format a single message with role label and content.
- * Used for messages inside a REQUEST (input to the LLM).
- */
 export function formatMessage(msg: FormattableMessage, index: number): string {
 	const num = `#${index + 1}`;
 	if (msg.role === "user") {
@@ -196,9 +157,7 @@ export function formatMessage(msg: FormattableMessage, index: number): string {
 	}
 	if (msg.role === "assistant") {
 		const blocks = formatAssistantContentBlocks(msg.content);
-		if (!blocks) {
-			return `**${num} — 🤖 Assistant** *(empty)*`;
-		}
+		if (!blocks) return `**${num} — 🤖 Assistant** *(empty)*`;
 		return `**${num} — 🤖 Assistant**\n\n${blocks}`;
 	}
 	if (msg.role === "toolResult") {
@@ -207,9 +166,8 @@ export function formatMessage(msg: FormattableMessage, index: number): string {
 		if (body.length <= LONG_TOOL_RESULT_CHARS) {
 			return `${header}\n\n\`\`\`\n${body}\n\`\`\``;
 		}
-		return `${header} — ${fmtNum(body.length)} chars\n\n<details>\n<summary>Show tool result</summary>\n\n\`\`\`\n${body}\n\`\`\`\n\n</details>`;
+		return `${header} (${fmtNum(body.length)} chars)\n\n<details>\n<summary>Show tool result</summary>\n\n\`\`\`\n${body}\n\`\`\`\n\n</details>`;
 	}
-	// Custom messages (bashExecution, custom, branchSummary, compactionSummary)
 	const role = (msg as { role: string }).role;
 	return `**${num} — 📦 ${role}**\n\n\`\`\`json\n${JSON.stringify(msg, null, 2)}\n\`\`\``;
 }
@@ -217,9 +175,7 @@ export function formatMessage(msg: FormattableMessage, index: number): string {
 // ── Section formatters ───────────────────────────────────────
 
 function formatModelLine(model: ModelInfo | null, responseModel?: string): string {
-	if (!model) {
-		return "**Model:** *(unknown)*";
-	}
+	if (!model) return "**Model:** *(unknown)*";
 	const requested = `${model.provider}/${model.id}`;
 	if (responseModel && responseModel !== model.id) {
 		return `**Model:** ${requested} (response: \`${responseModel}\`)`;
@@ -228,10 +184,22 @@ function formatModelLine(model: ModelInfo | null, responseModel?: string): strin
 }
 
 function formatSystemPrompt(systemPrompt: string): string {
-	if (systemPrompt.length <= LONG_SYSTEM_PROMPT_CHARS) {
-		return `**System prompt:**\n\n\`\`\`\n${systemPrompt}\n\`\`\``;
-	}
-	return `**System prompt:** ${fmtNum(systemPrompt.length)} chars\n\n<details>\n<summary>Show system prompt</summary>\n\n\`\`\`\n${systemPrompt}\n\`\`\`\n\n</details>`;
+	// Always collapse — system prompts are long and repeated every turn.
+	// The summary line gives enough context at a glance.
+	return `<details>\n<summary>System prompt (${fmtNum(systemPrompt.length)} chars)</summary>\n\n\`\`\`\n${systemPrompt}\n\`\`\`\n\n</details>`;
+}
+
+function formatUsage(u: AssistantMessage["usage"]): string {
+	const lines: string[] = [];
+	lines.push("| | tokens |");
+	lines.push("|---|---|");
+	lines.push(`| input | ${fmtNum(u.input)} |`);
+	lines.push(`| output | ${fmtNum(u.output)} |`);
+	lines.push(`| cache read | ${fmtNum(u.cacheRead)} |`);
+	lines.push(`| cache write | ${fmtNum(u.cacheWrite)} |`);
+	lines.push(`| **total** | **${fmtNum(u.totalTokens)}** |`);
+	lines.push(`| **cost** | **$${u.cost.total.toFixed(4)}** |`);
+	return lines.join("\n");
 }
 
 export interface FormatRequestOptions {
@@ -243,10 +211,6 @@ export interface FormatRequestOptions {
 	messages: FormattableMessage[];
 }
 
-/**
- * Format a REQUEST section — what was sent to the LLM.
- * Includes the system prompt, active tools, and all messages in the context.
- */
 export function formatRequest(opts: FormatRequestOptions): string {
 	const { turnIndex, timestamp, model, systemPrompt, tools, messages } = opts;
 	const lines: string[] = [];
@@ -259,11 +223,8 @@ export function formatRequest(opts: FormatRequestOptions): string {
 	lines.push("");
 	lines.push(formatSystemPrompt(systemPrompt));
 	lines.push("");
-
-	// Tools — always collapsible since schemas are verbose
 	lines.push(formatTools(tools));
 	lines.push("");
-
 	lines.push(`**Messages (${messages.length}):**`);
 	lines.push("");
 
@@ -283,49 +244,48 @@ export interface FormatResponseOptions {
 	timestamp: string;
 	model: ModelInfo | null;
 	message: AssistantMessage;
+	httpMeta?: string;
 }
 
-/**
- * Format a RESPONSE section — what came back from the LLM.
- * Includes content blocks (text / thinking / tool calls) and usage.
- */
 export function formatResponse(opts: FormatResponseOptions): string {
-	const { timestamp, model, message } = opts;
+	const { timestamp, model, message, httpMeta } = opts;
 	const lines: string[] = [];
 
+	// ── One-line summary for quick scanning ──
 	lines.push("### ← RESPONSE");
 	lines.push("");
-	lines.push(`*${timestamp}*`);
-	lines.push("");
-	lines.push(formatModelLine(model, message.responseModel));
+
+	const modelStr = model ? `${model.provider}/${model.id}` : "unknown";
+	const costStr = `$${message.usage.cost.total.toFixed(4)}`;
+	const stopStr = message.errorMessage ? `⚠ ${message.errorMessage}` : `\`${message.stopReason}\``;
+	let summary = `*${timestamp}* · **${modelStr}** · stop: ${stopStr} · ${fmtNum(message.usage.totalTokens)} tokens · ${costStr}`;
+	if (message.responseModel && model && message.responseModel !== model.id) {
+		summary += ` (actual: \`${message.responseModel}\`)`;
+	}
+	lines.push(summary);
 	lines.push("");
 
-	// Error (if any) — show prominently
+	// ── Content: what the LLM actually said ──
 	if (message.errorMessage) {
 		lines.push(`> **⚠ Error:** ${message.errorMessage}`);
 		lines.push("");
 	}
 
-	// Stop reason
-	lines.push(`**Stop reason:** \`${message.stopReason}\``);
-	lines.push("");
-
-	// Usage
-	const u = message.usage;
-	lines.push("**Usage:**");
-	lines.push(`- input: ${fmtNum(u.input)}`);
-	lines.push(`- output: ${fmtNum(u.output)}`);
-	lines.push(`- cache read: ${fmtNum(u.cacheRead)}`);
-	lines.push(`- cache write: ${fmtNum(u.cacheWrite)}`);
-	lines.push(`- total tokens: ${fmtNum(u.totalTokens)}`);
-	lines.push(`- cost: $${u.cost.total.toFixed(4)}`);
-	lines.push("");
-
-	// Content blocks
 	if (message.content.length === 0) {
 		lines.push("*(no content)*");
+		lines.push("");
 	} else {
 		lines.push(formatAssistantContentBlocks(message.content));
+		lines.push("");
+	}
+
+	// ── Usage stats (always visible, compact table) ──
+	lines.push(formatUsage(message.usage));
+	lines.push("");
+
+	// ── HTTP metadata ──
+	if (httpMeta) {
+		lines.push(httpMeta);
 		lines.push("");
 	}
 
@@ -339,9 +299,6 @@ export interface FormatSessionHeaderOptions {
 	startedAt: string;
 }
 
-/**
- * Format the file header — written once at the top of the log.
- */
 export function formatSessionHeader(opts: FormatSessionHeaderOptions): string {
 	const { sessionFile, sessionId, model, startedAt } = opts;
 	const lines: string[] = [];
@@ -367,7 +324,6 @@ export function formatSessionHeader(opts: FormatSessionHeaderOptions): string {
 
 // ── Tool definitions formatter ─────────────────────────────────
 
-/** Shape of a single tool returned by pi.getActiveTools(). */
 export interface ToolInfo {
 	name: string;
 	description: string;
@@ -375,14 +331,11 @@ export interface ToolInfo {
 	promptGuidelines?: string[];
 }
 
-/**
- * Format the active tool definitions as a collapsible section.
- * Shows tool name, description, and JSON Schema for parameters.
- */
 export function formatTools(tools: ToolInfo[]): string {
-	if (tools.length === 0) return "**Tools:** *(none)*";
+	if (tools.length === 0) return "**Tools:** *(none)*\n";
 
-	const summary = `**Tools (${tools.length}):**`;
+	// Summary line with tool names visible at a glance, full schemas collapsed
+	const summary = `**Tools (${tools.length}):** ${tools.map((t) => `\`${t.name}\``).join(", ")}`;
 	const entries = tools.map((t) => {
 		const desc = t.description || "*(no description)*";
 		const params = JSON.stringify(t.parameters ?? {}, null, 2);
@@ -392,36 +345,26 @@ export function formatTools(tools: ToolInfo[]): string {
 		return `#### \`${t.name}\`\n\n${desc}${guidelines}\n\n\`\`\`json\n${params}\n\`\`\``;
 	}).join("\n\n");
 
-	// Always collapsible — tool schemas are verbose
 	return `${summary}\n\n<details>\n<summary>Show tool definitions</summary>\n\n${entries}\n\n</details>`;
 }
 
 // ── Raw provider payload formatter ────────────────────────────
 
-/**
- * Format the raw provider payload as a collapsible JSON block.
- * This is the exact bytes sent to the LLM endpoint, in the
- * provider's native format (Anthropic / OpenAI / Google / etc.).
- */
 export function formatProviderPayload(payload: unknown): string {
+	// Always collapse — huge and mostly redundant with the structured view
 	const json = JSON.stringify(payload, null, 2);
-	// Always collapsible — payloads are large and mostly redundant
-	// with the structured view above
 	return `<details>\n<summary>Raw provider payload (${fmtNum(json.length)} chars)</summary>\n\n\`\`\`json\n${json}\n\`\`\`\n\n</details>`;
 }
 
 // ── HTTP response metadata formatter ──────────────────────────
 
-/**
- * Format HTTP response metadata (status code and headers).
- */
 export function formatResponseMeta(status: number, headers: Record<string, string>): string {
 	const lines: string[] = [];
 	lines.push(`**HTTP status:** ${status}`);
 
 	const headerKeys = Object.keys(headers);
 	if (headerKeys.length > 0) {
-		// Show notable headers inline
+		// Notable headers always visible
 		const notable = headerKeys
 			.filter((k) =>
 				k.toLowerCase().startsWith("x-ratelimit") ||
@@ -437,11 +380,18 @@ export function formatResponseMeta(status: number, headers: Record<string, strin
 			for (const h of notable) lines.push(`- ${h}`);
 		}
 
-		// All headers in a collapsible block
+		// All headers — visible if few, collapsed if many
 		const allHeaders = headerKeys.map((k) => `\`${k}\`: ${headers[k]}`).join("\n");
 		if (headerKeys.length > 5) {
 			lines.push("");
 			lines.push(`<details>\n<summary>Show all headers (${headerKeys.length})</summary>\n\n${allHeaders}\n\n</details>`);
+		} else {
+			lines.push("");
+			lines.push("**All headers:**");
+			lines.push("");
+			lines.push("```");
+			for (const k of headerKeys) lines.push(`${k}: ${headers[k]}`);
+			lines.push("```");
 		}
 	}
 

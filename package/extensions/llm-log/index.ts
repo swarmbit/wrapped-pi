@@ -4,37 +4,18 @@
 // Produces a human-readable Markdown log of every LLM exchange.
 // Disabled by default; use /llmlog to toggle or /llmlog on|off.
 //
-// Differentiation approach (why this works):
-//   ┌──────────────────────────────────────────────────────┐
-//   │  Input vs output is differentiated by EVENT:         │
-//   │    • `context`      → fires with the full messages   │
-//   │                       array that pi is about to send  │
-//   │                       to the LLM (this is INPUT)     │
-//   │    • `message_end`  → fires for assistant messages   │
-//   │                       when the LLM response is       │
-//   │                       finalized (this is OUTPUT)     │
-//   │                                                      │
-//   │  Role is intrinsic to each AgentMessage:             │
-//   │    • "user"        → 👤 User                         │
-//   │    • "assistant"   → 🤖 Assistant                    │
-//   │    • "toolResult"  → 🔧 Tool result                  │
-//   │    • custom types  → 📦 <role>                       │
-//   │                                                      │
-//   │  Content blocks have typed subtypes:                 │
-//   │    • type: "text"      → plain text                  │
-//   │    • type: "thinking"  → italicized thinking         │
-//   │    • type: "image"     → "[image: mime, N bytes]"    │
-//   │    • type: "toolCall"  → code block with JSON args   │
-//   │                                                      │
-//   │  System prompt is captured via `ctx.getSystemPrompt()`│
-//   │  at the time of the LLM call.                        │
-//   └──────────────────────────────────────────────────────┘
+// Everything is present in the log — nothing is removed or
+// truncated. Verbose sections (system prompts, tool schemas,
+// thinking blocks, raw payloads) collapse in <details> blocks
+// so the file remains scannable in rendered Markdown.
+//
+// Structure per turn:
+//   ## Turn N — <timestamp>
+//   ### → REQUEST   (system prompt, tools, messages, raw payload)
+//   ### ← RESPONSE  (summary line, content, usage, HTTP meta)
 //
 // Log file: <session-dir>/llm-log-<session-id>.md for sessions,
 //           ~/.pi/agent/logs/llm-log-<timestamp>.md for ephemeral.
-//
-// Long system prompts and tool results go in <details> blocks
-// so the file remains scannable.
 // ============================================================
 
 import * as fs from "node:fs";
@@ -116,12 +97,16 @@ export default function (pi: ExtensionAPI) {
 	// Per-session state (set during session_start, cleared on shutdown)
 	let logFile: string | null = null;
 	let currentTurnIndex = 0;
-	let turnInProgress = false;
 
 	// Tracks which turn we last logged a request for. Used to pair a response
 	// back to its request, and to filter out historical assistant messages
 	// loaded from a restored session.
 	let lastRequestTurnIndex: number | null = null;
+
+	// HTTP response metadata from `after_provider_response` is buffered here
+	// and appended to the RESPONSE section when `message_end` fires. This
+	// keeps the log order natural: REQUEST, raw payload, RESPONSE (+ HTTP meta).
+	let pendingHttpMeta: string | null = null;
 
 	// ── /llmlog command ─────────────────────────────────────
 	//
@@ -148,8 +133,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const state = enabled ? "✅ ON" : "⛔ OFF";
-			const pathInfo = logFile ? `\nLog file: ${logFile}` : "\nNo session active yet";
-			ctx.ui.notify(`LLM logging: ${state}${pathInfo}`, "info");
+			ctx.ui.notify(`LLM logging: ${state}`, "info");
 		},
 	});
 
@@ -173,17 +157,13 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		currentTurnIndex = 0;
-		turnInProgress = false;
 		lastRequestTurnIndex = null;
+		pendingHttpMeta = null;
 	});
 
 	pi.on("turn_start", (event) => {
 		currentTurnIndex = event.turnIndex;
-		turnInProgress = true;
-	});
-
-	pi.on("turn_end", () => {
-		turnInProgress = false;
+		pendingHttpMeta = null;
 	});
 
 	// Helper: lazily write the session header the first time logging is
@@ -249,22 +229,26 @@ export default function (pi: ExtensionAPI) {
 	// Guards:
 	//   - Logging must be enabled
 	//   - Only assistant messages (the LLM's role)
-	//   - Only when an active turn is in progress, OR a request was logged
-	//     for this turn. This filters historical assistant messages loaded
-	//     from a restored session (they fire message_end outside any turn).
+	//   - Only when we logged a request for this turn. This filters out
+	//     historical assistant messages loaded from a restored session (they
+	//     fire message_end outside any active request/response pair).
 	pi.on("message_end", (event, ctx) => {
 		if (!enabled) return;
 		if (event.message.role !== "assistant") return;
 		if (!logFile) return;
-		if (!turnInProgress && lastRequestTurnIndex !== currentTurnIndex) return;
+		// Only log responses for turns where we logged the request. This
+		// filters out historical assistant messages loaded from a restored
+		// session (they fire outside any active request/response pair).
 		if (lastRequestTurnIndex !== currentTurnIndex) return;
 
 		const response = formatResponse({
 			timestamp: new Date().toISOString(),
 			model: modelInfo(ctx.model),
 			message: event.message,
+			httpMeta: pendingHttpMeta ?? undefined,
 		});
 
+		pendingHttpMeta = null;
 		appendToFile(logFile, response + "\n" + TURN_SEPARATOR);
 	});
 
@@ -290,7 +274,8 @@ export default function (pi: ExtensionAPI) {
 		if (!enabled) return;
 		if (!logFile) return;
 
-		const meta = formatResponseMeta(event.status, event.headers);
-		appendToFile(logFile, meta + "\n\n");
+		// Buffer the metadata so it can be appended to the RESPONSE section
+		// when `message_end` fires. This keeps the log reading order natural.
+		pendingHttpMeta = formatResponseMeta(event.status, event.headers);
 	});
 }

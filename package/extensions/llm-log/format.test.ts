@@ -95,7 +95,7 @@ describe("formatSessionHeader", () => {
 	});
 });
 
-// ── formatMessage (per-role differentiation) ────────────────
+// ── formatMessage — role differentiation ────────────────────
 
 describe("formatMessage — role differentiation", () => {
 	it("labels user messages with 👤 User", () => {
@@ -151,37 +151,51 @@ describe("formatMessage — role differentiation", () => {
 describe("formatMessage — content block differentiation", () => {
 	it("shows plain text for assistant text blocks", () => {
 		const md = formatMessage(makeAssistant({ content: [{ type: "text", text: "world" }] }), 0);
-		expect(md).toContain("**Text:**");
 		expect(md).toContain("world");
 	});
 
-	it("shows Thinking: label for thinking blocks", () => {
+	it("collapses thinking into details block with char count", () => {
 		const md = formatMessage(
 			makeAssistant({ content: [{ type: "thinking", thinking: "let me think..." }] }),
 			0,
 		);
-		expect(md).toContain("**Thinking:**");
+		expect(md).toContain("<details>");
+		expect(md).toContain("Thinking");
+		expect(md).toContain("chars</summary>");
 		expect(md).toContain("let me think...");
 	});
 
-	it("renders tool calls as JSON code blocks with name and id", () => {
+	it("shows tool call name and id visible, args collapse when long", () => {
+		const bigArgs: Record<string, unknown> = {};
+		for (let i = 0; i < 50; i++) bigArgs[`key_${i}`] = "x".repeat(20);
 		const md = formatMessage(
 			makeAssistant({
 				content: [
-					{
-						type: "toolCall",
-						id: "toolu_xyz",
-						name: "bash",
-						arguments: { command: "ls" },
-					},
+					{ type: "toolCall", id: "toolu_xyz", name: "bash", arguments: bigArgs },
 				],
 			}),
 			0,
 		);
 		expect(md).toContain("Tool call: `bash`");
 		expect(md).toContain("`toolu_xyz`");
-		expect(md).toContain("```json");
+		// Long args collapse into details
+		expect(md).toContain("<details>");
+		expect(md).toContain("Show arguments");
+	});
+
+	it("shows short tool call args inline", () => {
+		const md = formatMessage(
+			makeAssistant({
+				content: [
+					{ type: "toolCall", id: "toolu_xyz", name: "bash", arguments: { command: "ls" } },
+				],
+			}),
+			0,
+		);
+		expect(md).toContain("Tool call: `bash`");
 		expect(md).toContain('"command": "ls"');
+		// Short args not collapsed
+		expect(md).not.toContain("Show arguments");
 	});
 
 	it("does NOT dump base64 for image blocks", () => {
@@ -190,7 +204,7 @@ describe("formatMessage — content block differentiation", () => {
 			makeUser([{ type: "image", data: fakeBase64, mimeType: "image/png" }]),
 			0,
 		);
-		expect(md).not.toContain("A".repeat(50)); // no base64 dump
+		expect(md).not.toContain("A".repeat(50));
 		expect(md).toContain("[image: image/png");
 		expect(md).toContain("bytes]");
 	});
@@ -200,9 +214,10 @@ describe("formatMessage — content block differentiation", () => {
 		const md = formatMessage(makeToolResult({ content: [{ type: "text", text: longContent }] }), 0);
 		expect(md).toContain("<details>");
 		expect(md).toContain("Show tool result");
+		expect(md).toContain("2,000 chars");
 	});
 
-	it("keeps short tool results inline", () => {
+	it("shows short tool results inline", () => {
 		const md = formatMessage(makeToolResult({ content: [{ type: "text", text: "short" }] }), 0);
 		expect(md).not.toContain("<details>");
 		expect(md).toContain("```\nshort\n```");
@@ -231,23 +246,8 @@ describe("formatRequest", () => {
 		expect(md).toContain("👤 User");
 	});
 
-	it("collapses long system prompts into <details>", () => {
-		const long = "x".repeat(1000);
-		const md = formatRequest({
-			turnIndex: 0,
-			timestamp: "2026-06-12T12:00:00.000Z",
-			model: null,
-			systemPrompt: long,
-			tools: [],
-			messages: [],
-		});
-		expect(md).toContain("1,000 chars");
-		expect(md).toContain("<details>");
-		expect(md).toContain("Show system prompt");
-	});
-
-	it("keeps short system prompts inline", () => {
-		const md = formatRequest({
+	it("always collapses system prompt into details", () => {
+		const short = formatRequest({
 			turnIndex: 0,
 			timestamp: "2026-06-12T12:00:00.000Z",
 			model: null,
@@ -255,8 +255,20 @@ describe("formatRequest", () => {
 			tools: [],
 			messages: [],
 		});
-		expect(md).toContain("```\nshort\n```");
-		expect(md).not.toContain("Show system prompt");
+		expect(short).toContain("<details>");
+		expect(short).toContain("System prompt");
+		expect(short).toContain("chars");
+
+		const long = formatRequest({
+			turnIndex: 0,
+			timestamp: "2026-06-12T12:00:00.000Z",
+			model: null,
+			systemPrompt: "x".repeat(5000),
+			tools: [],
+			messages: [],
+		});
+		expect(long).toContain("<details>");
+		expect(long).toContain("5,000 chars");
 	});
 
 	it("shows *(no messages)* for empty context", () => {
@@ -283,7 +295,7 @@ describe("formatRequest", () => {
 		expect(md).toContain("**Model:** *(unknown)*");
 	});
 
-	it("shows tool definitions", () => {
+	it("shows tool names in summary line and definitions in details", () => {
 		const md = formatRequest({
 			turnIndex: 0,
 			timestamp: "2026-06-12T12:00:00.000Z",
@@ -291,16 +303,18 @@ describe("formatRequest", () => {
 			systemPrompt: "",
 			tools: [
 				{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } },
-				{ name: "bash", description: "Run a command", parameters: { type: "object", properties: { command: { type: "string" } } }, promptGuidelines: ["Use bash for shell commands"] },
+				{ name: "bash", description: "Run a command", parameters: { type: "object", properties: { command: { type: "string" } } } },
 			],
 			messages: [],
 		});
+		// Summary line visible
 		expect(md).toContain("Tools (2)");
 		expect(md).toContain("`read`");
 		expect(md).toContain("`bash`");
+		// Definitions collapsed
+		expect(md).toContain("<summary>Show tool definitions</summary>");
 		expect(md).toContain("Read a file");
 		expect(md).toContain("Run a command");
-		expect(md).toContain("Guidelines:");
 	});
 
 	it("shows (none) for empty tools", () => {
@@ -312,14 +326,14 @@ describe("formatRequest", () => {
 			tools: noTools,
 			messages: [],
 		});
-		expect(md).toContain("Tools (0)");
+		expect(md).toContain("*(none)*");
 	});
 });
 
 // ── formatResponse ───────────────────────────────────────────
 
 describe("formatResponse", () => {
-	it("renders response marker, stop reason, usage, and content", () => {
+	it("renders response with one-line summary and content first", () => {
 		const md = formatResponse({
 			timestamp: "2026-06-12T12:34:57.000Z",
 			model: { provider: "anthropic", id: "claude-sonnet-4-5", api: "anthropic-messages" },
@@ -327,21 +341,23 @@ describe("formatResponse", () => {
 		});
 
 		expect(md).toContain("### ← RESPONSE");
-		expect(md).toContain("**Stop reason:** `stop`");
-		expect(md).toContain("**Usage:**");
-		expect(md).toContain("input: 1,234");
-		expect(md).toContain("output: 56");
-		expect(md).toContain("total tokens: 1,290");
+		expect(md).toContain("anthropic/claude-sonnet-4-5");
+		expect(md).toContain("stop: `stop`");
 		expect(md).toContain("$0.0123");
+		expect(md).toContain("1,290 tokens");
+		expect(md).toContain("Hello!");
+		// Content comes before usage
+		expect(md.indexOf("Hello!")).toBeLessThan(md.indexOf("| input |"));
 	});
 
-	it("shows error prominently when present", () => {
+	it("shows error in summary and blockquote", () => {
 		const md = formatResponse({
 			timestamp: "2026-06-12T12:00:00.000Z",
 			model: null,
 			message: makeAssistant({ errorMessage: "rate limit exceeded", stopReason: "error" }),
 		});
-		expect(md).toContain("**⚠ Error:** rate limit exceeded");
+		expect(md).toContain("⚠ rate limit exceeded");
+		expect(md).toContain("> **⚠ Error:** rate limit exceeded");
 	});
 
 	it("shows response model when it differs from requested", () => {
@@ -350,17 +366,21 @@ describe("formatResponse", () => {
 			model: { provider: "openrouter", id: "auto", api: "openai-completions" },
 			message: makeAssistant({ responseModel: "anthropic/claude-sonnet-4-5" }),
 		});
-		expect(md).toContain("openrouter/auto");
-		expect(md).toContain("response: `anthropic/claude-sonnet-4-5`");
+		expect(md).toContain("actual: `anthropic/claude-sonnet-4-5`");
 	});
 
-	it("omits response model line when it matches requested", () => {
+	it("renders usage as a table", () => {
 		const md = formatResponse({
 			timestamp: "2026-06-12T12:00:00.000Z",
 			model: { provider: "anthropic", id: "claude-sonnet-4-5", api: "anthropic-messages" },
 			message: makeAssistant(),
 		});
-		expect(md).not.toContain("response:");
+		expect(md).toContain("| input |");
+		expect(md).toContain("| output |");
+		expect(md).toContain("| **total** |");
+		expect(md).toContain("| **cost** |");
+		expect(md).toContain("1,234");
+		expect(md).toContain("56");
 	});
 
 	it("handles empty content", () => {
@@ -372,7 +392,7 @@ describe("formatResponse", () => {
 		expect(md).toContain("*(no content)*");
 	});
 
-	it("shows thinking before text", () => {
+	it("shows thinking in details block with char count", () => {
 		const md = formatResponse({
 			timestamp: "2026-06-12T12:00:00.000Z",
 			model: null,
@@ -383,7 +403,39 @@ describe("formatResponse", () => {
 				],
 			}),
 		});
-		expect(md.indexOf("**Thinking:**")).toBeLessThan(md.indexOf("**Text:**"));
+		expect(md).toContain("<details>");
+		expect(md).toContain("Thinking");
+		expect(md).toContain("hmm");
+		expect(md).toContain("answer");
+	});
+
+	it("shows tool call with collapsed args when long", () => {
+		const bigArgs: Record<string, unknown> = {};
+		for (let i = 0; i < 50; i++) bigArgs[`key_${i}`] = "x".repeat(20);
+		const md = formatResponse({
+			timestamp: "2026-06-12T12:00:00.000Z",
+			model: null,
+			message: makeAssistant({
+				content: [
+					{ type: "toolCall", id: "toolu_abc", name: "bash", arguments: bigArgs },
+				],
+			}),
+		});
+		expect(md).toContain("Tool call: `bash`");
+		expect(md).toContain("<summary>Show arguments");
+	});
+
+	it("appends HTTP metadata after usage", () => {
+		const md = formatResponse({
+			timestamp: "2026-06-12T12:00:00.000Z",
+			model: null,
+			message: makeAssistant(),
+			httpMeta: "**HTTP status:** 200\n\n**Notable headers:**\n- `x-req`: abc",
+		});
+		expect(md).toContain("**HTTP status:** 200");
+		expect(md).toContain("`x-req`: abc");
+		// Usage before HTTP meta
+		expect(md.indexOf("| **cost** |")).toBeLessThan(md.indexOf("**HTTP status:** 200"));
 	});
 });
 
@@ -394,7 +446,7 @@ describe("formatTools", () => {
 		expect(formatTools([])).toContain("*(none)*");
 	});
 
-	it("lists tool names and descriptions", () => {
+	it("shows tool names in summary and full definitions in details", () => {
 		const md = formatTools([
 			{ name: "read", description: "Read a file", parameters: {} },
 			{ name: "bash", description: "Run a command", parameters: {} },
@@ -404,6 +456,7 @@ describe("formatTools", () => {
 		expect(md).toContain("Read a file");
 		expect(md).toContain("`bash`");
 		expect(md).toContain("Run a command");
+		expect(md).toContain("<details>");
 	});
 
 	it("shows guidelines when present", () => {
@@ -414,27 +467,24 @@ describe("formatTools", () => {
 		expect(md).toContain("Use bash for shell commands; Always check cwd");
 	});
 
-	it("always wraps in details block", () => {
+	it("always wraps tool definitions in details block", () => {
 		const md = formatTools([{ name: "read", description: "Read", parameters: { type: "object" } }]);
 		expect(md).toContain("<details>");
 		expect(md).toContain("</details>");
+		expect(md).toContain("<summary>Show tool definitions</summary>");
 	});
 });
 
 // ── formatProviderPayload ─────────────────────────────────────
 
 describe("formatProviderPayload", () => {
-	it("wraps payload in a collapsible details block", () => {
+	it("wraps payload in details block with char count", () => {
 		const md = formatProviderPayload({ model: "claude-sonnet-4-5", messages: [] });
 		expect(md).toContain("<details>");
 		expect(md).toContain("Raw provider payload");
+		expect(md).toContain("chars");
 		expect(md).toContain("```json");
 		expect(md).toContain('"model"');
-	});
-
-	it("includes char count in summary", () => {
-		const md = formatProviderPayload({ short: "hi" });
-		expect(md).toContain("chars");
 	});
 });
 
@@ -457,5 +507,12 @@ describe("formatResponseMeta", () => {
 		const md = formatResponseMeta(200, headers);
 		expect(md).toContain("<details>");
 		expect(md).toContain("Show all headers");
+	});
+
+	it("shows few headers inline in code block", () => {
+		const md = formatResponseMeta(200, { "content-type": "application/json" });
+		expect(md).toContain("**All headers:**");
+		expect(md).toContain("content-type: application/json");
+		expect(md).not.toContain("<details>");
 	});
 });

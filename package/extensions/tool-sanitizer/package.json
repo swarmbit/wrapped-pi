@@ -1,0 +1,14 @@
+{
+  "name": "tool-sanitizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pre-tool-call JSON argument sanitizer — repairs malformed tool arguments emitted by less-accurate models",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*",
+    "vitest": "*"
+  }
+}
