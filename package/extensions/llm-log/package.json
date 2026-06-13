@@ -1,0 +1,12 @@
+{
+  "name": "llm-log",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Logs all text exchanged with the LLM endpoint to a human-readable Markdown file",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
