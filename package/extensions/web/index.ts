@@ -126,7 +126,7 @@ interface FirecrawlResponse {
 async function firecrawlRequest(
   endpoint: string,
   body: Record<string, unknown>,
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
 ): Promise<FirecrawlResponse> {
   if (!API_KEY) {
     return {
@@ -201,6 +201,8 @@ export default function (pi: ExtensionAPI) {
       "Fetch a web page and extract its content as clean markdown. " +
       "Use for reading documentation, articles, API docs, or any " +
       "publicly accessible web page. Returns markdown text.",
+    promptSnippet: "web_fetch(url) — fetch a URL and extract content as markdown",
+    executionMode: "parallel",
     parameters: Type.Object({
       url: Type.String({
         description: "The full URL to fetch (must start with http:// or https://)",
@@ -211,7 +213,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const { url, onlyMainContent = true } = params as {
         url: string;
         onlyMainContent?: boolean;
@@ -260,6 +262,8 @@ export default function (pi: ExtensionAPI) {
       "Search the web and return results with page content. " +
       "Each result includes title, URL, and extracted markdown content. " +
       "Use for finding information, documentation, or answers to questions.",
+    promptSnippet: "web_search(query, limit?) — search the web and get results with content",
+    executionMode: "parallel",
     parameters: Type.Object({
       query: Type.String({
         description: "The search query",
@@ -270,7 +274,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const { query, limit = DEFAULT_SEARCH_LIMIT } = params as {
         query: string;
         limit?: number;
@@ -331,6 +335,8 @@ export default function (pi: ExtensionAPI) {
       "Capture a screenshot of a web page. Returns a URL to the " +
       "screenshot image. Use for visual inspection of pages, UIs, " +
       "or layouts.",
+    promptSnippet: "web_screenshot(url, fullPage?) — capture a page screenshot",
+    executionMode: "parallel",
     parameters: Type.Object({
       url: Type.String({
         description: "The full URL to screenshot (must start with http:// or https://)",
@@ -341,7 +347,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const { url, fullPage = true } = params as {
         url: string;
         fullPage?: boolean;
