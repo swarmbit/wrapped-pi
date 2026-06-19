@@ -1,0 +1,137 @@
+# ============================================================
+# Firecrawl Self-Hosted — Docker Compose for wpi
+# ============================================================
+# Runs a local Firecrawl instance with SearXNG for search,
+# using pre-built GHCR images. No need to clone any repo:
+#
+#   cp .env.example .env
+#   docker compose up -d
+#
+# Firecrawl API:    http://localhost:3002
+# SearXNG UI:       http://localhost:8081
+# SearXNG JSON API: http://localhost:8081/search?format=json&q=...
+#
+# Then point wpi at it via FIRECRAWL_BASE_URL (see wpi-firecrawl.yml)
+#
+# Based on the official docker-compose.yaml from firecrawl/firecrawl.
+# Uses pre-built images instead of building from source.
+# ============================================================
+
+name: firecrawl
+
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  REDIS_RATE_LIMIT_URL: redis://redis:6379
+  PLAYWRIGHT_MICROSERVICE_URL: http://playwright-service:3000/scrape
+  POSTGRES_USER: ${POSTGRES_USER:-firecrawl}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firecrawl}
+  POSTGRES_DB: ${POSTGRES_DB:-firecrawl}
+  POSTGRES_HOST: nuq-postgres
+  POSTGRES_PORT: 5432
+  USE_DB_AUTHENTICATION: "false"
+  NUM_WORKERS_PER_QUEUE: ${NUM_WORKERS_PER_QUEUE:-8}
+  CRAWL_CONCURRENT_REQUESTS: ${CRAWL_CONCURRENT_REQUESTS:-10}
+  MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-5}
+  BROWSER_POOL_SIZE: ${BROWSER_POOL_SIZE:-5}
+  BULL_AUTH_KEY: ${BULL_AUTH_KEY:-CHANGEME}
+
+services:
+  playwright-service:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    environment:
+      PORT: 3000
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-false}
+      MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
+    networks:
+      - backend
+    cpus: 2.0
+    mem_limit: 4G
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    environment:
+      <<: *common-env
+      HOST: "0.0.0.0"
+      PORT: 3002
+      ENV: local
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      # SearXNG as search backend (instead of Google)
+      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT:-http://searxng:8080}
+      SEARXNG_ENGINES: ${SEARXNG_ENGINES:-}
+      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-}
+    depends_on:
+      redis:
+        condition: service_started
+      playwright-service:
+        condition: service_started
+      nuq-postgres:
+        condition: service_started
+      searxng:
+        condition: service_started
+    ports:
+      - "${PORT:-3002}:3002"
+    networks:
+      - backend
+    cpus: 4.0
+    mem_limit: 8G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  searxng:
+    image: searxng/searxng:latest
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081/
+    ports:
+      - "${SEARXNG_PORT:-8081}:8080"
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  redis:
+    image: redis:alpine
+    networks:
+      - backend
+    command: redis-server --bind 0.0.0.0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  nuq-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-firecrawl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firecrawl}
+      POSTGRES_DB: ${POSTGRES_DB:-firecrawl}
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  backend:
+    driver: bridge

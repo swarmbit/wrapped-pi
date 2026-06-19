@@ -1,0 +1,40 @@
+# ============================================================
+# wpi config — Self-hosted Firecrawl integration
+# ============================================================
+# Drop this into your project as .pi/wpi.yml (or merge into
+# your existing wpi.yml) to point the web extension at a
+# self-hosted Firecrawl instance.
+#
+# Prerequisites:
+#   1. Start Firecrawl:  cd example/firecrawl && docker compose up -d
+#   2. Verify:           curl http://localhost:3002/v2/scrape ...
+#
+# No FIRECRAWL_API_KEY needed — self-hosted instances don't
+# require authentication by default.
+# ============================================================
+
+docker:
+  env:
+    # Point the web extension at your local Firecrawl instance
+    FIRECRAWL_BASE_URL: http://localhost:3002
+
+    # No API key required for self-hosted (leave empty)
+    # FIRECRAWL_API_KEY: ""
+
+    # Optional: restrict which domains the agent can fetch
+    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev
+
+    # Optional: cache TTL in seconds (default 300 = 5 min)
+    FIRECRAWL_CACHE_TTL: 600
+
+    # ── LLM verification (optional, defense in depth) ──────
+    # A tool-less guard LLM checks fetched content for prompt
+    # injection before it reaches the main agent. Fails open on
+    # errors so web access isn't blocked when the guard is down.
+    # Uses Pi's built-in auth — model must already be configured
+    # via /login or models.json.
+    #
+    # WEB_VERIFY_ENABLED: "true"
+    # WEB_VERIFY_MODEL: gpt-4o-mini
+    # WEB_VERIFY_MAX_CHARS: 5000
+    # WEB_VERIFY_TIMEOUT_MS: 10000

@@ -78,7 +78,13 @@ wpi dry-run            # print config and docker commands (debugging)
 │  │  /opt/pi-package/                       │  ◄── Baked  │
 │  │    ├── package.json                      │      into   │
 │  │    ├── extensions/                       │      image  │
-│  │    │   └── confirm-dangerous/           │             │
+│  │    │   ├── confirm-dangerous/           │             │
+│  │    │   ├── tool-sanitizer/              │             │
+│  │    │   ├── worktree/                    │             │
+│  │    │   ├── llm-log/                     │             │
+│  │    │   ├── tps/                         │             │
+│  │    │   ├── git-files/                   │             │
+│  │    │   └── web/                         │             │
 │  │    └── themes/                          │             │
 │  │        └── github.json                  │             │
 │  └─────────────────────────────────────────┘             │
@@ -304,11 +310,135 @@ If you need to run two agents on the same project simultaneously, that's a workf
 
 If you use pi both natively and in the container, they share the same config.
 
-## Safety
+## Bundled Extensions
 
-The default package includes a safety extension:
+The default package includes several extensions:
 
 - **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, etc.), writes to system paths, and modifications to the pi config directory
+- **tool-sanitizer** — Repairs malformed tool arguments before execution (disabled by default, toggle with `/tool-sanitizer:enable`)
+- **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
+- **llm-log** — Logs all LLM I/O as Markdown (`/llmlog on|off|status`)
+- **tps** — Displays tokens-per-second metrics after each agent run
+- **git-files** — TUI widget showing changed git files, with `/git-diff` picker
+- **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
+
+### Web Extension (Firecrawl)
+
+The **web** extension provides three LLM-callable tools backed by the [Firecrawl](https://firecrawl.dev) API:
+
+| Tool | Description |
+|------|-------------|
+| `web_fetch` | Fetch a URL and extract content as clean markdown |
+| `web_search` | Search the web and return results with page content |
+| `web_screenshot` | Capture a screenshot of a web page |
+
+**Configuration** (environment variables, set via `docker.env` in `wpi.yml` or passed at runtime):
+
+- `FIRECRAWL_API_KEY` — API key (required for cloud). If missing, tools return a helpful error.
+- `FIRECRAWL_BASE_URL` — Base URL for the Firecrawl API. Defaults to `https://api.firecrawl.dev` (cloud). Set to your self-hosted instance URL to use that instead.
+- `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (e.g. `github.com,docs.firecrawl.dev`). If set, only these domains (and their subdomains) may be fetched/screenshotted. Empty/unset = all domains allowed.
+- `FIRECRAWL_CACHE_TTL` — Cache time-to-live in seconds for repeated fetches. Default 300 (5 min). Set to 0 to disable caching.
+
+**Prompt injection defenses** (always active):
+- Fetched content is sanitized — HTML/XML tags stripped, `<web_content>` delimiter tags removed to prevent forgery
+- Content truncated to 50KB (`web_fetch`) / 2KB per result (`web_search`)
+- Content wrapped in `<web_content>` delimiters signaling the LLM it's external data
+- System prompt guidelines explicitly tell the LLM to treat web content as untrusted
+
+**LLM verification** (optional, opt-in):
+- `WEB_VERIFY_ENABLED` — Set to `"true"` to enable. Disabled by default.
+- `WEB_VERIFY_MODEL` — Model ID for the guard LLM (e.g. `gpt-4o-mini`). Must be a model already configured in Pi via `/login` or `models.json`. Uses Pi's built-in auth — **no separate API key or base URL needed**.
+- `WEB_VERIFY_MAX_CHARS` — Max chars sent to guard (default 5000). Injections are usually at the top.
+- `WEB_VERIFY_TIMEOUT_MS` — Guard request timeout (default 10000).
+
+When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. Uses Pi's `completeSimple()` API and model registry for authentication — the guard model must already be configured in Pi. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
+
+Check status at any time with the `/web:status` slash command.
+
+Example `wpi.yml` with Firecrawl cloud configured:
+
+```yaml
+docker:
+  env:
+    FIRECRAWL_API_KEY: fc-your-key-here
+    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev,stackoverflow.com
+    FIRECRAWL_CACHE_TTL: 600
+```
+
+### Self-Hosted Firecrawl
+
+Firecrawl is [AGPL-3.0](https://github.com/firecrawl/firecrawl/blob/main/LICENSE) licensed and free to self-host. This avoids API costs and keeps all data on your infrastructure. No API key required for self-hosted instances.
+
+A ready-to-use Docker Compose setup is included in `example/firecrawl/`. It runs Firecrawl **with SearXNG** for privacy-preserving search:
+
+```bash
+cd example/firecrawl
+cp .env.example .env          # adjust if needed (defaults work for local dev)
+docker compose up -d          # starts Firecrawl + SearXNG
+```
+
+Services started:
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Firecrawl API | `http://localhost:3002` | Scrape, search, screenshot endpoints |
+| SearXNG UI | `http://localhost:8081` | Search engine aggregation (Brave, Startpage, Wikipedia, Wolfram Alpha) |
+| Redis | (internal) | Firecrawl job queue |
+| PostgreSQL | (internal) | Firecrawl database |
+| Playwright | (internal) | Headless browser for JS-rendered pages |
+
+Then point wpi at it — copy `wpi-firecrawl.yml` to your project as `.pi/wpi.yml`:
+
+```yaml
+docker:
+  env:
+    FIRECRAWL_BASE_URL: http://localhost:3002
+    # No API key needed for self-hosted
+    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev
+    FIRECRAWL_CACHE_TTL: 600
+```
+
+Verify it's running:
+
+```bash
+# Test Firecrawl scrape
+curl -X POST http://localhost:3002/v2/scrape \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com", "formats": ["markdown"]}'
+
+# Test SearXNG search
+curl 'http://localhost:8081/search?format=json&q=pi+coding+agent'
+```
+
+#### SearXNG
+
+SearXNG is a privacy-focused metasearch engine that aggregates results from multiple search engines without tracking. It's included in the compose and wired to Firecrawl by default — the `/v2/search` endpoint uses SearXNG instead of Google.
+
+**Default engines** (enabled out of the box): Brave, Startpage, Wikipedia, Wikidata, Wolfram Alpha. Google/Bing/DuckDuckGo are disabled by default because they rate-limit or block self-hosted instances. You can enable them by editing `searxng-settings.yml`.
+
+**Customizing engines:** edit `example/firecrawl/searxng-settings.yml` and add an `engines` section:
+
+```yaml
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "your-secret-key"
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+```
+
+See `example/firecrawl/` for the full setup including `.env.example` with all configurable options.
 
 ## Development
 

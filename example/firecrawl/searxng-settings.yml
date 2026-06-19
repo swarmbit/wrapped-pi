@@ -1,0 +1,22 @@
+# ============================================================
+# SearXNG Settings — minimal config for Firecrawl integration
+# ============================================================
+# Enables JSON API format (required for Firecrawl to query it)
+# and binds to all interfaces so Firecrawl can reach it.
+# All other settings use SearXNG defaults (Brave, Startpage,
+# Wikipedia, Wikidata, Wolfram Alpha enabled by default).
+# ============================================================
+
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  # Secret key for the Flask session. Change this in production.
+  secret_key: "wpi-firecrawl-local-dev-key"
+
+search:
+  # Enable JSON format so Firecrawl can query the API
+  formats:
+    - html
+    - json
