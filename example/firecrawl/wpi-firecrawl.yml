@@ -31,15 +31,10 @@ docker:
     # A tool-less guard LLM checks fetched content for prompt
     # injection before it reaches the main agent. Fails open on
     # errors so web access isn't blocked when the guard is down.
+    # Uses Pi's built-in auth — model must already be configured
+    # via /login or models.json.
     #
     # WEB_VERIFY_ENABLED: "true"
-    # WEB_VERIFY_API_KEY: your-api-key
-    # WEB_VERIFY_BASE_URL: https://api.openai.com/v1
     # WEB_VERIFY_MODEL: gpt-4o-mini
     # WEB_VERIFY_MAX_CHARS: 5000
     # WEB_VERIFY_TIMEOUT_MS: 10000
-    #
-    # Or use a local model (Ollama):
-    # WEB_VERIFY_BASE_URL: http://localhost:11434/v1
-    # WEB_VERIFY_MODEL: llama3.2
-    # WEB_VERIFY_API_KEY: "ollama"

@@ -347,13 +347,11 @@ The **web** extension provides three LLM-callable tools backed by the [Firecrawl
 
 **LLM verification** (optional, opt-in):
 - `WEB_VERIFY_ENABLED` — Set to `"true"` to enable. Disabled by default.
-- `WEB_VERIFY_API_KEY` — API key for the guard model.
-- `WEB_VERIFY_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
-- `WEB_VERIFY_MODEL` — Model name (e.g. `gpt-4o-mini`, or a local model via `http://localhost:11434/v1` for Ollama).
+- `WEB_VERIFY_MODEL` — Model ID for the guard LLM (e.g. `gpt-4o-mini`). Must be a model already configured in Pi via `/login` or `models.json`. Uses Pi's built-in auth — **no separate API key or base URL needed**.
 - `WEB_VERIFY_MAX_CHARS` — Max chars sent to guard (default 5000). Injections are usually at the top.
 - `WEB_VERIFY_TIMEOUT_MS` — Guard request timeout (default 10000).
 
-When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
+When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. Uses Pi's `completeSimple()` API and model registry for authentication — the guard model must already be configured in Pi. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
 
 Check status at any time with the `/web:status` slash command.
 

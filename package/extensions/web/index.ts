@@ -42,17 +42,19 @@
 // LLM verification (optional, opt-in):
 //   WEB_VERIFY_ENABLED       — Set to "true" to enable LLM verification.
 //                              Disabled by default.
-//   WEB_VERIFY_API_KEY       — API key for the guard model.
-//   WEB_VERIFY_BASE_URL      — OpenAI-compatible API base URL.
-//                              Defaults to https://api.openai.com/v1
-//   WEB_VERIFY_MODEL         — Model name (e.g. "gpt-4o-mini").
+//   WEB_VERIFY_MODEL         — Model ID for the guard LLM (e.g. "gpt-4o-mini").
+//                              Must be a model already configured in Pi via
+//                              /login or models.json. Uses Pi's auth — no
+//                              separate API key or base URL needed.
 //   WEB_VERIFY_MAX_CHARS     — Max chars sent to guard (default 5000).
 //                              Injections are usually at the top.
 //   WEB_VERIFY_TIMEOUT_MS    — Guard request timeout (default 10000).
 // ============================================================
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { completeSimple } from "@earendil-works/pi-ai";
+import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
 
 // ── Configuration ───────────────────────────────────────────
 
@@ -76,9 +78,7 @@ const MAX_SEARCH_RESULT_CHARS = 2_000;
 
 // ── LLM verification config ─────────────────────────────────
 const VERIFY_ENABLED = process.env.WEB_VERIFY_ENABLED === "true";
-const VERIFY_API_KEY = process.env.WEB_VERIFY_API_KEY ?? "";
-const VERIFY_BASE_URL = (process.env.WEB_VERIFY_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-const VERIFY_MODEL = process.env.WEB_VERIFY_MODEL ?? "gpt-4o-mini";
+const VERIFY_MODEL_ID = process.env.WEB_VERIFY_MODEL ?? "";
 const VERIFY_MAX_CHARS = parseInt(process.env.WEB_VERIFY_MAX_CHARS ?? "5000", 10) || 5000;
 const VERIFY_TIMEOUT_MS = parseInt(process.env.WEB_VERIFY_TIMEOUT_MS ?? "10000", 10) || 10000;
 
@@ -274,7 +274,11 @@ export function parseVerificationResponse(response: string): VerificationResult 
 
 /**
  * Send content to a guard LLM for prompt injection verification.
- * Uses an OpenAI-compatible chat completions endpoint.
+ * Uses Pi's built-in model registry and completeSimple() from pi-ai,
+ * so authentication is handled by Pi — no separate API key needed.
+ *
+ * Requires WEB_VERIFY_MODEL to be set to a model ID already configured
+ * in Pi (via /login or models.json).
  *
  * Returns:
  *   - {safe: true} if content is clean or verification is disabled
@@ -285,55 +289,61 @@ async function verifyContent(
   content: string,
   source: string,
   signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
 ): Promise<VerificationResult> {
   if (!VERIFY_ENABLED) {
     return { safe: true, reason: "verification disabled" };
   }
 
-  if (!VERIFY_API_KEY) {
-    return { safe: true, reason: "WEB_VERIFY_API_KEY not set" };
+  if (!VERIFY_MODEL_ID) {
+    return { safe: true, reason: "WEB_VERIFY_MODEL not set" };
+  }
+
+  // Find the guard model in Pi's model registry
+  const model = ctx.modelRegistry.getAll().find((m) => m.id === VERIFY_MODEL_ID);
+  if (!model) {
+    return { safe: true, reason: `model "${VERIFY_MODEL_ID}" not found in Pi registry` };
+  }
+
+  // Resolve API key via Pi's auth system
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok || !auth.apiKey) {
+    return { safe: true, reason: `no API key for model "${VERIFY_MODEL_ID}"` };
   }
 
   // Sample first N chars — injections are usually at the top
   const sample = content.slice(0, VERIFY_MAX_CHARS);
 
+  // Build the guard context — no tools, just system prompt + user message
+  const guardContext: Context = {
+    systemPrompt: GUARD_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `Source: ${source}\n\nContent to verify:\n\n${sample}`,
+        timestamp: Date.now(),
+      } as UserMessage,
+    ],
+  };
+
   // Combine with abort signal + timeout
   const timeoutController = new AbortController();
   const timeoutId = setTimeout(() => timeoutController.abort(), VERIFY_TIMEOUT_MS);
-
-  // If caller's signal aborts, abort our timeout too
   if (signal) {
     signal.addEventListener("abort", () => timeoutController.abort(), { once: true });
   }
 
   try {
-    const response = await fetch(`${VERIFY_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${VERIFY_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: VERIFY_MODEL,
-        messages: [
-          { role: "system", content: GUARD_SYSTEM_PROMPT },
-          { role: "user", content: `Source: ${source}\n\nContent to verify:\n\n${sample}` },
-        ],
-        temperature: 0,
-        max_tokens: 200,
-      }),
+    const response = await completeSimple(model, guardContext, {
+      apiKey: auth.apiKey,
       signal: timeoutController.signal,
+      maxTokens: 200,
+      temperature: 0,
     });
 
-    if (!response.ok) {
-      return { safe: true, reason: `guard API error: HTTP ${response.status}` };
-    }
-
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-
-    const guardResponse = data?.choices?.[0]?.message?.content ?? "";
+    // Extract text from the assistant response
+    const textBlock = response.content.find((c): c is TextContent => c.type === "text");
+    const guardResponse = textBlock?.text ?? "";
     if (!guardResponse) {
       return { safe: true, reason: "guard returned empty response" };
     }
@@ -418,7 +428,7 @@ export default function (pi: ExtensionAPI) {
           : "disabled";
 
       const verifyStatus = VERIFY_ENABLED
-        ? `enabled (model: ${VERIFY_MODEL}, max ${VERIFY_MAX_CHARS} chars)`
+        ? `enabled (model: ${VERIFY_MODEL_ID || "not set"}, max ${VERIFY_MAX_CHARS} chars)`
         : "disabled";
 
       ctx.ui.notify(
@@ -454,7 +464,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { url, onlyMainContent = true } = params as {
         url: string;
         onlyMainContent?: boolean;
@@ -497,7 +507,7 @@ export default function (pi: ExtensionAPI) {
           : sanitized;
 
       // LLM verification (if enabled)
-      const verification = await verifyContent(truncated, url, signal);
+      const verification = await verifyContent(truncated, url, signal, ctx);
       if (!verification.safe) {
         return errorResult(
           `Content from ${url} blocked by verification: ${verification.reason}. ` +
@@ -537,7 +547,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { query, limit = DEFAULT_SEARCH_LIMIT } = params as {
         query: string;
         limit?: number;
@@ -584,7 +594,7 @@ export default function (pi: ExtensionAPI) {
           : "No results found.";
 
       // LLM verification (if enabled)
-      const verification = await verifyContent(rawOutput, `search: "${query}"`, signal);
+      const verification = await verifyContent(rawOutput, `search: "${query}"`, signal, ctx);
       if (!verification.safe) {
         return errorResult(
           `Search results for "${query}" blocked by verification: ${verification.reason}. ` +

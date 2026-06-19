@@ -17,6 +17,12 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   default: {},
 }));
 
+// Mock @earendil-works/pi-ai — completeSimple is only called at runtime
+// with a real model registry, not in unit tests.
+vi.mock("@earendil-works/pi-ai", () => ({
+  completeSimple: vi.fn(),
+}));
+
 // Mock typebox — only used for tool schema registration at runtime,
 // not needed for the pure helper functions under test.
 vi.mock("typebox", () => ({
