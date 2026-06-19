@@ -371,13 +371,23 @@ docker:
 
 Firecrawl is [AGPL-3.0](https://github.com/firecrawl/firecrawl/blob/main/LICENSE) licensed and free to self-host. This avoids API costs and keeps all data on your infrastructure. No API key required for self-hosted instances.
 
-A ready-to-use Docker Compose setup is included in `example/firecrawl/`:
+A ready-to-use Docker Compose setup is included in `example/firecrawl/`. It runs Firecrawl **with SearXNG** for privacy-preserving search:
 
 ```bash
 cd example/firecrawl
 cp .env.example .env          # adjust if needed (defaults work for local dev)
-docker compose up -d          # starts Firecrawl at http://localhost:3002
+docker compose up -d          # starts Firecrawl + SearXNG
 ```
+
+Services started:
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Firecrawl API | `http://localhost:3002` | Scrape, search, screenshot endpoints |
+| SearXNG UI | `http://localhost:8081` | Search engine aggregation (Brave, Startpage, Wikipedia, Wolfram Alpha) |
+| Redis | (internal) | Firecrawl job queue |
+| PostgreSQL | (internal) | Firecrawl database |
+| Playwright | (internal) | Headless browser for JS-rendered pages |
 
 Then point wpi at it — copy `wpi-firecrawl.yml` to your project as `.pi/wpi.yml`:
 
@@ -393,9 +403,41 @@ docker:
 Verify it's running:
 
 ```bash
+# Test Firecrawl scrape
 curl -X POST http://localhost:3002/v2/scrape \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com", "formats": ["markdown"]}'
+
+# Test SearXNG search
+curl 'http://localhost:8081/search?format=json&q=pi+coding+agent'
+```
+
+#### SearXNG
+
+SearXNG is a privacy-focused metasearch engine that aggregates results from multiple search engines without tracking. It's included in the compose and wired to Firecrawl by default — the `/v2/search` endpoint uses SearXNG instead of Google.
+
+**Default engines** (enabled out of the box): Brave, Startpage, Wikipedia, Wikidata, Wolfram Alpha. Google/Bing/DuckDuckGo are disabled by default because they rate-limit or block self-hosted instances. You can enable them by editing `searxng-settings.yml`.
+
+**Customizing engines:** edit `example/firecrawl/searxng-settings.yml` and add an `engines` section:
+
+```yaml
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "your-secret-key"
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
 ```
 
 See `example/firecrawl/` for the full setup including `.env.example` with all configurable options.

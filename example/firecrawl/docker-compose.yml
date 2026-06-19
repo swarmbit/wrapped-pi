@@ -1,13 +1,16 @@
 # ============================================================
 # Firecrawl Self-Hosted — Docker Compose for wpi
 # ============================================================
-# Runs a local Firecrawl instance using pre-built GHCR images.
-# No need to clone the Firecrawl repo — just:
+# Runs a local Firecrawl instance with SearXNG for search,
+# using pre-built GHCR images. No need to clone any repo:
 #
 #   cp .env.example .env
 #   docker compose up -d
 #
-# Firecrawl API will be available at http://localhost:3002
+# Firecrawl API:    http://localhost:3002
+# SearXNG UI:       http://localhost:8081
+# SearXNG JSON API: http://localhost:8081/search?format=json&q=...
+#
 # Then point wpi at it via FIRECRAWL_BASE_URL (see wpi-firecrawl.yml)
 #
 # Based on the official docker-compose.yaml from firecrawl/firecrawl.
@@ -63,7 +66,8 @@ services:
       ENV: local
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT:-}
+      # SearXNG as search backend (instead of Google)
+      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT:-http://searxng:8080}
       SEARXNG_ENGINES: ${SEARXNG_ENGINES:-}
       SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-}
     depends_on:
@@ -72,6 +76,8 @@ services:
       playwright-service:
         condition: service_started
       nuq-postgres:
+        condition: service_started
+      searxng:
         condition: service_started
     ports:
       - "${PORT:-3002}:3002"
@@ -84,6 +90,22 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  searxng:
+    image: searxng/searxng:latest
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081/
+    ports:
+      - "${SEARXNG_PORT:-8081}:8080"
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   redis:
     image: redis:alpine
