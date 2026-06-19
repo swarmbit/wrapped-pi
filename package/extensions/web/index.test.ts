@@ -29,7 +29,7 @@ vi.mock("typebox", () => ({
   },
 }));
 
-import { isValidUrl, getHostname, isDomainAllowed, sanitizeContent, wrapContent } from "./index";
+import { isValidUrl, getHostname, isDomainAllowed, sanitizeContent, wrapContent, parseVerificationResponse } from "./index";
 
 // ── isValidUrl ──────────────────────────────────────────────
 
@@ -237,5 +237,68 @@ describe("wrapContent", () => {
     const result = wrapContent("", "https://example.com");
     expect(result).toContain("<web_content source=\"https://example.com\">");
     expect(result).toContain("</web_content>");
+  });
+});
+
+// ── parseVerificationResponse ───────────────────────────────
+
+describe("parseVerificationResponse", () => {
+  it("parses a clean safe response", () => {
+    const result = parseVerificationResponse('{"safe": true, "reason": "clean content"}');
+    expect(result.safe).toBe(true);
+    expect(result.reason).toBe("clean content");
+  });
+
+  it("parses an unsafe response", () => {
+    const result = parseVerificationResponse('{"safe": false, "reason": "contains ignore previous instructions"}');
+    expect(result.safe).toBe(false);
+    expect(result.reason).toBe("contains ignore previous instructions");
+  });
+
+  it("extracts JSON from markdown code block", () => {
+    const result = parseVerificationResponse('```json\n{"safe": true, "reason": "ok"}\n```');
+    expect(result.safe).toBe(true);
+    expect(result.reason).toBe("ok");
+  });
+
+  it("extracts JSON from plain code block", () => {
+    const result = parseVerificationResponse('```\n{"safe": false, "reason": "injection"}\n```');
+    expect(result.safe).toBe(false);
+    expect(result.reason).toBe("injection");
+  });
+
+  it("extracts JSON from surrounding text", () => {
+    const result = parseVerificationResponse('The analysis shows: {"safe": true, "reason": "no issues"} as expected.');
+    expect(result.safe).toBe(true);
+    expect(result.reason).toBe("no issues");
+  });
+
+  it("fails open on completely unparseable response", () => {
+    const result = parseVerificationResponse("This is not JSON at all.");
+    expect(result.safe).toBe(true);
+    expect(result.reason).toContain("unparseable");
+  });
+
+  it("fails open on empty response", () => {
+    const result = parseVerificationResponse("");
+    expect(result.safe).toBe(true);
+    expect(result.reason).toContain("unparseable");
+  });
+
+  it("coerces missing reason to unknown", () => {
+    const result = parseVerificationResponse('{"safe": true}');
+    expect(result.safe).toBe(true);
+    expect(result.reason).toBe("unknown");
+  });
+
+  it("coerces missing safe to true (fail open)", () => {
+    const result = parseVerificationResponse('{"reason": "some content"}');
+    expect(result.safe).toBe(true);
+  });
+
+  it("coerces non-boolean safe to true (fail open)", () => {
+    const result = parseVerificationResponse('{"safe": "yes", "reason": "looks fine"}');
+    expect(result.safe).toBe(true);
+    expect(result.reason).toBe("looks fine");
   });
 });

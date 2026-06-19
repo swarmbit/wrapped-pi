@@ -339,6 +339,22 @@ The **web** extension provides three LLM-callable tools backed by the [Firecrawl
 - `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (e.g. `github.com,docs.firecrawl.dev`). If set, only these domains (and their subdomains) may be fetched/screenshotted. Empty/unset = all domains allowed.
 - `FIRECRAWL_CACHE_TTL` — Cache time-to-live in seconds for repeated fetches. Default 300 (5 min). Set to 0 to disable caching.
 
+**Prompt injection defenses** (always active):
+- Fetched content is sanitized — HTML/XML tags stripped, `<web_content>` delimiter tags removed to prevent forgery
+- Content truncated to 50KB (`web_fetch`) / 2KB per result (`web_search`)
+- Content wrapped in `<web_content>` delimiters signaling the LLM it's external data
+- System prompt guidelines explicitly tell the LLM to treat web content as untrusted
+
+**LLM verification** (optional, opt-in):
+- `WEB_VERIFY_ENABLED` — Set to `"true"` to enable. Disabled by default.
+- `WEB_VERIFY_API_KEY` — API key for the guard model.
+- `WEB_VERIFY_BASE_URL` — OpenAI-compatible API base URL. Defaults to `https://api.openai.com/v1`.
+- `WEB_VERIFY_MODEL` — Model name (e.g. `gpt-4o-mini`, or a local model via `http://localhost:11434/v1` for Ollama).
+- `WEB_VERIFY_MAX_CHARS` — Max chars sent to guard (default 5000). Injections are usually at the top.
+- `WEB_VERIFY_TIMEOUT_MS` — Guard request timeout (default 10000).
+
+When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
+
 Check status at any time with the `/web:status` slash command.
 
 Example `wpi.yml` with Firecrawl cloud configured:
