@@ -341,7 +341,7 @@ The **web** extension provides three LLM-callable tools backed by the [Firecrawl
 
 Check status at any time with the `/web:status` slash command.
 
-Example `wpi.yml` with Firecrawl configured:
+Example `wpi.yml` with Firecrawl cloud configured:
 
 ```yaml
 docker:
@@ -350,6 +350,39 @@ docker:
     FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev,stackoverflow.com
     FIRECRAWL_CACHE_TTL: 600
 ```
+
+### Self-Hosted Firecrawl
+
+Firecrawl is [AGPL-3.0](https://github.com/firecrawl/firecrawl/blob/main/LICENSE) licensed and free to self-host. This avoids API costs and keeps all data on your infrastructure. No API key required for self-hosted instances.
+
+A ready-to-use Docker Compose setup is included in `example/firecrawl/`:
+
+```bash
+cd example/firecrawl
+cp .env.example .env          # adjust if needed (defaults work for local dev)
+docker compose up -d          # starts Firecrawl at http://localhost:3002
+```
+
+Then point wpi at it — copy `wpi-firecrawl.yml` to your project as `.pi/wpi.yml`:
+
+```yaml
+docker:
+  env:
+    FIRECRAWL_BASE_URL: http://localhost:3002
+    # No API key needed for self-hosted
+    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev
+    FIRECRAWL_CACHE_TTL: 600
+```
+
+Verify it's running:
+
+```bash
+curl -X POST http://localhost:3002/v2/scrape \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com", "formats": ["markdown"]}'
+```
+
+See `example/firecrawl/` for the full setup including `.env.example` with all configurable options.
 
 ## Development
 
