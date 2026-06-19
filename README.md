@@ -78,7 +78,13 @@ wpi dry-run            # print config and docker commands (debugging)
 │  │  /opt/pi-package/                       │  ◄── Baked  │
 │  │    ├── package.json                      │      into   │
 │  │    ├── extensions/                       │      image  │
-│  │    │   └── confirm-dangerous/           │             │
+│  │    │   ├── confirm-dangerous/           │             │
+│  │    │   ├── tool-sanitizer/              │             │
+│  │    │   ├── worktree/                    │             │
+│  │    │   ├── llm-log/                     │             │
+│  │    │   ├── tps/                         │             │
+│  │    │   ├── git-files/                   │             │
+│  │    │   └── web/                         │             │
 │  │    └── themes/                          │             │
 │  │        └── github.json                  │             │
 │  └─────────────────────────────────────────┘             │
@@ -304,11 +310,46 @@ If you need to run two agents on the same project simultaneously, that's a workf
 
 If you use pi both natively and in the container, they share the same config.
 
-## Safety
+## Bundled Extensions
 
-The default package includes a safety extension:
+The default package includes several extensions:
 
 - **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, etc.), writes to system paths, and modifications to the pi config directory
+- **tool-sanitizer** — Repairs malformed tool arguments before execution (disabled by default, toggle with `/tool-sanitizer:enable`)
+- **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
+- **llm-log** — Logs all LLM I/O as Markdown (`/llmlog on|off|status`)
+- **tps** — Displays tokens-per-second metrics after each agent run
+- **git-files** — TUI widget showing changed git files, with `/git-diff` picker
+- **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
+
+### Web Extension (Firecrawl)
+
+The **web** extension provides three LLM-callable tools backed by the [Firecrawl](https://firecrawl.dev) API:
+
+| Tool | Description |
+|------|-------------|
+| `web_fetch` | Fetch a URL and extract content as clean markdown |
+| `web_search` | Search the web and return results with page content |
+| `web_screenshot` | Capture a screenshot of a web page |
+
+**Configuration** (environment variables, set via `docker.env` in `wpi.yml` or passed at runtime):
+
+- `FIRECRAWL_API_KEY` — API key (required for cloud). If missing, tools return a helpful error.
+- `FIRECRAWL_BASE_URL` — Base URL for the Firecrawl API. Defaults to `https://api.firecrawl.dev` (cloud). Set to your self-hosted instance URL to use that instead.
+- `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (e.g. `github.com,docs.firecrawl.dev`). If set, only these domains (and their subdomains) may be fetched/screenshotted. Empty/unset = all domains allowed.
+- `FIRECRAWL_CACHE_TTL` — Cache time-to-live in seconds for repeated fetches. Default 300 (5 min). Set to 0 to disable caching.
+
+Check status at any time with the `/web:status` slash command.
+
+Example `wpi.yml` with Firecrawl configured:
+
+```yaml
+docker:
+  env:
+    FIRECRAWL_API_KEY: fc-your-key-here
+    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev,stackoverflow.com
+    FIRECRAWL_CACHE_TTL: 600
+```
 
 ## Development
 
