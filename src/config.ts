@@ -60,7 +60,7 @@ export function debugLog(...args: unknown[]): void {
 // ── Package constants ──────────────────────────────────────────
 
 /** Pi version shipped by this version of wpi. */
-export const PI_VERSION = "0.79.1";
+export const PI_VERSION = "0.80.2";
 
 /** Docker image tag derived from the pi version. */
 export const PI_IMAGE = `pi-agent:${PI_VERSION}`;

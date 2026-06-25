@@ -280,4 +280,121 @@ describe("sanitizeToolInput", () => {
 		const result = sanitizeToolInput(input, schema, "test");
 		expect(result.changed).toBe(false);
 	});
+
+	// ── Unknown property removal ──────────────────────────
+
+	describe("unknown property removal", () => {
+		it("removes top-level extra properties not in the schema", () => {
+			const schema = Type.Object({
+				path: Type.String(),
+			});
+			const input = {
+				path: "file.ts",
+				bogus: "nope",
+				extra: 42,
+			};
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.repairs).toContain("test.bogus: removed unknown property (not in schema)");
+			expect(result.repairs).toContain("test.extra: removed unknown property (not in schema)");
+			expect(result.value).toEqual({ path: "file.ts" });
+		});
+
+		it("removes extra properties recursively from nested objects", () => {
+			const inner = Type.Object({ x: Type.Number() });
+			const schema = Type.Object({ data: inner });
+			const input = {
+				data: { x: 1, y: 2, z: 3 },
+				stray: true,
+			};
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.value).toEqual({ data: { x: 1 } });
+			expect(result.repairs).toContain("test.stray: removed unknown property (not in schema)");
+			expect(result.repairs).toContain("test.data.y: removed unknown property (not in schema)");
+			expect(result.repairs).toContain("test.data.z: removed unknown property (not in schema)");
+		});
+
+		it("removes unknown properties from object array items", () => {
+			const item = Type.Object({ id: Type.String() });
+			const schema = Type.Object({ items: Type.Array(item) });
+			const input = {
+				items: [
+					{ id: "a", junk: 1 },
+					{ id: "b" },
+				],
+			};
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.value).toEqual({
+				items: [{ id: "a" }, { id: "b" }],
+			});
+			expect(result.repairs).toContain("test.items[0].junk: removed unknown property (not in schema)");
+		});
+
+		it("keeps extra properties when additionalProperties is true", () => {
+			const schema = Type.Object(
+				{ name: Type.String() },
+				{ additionalProperties: true },
+			);
+			const input = { name: "x", extra: 1 };
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(false);
+			expect(result.value).toEqual({ name: "x", extra: 1 });
+		});
+
+		it("respects explicit additionalProperties: false", () => {
+			const schema = Type.Object(
+				{ name: Type.String() },
+				{ additionalProperties: false },
+			);
+			const input = { name: "x", extra: 1 };
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.value).toEqual({ name: "x" });
+		});
+
+		it("keeps optional declared properties", () => {
+			const schema = Type.Object({
+				a: Type.String(),
+				b: Type.Optional(Type.Number()),
+			});
+			const input = { a: "hi", b: 3 };
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(false);
+			expect(result.value).toEqual({ a: "hi", b: 3 });
+		});
+
+		it("keeps pattern-matching properties via patternProperties", () => {
+			const schema: any = {
+				type: "object",
+				properties: { name: { type: "string" } },
+				patternProperties: { "^x-": { type: "string" } },
+			};
+			const input = { name: "n", "x-extra": "v", bogus: 1 };
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.value).toEqual({ name: "n", "x-extra": "v" });
+			expect(result.repairs).toContain("test.bogus: removed unknown property (not in schema)");
+		});
+
+		it("removes unknown keys from intersect schemas (union of members)", () => {
+			const schema = Type.Intersect([
+				Type.Object({ a: Type.String() }),
+				Type.Object({ b: Type.Number() }),
+			]);
+			const input = { a: "x", b: 2, c: true };
+			const result = sanitizeToolInput(input, schema, "test");
+			expect(result.changed).toBe(true);
+			expect(result.value).toEqual({ a: "x", b: 2 });
+			expect(result.repairs).toContain("test.c: removed unknown property (not in schema)");
+		});
+
+		it("does not remove extras when there is no schema", () => {
+			const input = { path: "f.ts", bogus: 1 };
+			const result = sanitizeToolInput(input, undefined, "test");
+			// No schema -> heuristic path does not strip unknown keys
+			expect(result.value).toEqual({ path: "f.ts", bogus: 1 });
+		});
+	});
 });

@@ -161,7 +161,7 @@ describe("formatMessage — content block differentiation", () => {
 		);
 		expect(md).toContain("<details>");
 		expect(md).toContain("Thinking");
-		expect(md).toContain("chars</summary>");
+		expect(md).toContain("chars)</summary>");
 		expect(md).toContain("let me think...");
 	});
 

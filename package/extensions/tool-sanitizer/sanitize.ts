@@ -31,7 +31,9 @@ export interface SanitizeResult {
  *       string fields.
  *     - Properties expected to be objects/arrays but arriving as strings:
  *       try JSON.parse (with light repair for trailing commas etc.).
- *     - Unknown or invalid properties: remove them.
+ *     - Unknown properties not declared in the schema: remove them
+ *       (unless the schema explicitly allows additionalProperties).
+ *     - Simple type coercions (number -> string etc.).
  *  3. Never block — if we can't fix it, leave it and let pi's own
  *     validation report the error.
  */
@@ -94,7 +96,12 @@ function walkSchema(
 	const kind = s[Symbol.toStringTag] ?? s.kind;
 
 	// ── Object schema ────────────────────────────────────
-	if (kind === "Object" || kind === "Intersect" || (s.type === "object" && s.properties)) {
+	if (
+		kind === "Object" ||
+		kind === "Intersect" ||
+		Array.isArray(s.allOf) ||
+		(s.type === "object" && s.properties)
+	) {
 		if (typeof value !== "object" || value === null || Array.isArray(value)) {
 			// Try parsing if it's a string
 			if (typeof value === "string") {
@@ -112,13 +119,16 @@ function walkSchema(
 
 		const obj = { ...(value as Record<string, unknown>) };
 
-		if (kind === "Intersect" && Array.isArray(s.allOf)) {
-			// Walk each sub-schema
+		if (Array.isArray(s.allOf)) {
+			// Intersect schema: walk each member, then strip keys declared nowhere.
 			for (const sub of s.allOf) {
-				walkObjectProperties(obj, sub, path, repairs);
+				walkObjectProperties(obj, sub as TSchema, path, repairs);
 			}
+			removeUnknownKeysIntersect(obj, s.allOf as TSchema[], path, repairs);
 		} else if (s.properties) {
 			walkObjectProperties(obj, schema, path, repairs);
+			// Remove properties not declared in the object schema
+			removeUnknownKeys(obj, getAllowedInfo(schema), path, repairs);
 		}
 
 		return obj;
@@ -147,16 +157,18 @@ function walkSchema(
 			const itemsSchema = s.items as TSchema;
 			const itemKind = (itemsSchema as any)[Symbol.toStringTag] ?? (itemsSchema as any).kind;
 
-			// If items are objects, drop non-object entries and entries missing required fields
+			// If items are objects, drop non-object entries and entries missing required
+			// fields, then walk each survivor to strip unknown properties and repair.
 			if (
 				itemKind === "Object" ||
 				(itemsSchema as any).type === "object"
 			) {
 				const required = getRequiredFields(itemsSchema);
-				const filtered = arr.filter((item, i) => {
+				const kept: unknown[] = [];
+				arr.forEach((item, i) => {
 					if (item === null || typeof item !== "object" || Array.isArray(item)) {
 						repairs.push(`${path}[${i}]: dropped non-object entry (${prettyType(item)})`);
-						return false;
+						return;
 					}
 					// Check required string fields
 					for (const field of required) {
@@ -164,16 +176,16 @@ function walkSchema(
 						const isStringField = fieldSchema?.type === "string";
 						if (!(field in (item as Record<string, unknown>))) {
 							repairs.push(`${path}[${i}]: dropped object missing required field "${field}"`);
-							return false;
+							return;
 						}
 						if (isStringField && typeof (item as Record<string, unknown>)[field] !== "string") {
 							repairs.push(`${path}[${i}]: dropped object with non-string required field "${field}" (${prettyType((item as Record<string, unknown>)[field])})`);
-							return false;
+							return;
 						}
 					}
-					return true;
+					kept.push(walkSchema(item, itemsSchema, `${path}[${i}]`, repairs));
 				});
-				return filtered;
+				return kept;
 			}
 
 			// Generic: walk each item against items schema
@@ -268,6 +280,110 @@ function walkObjectProperties(
 		if (repaired !== original) {
 			obj[key] = repaired;
 		}
+	}
+}
+
+// ── Unknown-property removal ─────────────────────────────────
+
+interface AllowedInfo {
+	/** Property names explicitly declared in `properties`. */
+	properties: Set<string>;
+	/** True only when the schema explicitly allows extra properties. */
+	allowAdditional: boolean;
+	/** patternProperties entries compiled to RegExp. */
+	patterns: { regex: RegExp; schema: TSchema }[];
+}
+
+/**
+ * Build a description of which property names a schema accepts.
+ *
+ * Following the sanitizer's strict stance, `additionalProperties: undefined`
+ * is treated as DISALLOW (we remove undeclared keys). Only an explicit
+ * `additionalProperties: true` or a sub-schema opts in to keeping extras.
+ */
+function getAllowedInfo(schema: TSchema): AllowedInfo {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const s = schema as any;
+	const properties = new Set<string>(Object.keys(s.properties ?? {}));
+
+	const ap = s.additionalProperties;
+	const allowAdditional =
+		ap === true || (ap !== undefined && ap !== false && typeof ap === "object");
+
+	const patterns: { regex: RegExp; schema: TSchema }[] = [];
+	if (s.patternProperties && typeof s.patternProperties === "object") {
+		for (const [pattern, patSchema] of Object.entries(s.patternProperties)) {
+			const regex = safeRegExp(pattern);
+			if (regex) {
+				patterns.push({ regex, schema: patSchema as TSchema });
+			}
+		}
+	}
+
+	return { properties, allowAdditional, patterns };
+}
+
+/** Whether `key` is accepted by a single schema's allowed-info. */
+function isAllowedByKey(key: string, info: AllowedInfo): boolean {
+	if (info.properties.has(key)) return true;
+	if (info.allowAdditional) return true;
+	for (const p of info.patterns) {
+		try {
+			if (p.regex.test(key)) return true;
+		} catch {
+			// Ignore broken regex — treat as no match
+		}
+	}
+	return false;
+}
+
+/**
+ * Remove object keys that are not declared in the schema's `properties`
+ * (and not allowed via additionalProperties / patternProperties).
+ */
+function removeUnknownKeys(
+	obj: Record<string, unknown>,
+	info: AllowedInfo,
+	path: string,
+	repairs: string[],
+): void {
+	if (info.allowAdditional) return;
+	for (const key of Object.keys(obj)) {
+		if (isAllowedByKey(key, info)) continue;
+		repairs.push(`${path}.${key}: removed unknown property (not in schema)`);
+		delete obj[key];
+	}
+}
+
+/**
+ * Remove object keys that are not declared in ANY member of an intersect.
+ * A key is kept if at least one member declares it (or allows it via
+ * additionalProperties / patternProperties).
+ */
+function removeUnknownKeysIntersect(
+	obj: Record<string, unknown>,
+	members: TSchema[],
+	path: string,
+	repairs: string[],
+): void {
+	const infos = members.map(getAllowedInfo);
+	// If any member explicitly allows additional properties, keep everything.
+	if (infos.some((i) => i.allowAdditional)) return;
+
+	for (const key of Object.keys(obj)) {
+		const allowedByAny = infos.some((info) => isAllowedByKey(key, info));
+		if (allowedByAny) continue;
+		repairs.push(`${path}.${key}: removed unknown property (not in schema)`);
+		delete obj[key];
+	}
+}
+
+/** Compile a JSON Schema pattern into a RegExp, returning null on failure. */
+function safeRegExp(pattern: string): RegExp | null {
+	try {
+		return new RegExp(pattern);
+	} catch {
+		return null;
 	}
 }
 
