@@ -12,6 +12,7 @@ import { PiContainerConfig, PI_VERSION, PI_IMAGE } from "./config";
 
 function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConfig {
   return {
+    runtimeMode: "docker",
     piVersion: PI_VERSION,
     ports: [],
     env: {},
@@ -33,6 +34,7 @@ interface FullConfig extends PiContainerConfig {
 
 function makeFullConfig(overrides: Partial<FullConfig> = {}): FullConfig {
   return {
+    runtimeMode: "docker",
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],

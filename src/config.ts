@@ -11,6 +11,8 @@
 //   4. (none — no built-in defaults for ports/env/mounts)
 //
 // Config file schema:
+//   runtime:
+//     mode: docker         # docker | nono (default: docker)
 //   pi:
 //     version: 0.83.0      # override pi version (default: baked-in)
 //   docker:
@@ -67,6 +69,23 @@ export const PI_IMAGE = `pi-agent:${PI_VERSION}`;
 
 // ── Types ──────────────────────────────────────────────────────
 
+/** Runtime backend modes supported by wpi. */
+export const RUNTIME_MODES = ["docker", "nono"] as const;
+export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+
+/** Default runtime mode. Docker remains the default for backwards compatibility. */
+export const DEFAULT_RUNTIME_MODE: RuntimeMode = "docker";
+
+/** Validate a raw runtime.mode value from config or CLI. Throws on invalid input. */
+export function parseRuntimeMode(value: string, source: string): RuntimeMode {
+  if ((RUNTIME_MODES as readonly string[]).includes(value)) {
+    return value as RuntimeMode;
+  }
+  throw new Error(
+    `Invalid runtime mode "${value}" in ${source}. Expected one of: ${RUNTIME_MODES.join(", ")}.`
+  );
+}
+
 export interface PortMapping {
   /** Host port */
   host: number;
@@ -94,6 +113,8 @@ export interface VolumeMapping {
 
 /** User-configurable settings (from wpi.yml). */
 export interface PiContainerConfig {
+  /** Runtime backend mode (runtime.mode). Defaults to "docker". */
+  runtimeMode: RuntimeMode;
   /** Pi version to use (pi.version). Defaults to the version baked into this wpi release. */
   piVersion: string;
   ports: PortMapping[];
@@ -129,6 +150,8 @@ export interface LoadConfigOptions {
   homeDir?: string;
   /** Port mappings from CLI -p flags (highest precedence). */
   cliPorts?: string[];
+  /** Runtime mode from CLI --mode flag (highest precedence). Overrides config files; never written back. */
+  cliMode?: string;
   /** Enable debug logging. */
   debug?: boolean;
 }
@@ -136,6 +159,10 @@ export interface LoadConfigOptions {
 // ── Config file schema ────────────────────────────────────────
 
 interface ConfigFile {
+  runtime?: {
+    /** Runtime backend: docker | nono. Default: docker. */
+    mode?: string;
+  };
   pi?: {
     /** Override the pi version used to build/run the container. */
     version?: string;
@@ -223,6 +250,19 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     userConfig.pi?.version ??
     PI_VERSION;
 
+  // Runtime mode: CLI flag > user config > project config > default ("docker").
+  // Invalid values fail fast with a source-labeled error.
+  const runtimeMode: RuntimeMode = options?.cliMode
+    ? parseRuntimeMode(options.cliMode, "--mode flag")
+    : userConfig.runtime?.mode
+      ? parseRuntimeMode(userConfig.runtime.mode, getUserConfigPath(homeDir))
+      : projectConfig.runtime?.mode
+        ? parseRuntimeMode(
+            projectConfig.runtime.mode,
+            path.join(containerDir, "wpi.yml")
+          )
+        : DEFAULT_RUNTIME_MODE;
+
   // Docker image tag derived from the resolved pi version (not user-configurable)
   const piImage = `pi-agent:${piVersion}`;
 
@@ -239,6 +279,7 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     inferGitConfig(homeDir, "user.email");
 
   return {
+    runtimeMode,
     piVersion,
     ports,
     env,
