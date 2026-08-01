@@ -52,6 +52,7 @@
 // ============================================================
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
@@ -464,6 +465,20 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
+    renderResult(result, { isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("muted", "Fetching…"), 0, 0);
+      if (result.details?.error) {
+        const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const url = result.details?.url as string | undefined;
+      const chars = result.details?.chars as number | undefined;
+      const isCached = result.details?.cached as boolean | undefined;
+      let text = theme.fg("success", "✓ ") + theme.fg("accent", url ?? "");
+      if (chars !== undefined) text += theme.fg("muted", ` — ${chars.toLocaleString()} chars`);
+      if (isCached) text += theme.fg("muted", " (cached)");
+      return new Text(text, 0, 0);
+    },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { url, onlyMainContent = true } = params as {
         url: string;
@@ -483,7 +498,7 @@ export default function (pi: ExtensionAPI) {
       const cacheKey = `fetch:${url}:${onlyMainContent}`;
       const cached = cacheGet<string>(cacheKey);
       if (cached !== undefined) {
-        return textResult(cached, "(cached)");
+        return textResult(cached, "(cached)", { url, cached: true });
       }
 
       const result = await firecrawlRequest(
@@ -522,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 
       cacheSet(cacheKey, suffix ? `${wrapped}\n\n_${suffix}_` : wrapped);
 
-      return textResult(wrapped, suffix);
+      return textResult(wrapped, suffix, { url, chars: truncated.length, cached: false });
     },
   });
 
@@ -547,6 +562,20 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
+    renderResult(result, { isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("muted", "Searching…"), 0, 0);
+      if (result.details?.error) {
+        const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const query = result.details?.query as string | undefined;
+      const count = result.details?.resultCount as number | undefined;
+      const isCached = result.details?.cached as boolean | undefined;
+      let text = theme.fg("success", "✓ ") + theme.fg("muted", "Searched ") + theme.fg("accent", `'${query ?? ""}'`);
+      if (count !== undefined && count >= 0) text += theme.fg("muted", ` — ${count} result${count !== 1 ? "s" : ""}`);
+      if (isCached) text += theme.fg("muted", " (cached)");
+      return new Text(text, 0, 0);
+    },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { query, limit = DEFAULT_SEARCH_LIMIT } = params as {
         query: string;
@@ -558,7 +587,7 @@ export default function (pi: ExtensionAPI) {
       const cacheKey = `search:${query}:${clampedLimit}`;
       const cached = cacheGet<string>(cacheKey);
       if (cached !== undefined) {
-        return textResult(cached, "(cached)");
+        return textResult(cached, "(cached)", { query, resultCount: -1, cached: true });
       }
 
       const result = await firecrawlRequest(
@@ -571,8 +600,8 @@ export default function (pi: ExtensionAPI) {
         return errorResult(result.error ?? "Unknown error");
       }
 
-      const data = result.data as { data?: Array<{ title?: string; url?: string; markdown?: string }> };
-      const results = data?.data ?? [];
+      const data = result.data as { web?: Array<{ title?: string; url?: string; markdown?: string }> };
+      const results = data?.web ?? [];
 
       const formatted = results
         .map((r, i) => {
@@ -610,7 +639,7 @@ export default function (pi: ExtensionAPI) {
 
       cacheSet(cacheKey, suffix ? `${wrapped}\n\n_${suffix}_` : wrapped);
 
-      return textResult(wrapped, suffix);
+      return textResult(wrapped, suffix, { query, resultCount: results.length, cached: false });
     },
   });
 
@@ -635,6 +664,18 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
+    renderResult(result, { isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("muted", "Capturing screenshot…"), 0, 0);
+      if (result.details?.error) {
+        const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
+        return new Text(theme.fg("error", msg), 0, 0);
+      }
+      const url = result.details?.url as string | undefined;
+      const isCached = result.details?.cached as boolean | undefined;
+      let text = theme.fg("success", "✓ ") + theme.fg("muted", "Screenshot: ") + theme.fg("accent", url ?? "");
+      if (isCached) text += theme.fg("muted", " (cached)");
+      return new Text(text, 0, 0);
+    },
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const { url, fullPage = true } = params as {
         url: string;
@@ -654,12 +695,12 @@ export default function (pi: ExtensionAPI) {
       const cacheKey = `screenshot:${url}:${fullPage}`;
       const cached = cacheGet<string>(cacheKey);
       if (cached !== undefined) {
-        return textResult(cached, "(cached)");
+        return textResult(cached, "(cached)", { url, screenshotUrl: cached, cached: true });
       }
 
       const result = await firecrawlRequest(
         "/v2/scrape",
-        { url, formats: [{ type: "screenshot", fullPage }] },
+        { url, formats: ["screenshot"] },
         signal,
       );
 
@@ -676,21 +717,21 @@ export default function (pi: ExtensionAPI) {
 
       cacheSet(cacheKey, screenshotUrl);
 
-      return textResult(`Screenshot URL: ${screenshotUrl}`);
+      return textResult(`Screenshot URL: ${screenshotUrl}`, "", { url, screenshotUrl, cached: false });
     },
   });
 }
 
 // ── Response helpers ────────────────────────────────────────
 
-function textResult(text: string, suffix = ""): {
+function textResult(text: string, suffix = "", details: Record<string, unknown> = {}): {
   content: Array<{ type: "text"; text: string }>;
   details: Record<string, unknown>;
 } {
   const finalText = suffix ? `${text}\n\n_${suffix}_` : text;
   return {
     content: [{ type: "text", text: finalText }],
-    details: {},
+    details,
   };
 }
 
