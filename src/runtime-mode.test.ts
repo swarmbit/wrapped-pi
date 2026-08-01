@@ -55,7 +55,7 @@ describe("parseRuntimeMode", () => {
 
   it("rejects an unknown mode with a source-labeled error", () => {
     expect(() => parseRuntimeMode("podman", "my-source")).toThrow(
-      'Invalid runtime mode "podman" in my-source. Expected one of: docker, nono.'
+      'Invalid runtime mode "podman" in my-source. Expected one of: docker, host.'
     );
   });
 
@@ -89,34 +89,34 @@ describe("runtime mode defaults", () => {
 
 describe("runtime mode from config files", () => {
   it("reads runtime.mode from project config", () => {
-    writeProjectConfig("runtime:\n  mode: nono");
+    writeProjectConfig("runtime:\n  mode: host");
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir });
-    expect(config.runtimeMode).toBe("nono");
+    expect(config.runtimeMode).toBe("host");
   });
 
   it("reads runtime.mode from user config", () => {
-    writeUserConfig("runtime:\n  mode: nono");
+    writeUserConfig("runtime:\n  mode: host");
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir });
-    expect(config.runtimeMode).toBe("nono");
+    expect(config.runtimeMode).toBe("host");
   });
 
   it("user config wins over project config", () => {
     writeProjectConfig("runtime:\n  mode: docker");
-    writeUserConfig("runtime:\n  mode: nono");
+    writeUserConfig("runtime:\n  mode: host");
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir });
-    expect(config.runtimeMode).toBe("nono");
+    expect(config.runtimeMode).toBe("host");
   });
 
   it("coexists with other config sections without disturbing them", () => {
     writeProjectConfig(
-      "runtime:\n  mode: nono\ndocker:\n  env:\n    ANTHROPIC_API_KEY: sk-test\n  memory: 4g"
+      "runtime:\n  mode: host\ndocker:\n  env:\n    ANTHROPIC_API_KEY: sk-test\n  memory: 4g"
     );
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir });
-    expect(config.runtimeMode).toBe("nono");
+    expect(config.runtimeMode).toBe("host");
     expect(config.env).toEqual({ ANTHROPIC_API_KEY: "sk-test" });
     expect(config.memory).toBe("4g");
   });
@@ -124,7 +124,7 @@ describe("runtime mode from config files", () => {
 
 describe("runtime mode CLI override (--mode)", () => {
   it("CLI flag overrides user config", () => {
-    writeUserConfig("runtime:\n  mode: nono");
+    writeUserConfig("runtime:\n  mode: host");
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir, cliMode: "docker" });
     expect(config.runtimeMode).toBe("docker");
@@ -133,20 +133,20 @@ describe("runtime mode CLI override (--mode)", () => {
   it("CLI flag overrides project config", () => {
     writeProjectConfig("runtime:\n  mode: docker");
     process.chdir(tmpDir);
-    const config = loadConfig({ homeDir, cliMode: "nono" });
-    expect(config.runtimeMode).toBe("nono");
+    const config = loadConfig({ homeDir, cliMode: "host" });
+    expect(config.runtimeMode).toBe("host");
   });
 
   it("CLI flag applies when no config files exist", () => {
     process.chdir(tmpDir);
-    const config = loadConfig({ homeDir, cliMode: "nono" });
-    expect(config.runtimeMode).toBe("nono");
+    const config = loadConfig({ homeDir, cliMode: "host" });
+    expect(config.runtimeMode).toBe("host");
   });
 
   it("CLI override does not mutate config files", () => {
     writeProjectConfig("runtime:\n  mode: docker");
     process.chdir(tmpDir);
-    loadConfig({ homeDir, cliMode: "nono" });
+    loadConfig({ homeDir, cliMode: "host" });
     const onDisk = fs.readFileSync(path.join(tmpDir, ".pi", "wpi.yml"), "utf-8");
     expect(onDisk).toBe("runtime:\n  mode: docker");
   });
@@ -172,7 +172,7 @@ describe("invalid runtime mode rejection", () => {
   it("rejects invalid CLI --mode value, naming the flag", () => {
     process.chdir(tmpDir);
     expect(() => loadConfig({ homeDir, cliMode: "podman" })).toThrow(
-      'Invalid runtime mode "podman" in --mode flag. Expected one of: docker, nono.'
+      'Invalid runtime mode "podman" in --mode flag. Expected one of: docker, host.'
     );
   });
 
@@ -188,7 +188,7 @@ describe("invalid runtime mode rejection", () => {
     writeProjectConfig("runtime:\n  mode: podman");
     process.chdir(tmpDir);
     // CLI outranks project config — the invalid project value is never resolved
-    const config = loadConfig({ homeDir, cliMode: "nono" });
-    expect(config.runtimeMode).toBe("nono");
+    const config = loadConfig({ homeDir, cliMode: "host" });
+    expect(config.runtimeMode).toBe("host");
   });
 });

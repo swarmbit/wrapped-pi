@@ -34,20 +34,20 @@ Also covered by the existing suite (must stay green — regression guard):
 
 ### 2. Config file mode selection
 
-- [ ] Project `.pi/wpi.yml` with `runtime:\n  mode: nono` → `wpi dry-run` shows `runtime mode:   nono`
-- [ ] `~/.pi/wpi.yml` with `mode: nono` + project with `mode: docker` → `dry-run` shows `nono` (user wins)
+- [ ] Project `.pi/wpi.yml` with `runtime:\n  mode: host` → `wpi dry-run` shows `runtime mode:   host`
+- [ ] `~/.pi/wpi.yml` with `mode: host` + project with `mode: docker` → `dry-run` shows `host` (user wins)
 - [ ] No `runtime:` section anywhere → `docker`
 
 ### 3. CLI flag
 
-- [ ] `wpi --mode nono dry-run` → shows `nono` regardless of config files
-- [ ] `wpi --mode docker dry-run` with `mode: nono` in user config → shows `docker`
-- [ ] After `wpi --mode nono dry-run`, both YAML files are byte-identical (no write-back)
-- [ ] `wpi --mode` (missing value) → clean error `Error: --mode requires a value (docker or nono).`, exit 1
+- [ ] `wpi --mode host dry-run` → shows `host` regardless of config files
+- [ ] `wpi --mode docker dry-run` with `mode: host` in user config → shows `docker`
+- [ ] After `wpi --mode host dry-run`, both YAML files are byte-identical (no write-back)
+- [ ] `wpi --mode` (missing value) → clean error `Error: --mode requires a value (docker or host).`, exit 1
 
 ### 4. Invalid values
 
-- [ ] `wpi --mode podman dry-run` → `Error: Invalid runtime mode "podman" in --mode flag. Expected one of: docker, nono.`, exit 1 (no stack trace)
+- [ ] `wpi --mode podman dry-run` → `Error: Invalid runtime mode "podman" in --mode flag. Expected one of: docker, host.`, exit 1 (no stack trace)
 - [ ] `mode: podman` in project config → same error naming `.pi/wpi.yml`, exit 1
 - [ ] `mode: podman` in user config → same error naming `~/.pi/wpi.yml`, exit 1
 - [ ] `mode: DOCKER` (uppercase) → rejected (case-sensitive)
@@ -55,11 +55,11 @@ Also covered by the existing suite (must stay green — regression guard):
 ### 5. Help & docs
 
 - [ ] `wpi --help` documents `--mode` and the `runtime:` config section
-- [ ] Help example for nono notes it is Phase 3+ (flag parses; backend doesn't exist yet)
+- [ ] Help example for host notes it is Phase 3+ (flag parses; backend doesn't exist yet)
 
 ## Known limitations (accepted for Phase 0)
 
-- `--mode nono` for `run`/`build`/`shell` still executes the **Docker** backend — the mode is resolved and visible but not yet dispatched. Dispatch lands in Phase 1 (`RuntimeBackend` factory). This is intentional: Phase 0 is scaffolding only.
+- `--mode host` for `run`/`build`/`shell` still executes the **Docker** backend — the mode is resolved and visible but not yet dispatched. Dispatch lands in Phase 1 (`RuntimeBackend` factory). This is intentional: Phase 0 is scaffolding only.
 - No `doctor` command yet (Phase 2).
 
 ## Exit criteria for merge

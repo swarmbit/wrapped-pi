@@ -37,7 +37,7 @@ Options:
   --help, -h        Show this help
   --version         Show version
   --debug, -d       Enable debug logging
-  --mode MODE       Runtime backend: docker (default) or nono
+  --mode MODE       Runtime backend: docker (default) or host
                     Overrides runtime.mode in config for this run only
   -p, --port PORT   Publish container port to localhost (repeatable)
                     PORT can be a simple port (3000) or host:container (8080:3000)
@@ -45,7 +45,7 @@ All arguments after -- are passed to pi.
 
 Examples:
   wpi                              # interactive session
-  wpi --mode nono                  # run with the nono backend (Phase 3+)
+  wpi --mode host                  # run natively on the host (Phase 3+)
   wpi -p 3000                      # expose port 3000
   wpi -p 8080:3000                # host 8080 → container 3000
   wpi -p 3000 -p 6006             # expose multiple ports
@@ -62,7 +62,7 @@ Port config precedence (highest wins):
 
 Config file schema:
   runtime:
-    mode: docker        # docker | nono (default: docker)
+    mode: docker        # docker | host (default: docker)
   pi:
     version: 0.76.0     # override the pi version used (default: baked-in)
   docker:
@@ -141,8 +141,8 @@ async function main(): Promise<void> {
     } else if (arg === "--mode") {
       const value = ourArgs[i + 1];
       if (!value || value.startsWith("-")) {
-        console.error("Error: --mode requires a value (docker or nono).");
-        console.error("Example: wpi --mode nono");
+        console.error("Error: --mode requires a value (docker or host).");
+        console.error("Example: wpi --mode host");
         process.exit(1);
       }
       cliMode = value;

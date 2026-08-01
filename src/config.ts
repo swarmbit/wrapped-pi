@@ -12,7 +12,7 @@
 //
 // Config file schema:
 //   runtime:
-//     mode: docker         # docker | nono (default: docker)
+//     mode: docker         # docker | host (default: docker)
 //   pi:
 //     version: 0.83.0      # override pi version (default: baked-in)
 //   docker:
@@ -70,7 +70,7 @@ export const PI_IMAGE = `pi-agent:${PI_VERSION}`;
 // ── Types ──────────────────────────────────────────────────────
 
 /** Runtime backend modes supported by wpi. */
-export const RUNTIME_MODES = ["docker", "nono"] as const;
+export const RUNTIME_MODES = ["docker", "host"] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /** Default runtime mode. Docker remains the default for backwards compatibility. */
@@ -160,7 +160,7 @@ export interface LoadConfigOptions {
 
 interface ConfigFile {
   runtime?: {
-    /** Runtime backend: docker | nono. Default: docker. */
+    /** Runtime backend: docker | host. Default: docker. */
     mode?: string;
   };
   pi?: {
