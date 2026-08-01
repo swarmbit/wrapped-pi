@@ -12,7 +12,7 @@
 //
 // Config file schema:
 //   pi:
-//     version: 0.79.1      # override pi version (default: baked-in)
+//     version: 0.83.0      # override pi version (default: baked-in)
 //   docker:
 //     ports:
 //       - 3000
@@ -60,7 +60,7 @@ export function debugLog(...args: unknown[]): void {
 // ── Package constants ──────────────────────────────────────────
 
 /** Pi version shipped by this version of wpi. */
-export const PI_VERSION = "0.80.2";
+export const PI_VERSION = "0.83.0";
 
 /** Docker image tag derived from the pi version. */
 export const PI_IMAGE = `pi-agent:${PI_VERSION}`;
