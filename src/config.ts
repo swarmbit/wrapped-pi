@@ -99,6 +99,83 @@ export function parseRuntimeMode(value: string, source: string): RuntimeMode {
 export const SANDBOX_BACKENDS = ["nono", "none"] as const;
 export type SandboxBackend = (typeof SANDBOX_BACKENDS)[number];
 
+// ── Network & workspace config (Phase 3 commit 2) ─────────────
+//
+// Network maps to nono's `network` profile section (allow_domain, network_profile,
+// credentials, custom_credentials). Workspace maps to nono `filesystem` grants on
+// top of the read-write workdir. These only take effect in host+nono mode (Phase 3);
+// in docker mode they are parsed, validated, and ignored (Phase 4 plumbing will use
+// them for docker+nono).
+
+/** Preset credential services nono knows about (built-in credential routes). */
+export const PRESET_CREDENTIAL_SERVICES = [
+  "openai",
+  "anthropic",
+  "gemini",
+  "google-ai",
+  "github",
+  "gitlab",
+] as const;
+export type PresetCredentialService = (typeof PRESET_CREDENTIAL_SERVICES)[number];
+
+/** Env var name each preset credential service consumes (for deny_vars routing). */
+export const PRESET_CREDENTIAL_ENV_VAR: Record<PresetCredentialService, string> = {
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  "google-ai": "GOOGLE_API_KEY",
+  github: "GITHUB_TOKEN",
+  gitlab: "GITLAB_TOKEN",
+};
+
+/** Network proxy mode. "filtered" enables the nono proxy (default in host mode). */
+export const NETWORK_MODES = ["filtered", "open", "blocked"] as const;
+export type NetworkMode = (typeof NETWORK_MODES)[number];
+
+/** Custom credential route for an API not covered by a preset service (e.g. Firecrawl). */
+export interface CustomCredentialDef {
+  /** Upstream URL the nono proxy forwards to. Must be HTTPS (or localhost for HTTP). */
+  upstream: string;
+  /** Where the real secret is read from: keyring account name, env://VAR, op://…, file://…, cmd://… */
+  credentialKey?: string;
+  /** Env var name the phantom token is placed in (required for custom routes). */
+  envVar: string;
+  /** Header to inject the real credential into (default "Authorization"). */
+  injectHeader?: string;
+  /** Format string for the credential value (default "Bearer {}"). */
+  credentialFormat?: string;
+  /** Injection mode: header (default), url_path, query_param, basic_auth. */
+  injectMode?: string;
+}
+
+/** Resolved `network:` section. */
+export interface NetworkConfig {
+  /** Proxy mode. "filtered" enables the nono L7 proxy (default in host+nono). */
+  mode: NetworkMode;
+  /** Domains allowed through the proxy (nono `network.allow_domain`). */
+  allowDomains: string[];
+  /** Preset credential services to enable (nono `network.credentials`). */
+  credentials: PresetCredentialService[];
+  /** Custom credential route definitions (nono `network.custom_credentials`). */
+  customCredentials: Record<string, CustomCredentialDef>;
+}
+
+/** Resolved `workspace:` section — extra fs grants beyond read-write workdir. */
+export interface WorkspaceConfig {
+  /** Read+write fs grants (nono `filesystem.allow`). */
+  allowPaths: string[];
+  /** Read-only fs grants (nono `filesystem.read`). */
+  readPaths: string[];
+}
+
+/** Resolved `nono:` section — profile tuning. */
+export interface NonoConfig {
+  /** Read+write fs grants (nono `filesystem.allow`). Merged with workspace.allowPaths. */
+  allowPaths: string[];
+  /** Read-only fs grants. Merged with workspace.readPaths. */
+  readPaths: string[];
+}
+
 /**
  * Default sandbox backend per runtime mode for the current phase.
  * Phase 4 will flip docker → "nono" once docker+nono dispatch is implemented.
@@ -156,6 +233,12 @@ export interface PiContainerConfig {
   runtimeMode: RuntimeMode;
   /** Sandbox backend (sandbox.backend). Defaults to nono on host, none on docker (Phase 3). */
   sandboxBackend: SandboxBackend;
+  /** Resolved `network:` section (Phase 3 commit 2); host+nono only takes effect there. */
+  network: NetworkConfig;
+  /** Resolved `workspace:` section — extra fs grants beyond read-write workdir. */
+  workspace: WorkspaceConfig;
+  /** Resolved `nono:` section — profile tuning (fs grants). */
+  nono: NonoConfig;
   /** Pi version to use (pi.version). Defaults to the version baked into this wpi release. */
   piVersion: string;
   ports: PortMapping[];
@@ -230,6 +313,28 @@ interface ConfigFile {
       name?: string;
       email?: string;
     };
+  };
+  network?: {
+    /** Proxy mode: filtered (default) | open | blocked. */
+    mode?: string;
+    /** Domains allowed through the nono proxy. */
+    allowDomains?: string[];
+    /** Preset credential services: openai, anthropic, gemini, google-ai, github, gitlab. */
+    credentials?: string[];
+    /** Custom credential route definitions (non-preset APIs). */
+    customCredentials?: Record<string, CustomCredentialDef>;
+  };
+  workspace?: {
+    /** Read+write fs grants beyond the read-write workdir. */
+    allowPaths?: string[];
+    /** Read-only fs grants. */
+    readPaths?: string[];
+  };
+  nono?: {
+    /** Read+write fs grants (merged with workspace.allowPaths). */
+    allowPaths?: string[];
+    /** Read-only fs grants (merged with workspace.readPaths). */
+    readPaths?: string[];
   };
 }
 
@@ -347,9 +452,20 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     userConfig.git?.user?.email ??
     inferGitConfig(homeDir, "user.email");
 
+  // Network section (Phase 3 commit 2). Preset service names are validated
+  // against PRESET_CREDENTIAL_SERVICES; custom credentials merge user-over-project.
+  const network = resolveNetwork(projectConfig.network, userConfig.network, homeDir);
+
+  // Workspace + nono fs grants (arrays merged project ++ user, deduped, order preserved).
+  const workspace = resolveFsGrants(projectConfig.workspace, userConfig.workspace);
+  const nono = resolveFsGrants(projectConfig.nono, userConfig.nono);
+
   return {
     runtimeMode,
     sandboxBackend,
+    network,
+    workspace,
+    nono,
     piVersion,
     ports,
     env,
@@ -655,4 +771,77 @@ export async function checkPortAvailable(port: number): Promise<boolean> {
 /** Get the user config path for a given home directory. */
 export function getUserConfigPath(homeDir?: string): string {
   return path.join(homeDir ?? getHomeDir(), ".pi", "wpi.yml");
+}
+
+// ── Network / workspace / nono resolution (Phase 3 commit 2) ──
+
+type RawNetworkSection = NonNullable<ConfigFile["network"]>;
+
+type RawFsSection = {
+  allowPaths?: string[];
+  readPaths?: string[];
+};
+
+function parseNetworkMode(value: string, source: string): NetworkMode {
+  if ((NETWORK_MODES as readonly string[]).includes(value)) return value as NetworkMode;
+  throw new Error(
+    `Invalid network mode "${value}" in ${source}. Expected one of: ${NETWORK_MODES.join(", ")}.`
+  );
+}
+
+function parsePresetService(value: string, source: string): PresetCredentialService {
+  if ((PRESET_CREDENTIAL_SERVICES as readonly string[]).includes(value)) return value as PresetCredentialService;
+  throw new Error(
+    `Invalid credential service "${value}" in ${source}. Expected one of: ${PRESET_CREDENTIAL_SERVICES.join(", ")}.`
+  );
+}
+
+function resolveNetwork(
+  project: RawNetworkSection | undefined,
+  user: RawNetworkSection | undefined,
+  homeDir: string
+): NetworkConfig {
+  void homeDir; // reserved for future uri validation
+  const projectMode = project?.mode ? parseNetworkMode(project.mode, ".pi/wpi.yml") : undefined;
+  const userMode = user?.mode ? parseNetworkMode(user.mode, "~/.pi/wpi.yml") : undefined;
+  const mode: NetworkMode = userMode ?? projectMode ?? "filtered";
+
+  const allowDomains = dedupeStrings([...(project?.allowDomains ?? []), ...(user?.allowDomains ?? [])]);
+
+  const credentials = dedupeStrings([...(project?.credentials ?? []), ...(user?.credentials ?? [])]).map((c) =>
+    parsePresetService(c, "network.credentials")
+  );
+
+  const customCredentials: Record<string, CustomCredentialDef> = {
+    ...(project?.customCredentials ?? {}),
+    ...(user?.customCredentials ?? {}),
+  };
+
+  return { mode, allowDomains, credentials, customCredentials };
+}
+
+function resolveFsGrants(
+  project: RawFsSection | undefined,
+  user: RawFsSection | undefined,
+): NonoConfig {
+  const allowPaths = dedupeStrings([...(project?.allowPaths ?? []), ...(user?.allowPaths ?? [])]);
+  const readPaths = dedupeStrings([...(project?.readPaths ?? []), ...(user?.readPaths ?? [])]);
+  return { allowPaths, readPaths };
+}
+
+/** Empty/resolved defaults for network, workspace, nono (handy for tests). */
+export const EMPTY_NETWORK: NetworkConfig = { mode: "filtered", allowDomains: [], credentials: [], customCredentials: {} };
+export const EMPTY_NONO: NonoConfig = { allowPaths: [], readPaths: [] };
+
+function dedupeStrings(xs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of xs) {
+    const t = x.trim();
+    if (!seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
 }

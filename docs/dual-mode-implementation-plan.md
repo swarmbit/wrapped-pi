@@ -176,27 +176,27 @@ export interface RuntimeBackend {
 
 **Exit criteria met:** suite green (370 tests); manual `wpi doctor` confirmed with daemon-down (exit 2) and secret-env (warn) scenarios; no dry-run regression.
 
-## Phase 3 — Host mode with nono  ✅ slice 1 done (commit pending); commit 2 TODO
+## Phase 3 — Host mode with nono  ✅ done (slice 1 + commit 2; live-verified)
 
 The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 
 * [x] `src/runtime/host-backend.ts` implementing `RuntimeBackend`.
 * [x] `checkPrerequisites(config)`: platform support (Seatbelt/Landlock), `nono` binary (only when sandbox=nono), `pi` binary. Moved post-config so it is mode- and sandbox-aware.
 * [x] **Sandbox axis** `sandbox.backend: nono | none` parsed (`src/config.ts`), with per-mode defaults: **host → nono**, **docker → none** (docker flips to nono in Phase 4). `--sandbox` CLI flag added (overrides config, never written back). docker+nono rejected in Phase 3 with an actionable "lands in Phase 4" error (no silent downgrade).
-* [x] Profile generation: `src/runtime/profile.ts` authors a `wpi` profile JSON that **extends** the signed `nolabs-ai/pi` pack (no stale copy of pi's policy); `workdir.access: read-write`. Written to `~/.config/nono/profiles/wpi.json` by `ensureWpiProfile` — **write-if-absent, never overwrites** an existing profile.
+* [x] Profile generation: `src/runtime/profile.ts` authors a `wpi` profile JSON that **extends** the signed `nolabs-ai/pi` pack (no stale copy of pi's policy); `workdir.access: readwrite` (nono uses `readwrite`, not `read-write` — caught by live validation against nono 0.73.0). Written to `~/.config/nono/profiles/wpi.json` by `ensureWpiProfile` — **write-if-absent, never overwrites** an existing profile.
 * [x] `run`: `nono run --profile wpi --allow-cwd --rollback [--listen-port P ...] -- pi <args>` (sandboxed); bare `pi <args>` + unsandboxed notice when `sandbox: none`.
 * [x] `shell`: `nono shell --profile wpi --allow-cwd --rollback` (sandboxed) or bare `$SHELL` (unsandboxed).
 * [x] `host` + `sandbox: none`: allowed, doctor warns, run/shell print a one-line `⚠ UNSANDBOXED` notice.
 * [x] Ports: host mode rejects `host:container` mismatch (no container to forward to); simple ports become `--listen-port` grants.
 * [x] `docker.*` in host mode → doctor `Configuration` warns (`docker.extension` ignored in host mode).
-* [x] `doctor` host section set: Runtime, Sandbox, Pi, Platform, Configuration (Sandbox promoted to its own section across both modes).
-* [x] Tests: `src/sandbox-config.test.ts` (parsing/precedence/Phase-3 guard/invalid), `src/runtime/profile.test.ts` (shape/determinism/never-overwrite), `src/runtime/host-backend.test.ts` (command assembly, port errors, execShell error, dryRun, doctor sections). Full suite 416 green.
+* [x] `doctor` host section set: **Runtime, Sandbox, Profile, Pi, Platform, Configuration** (Sandbox promoted to its own section across both modes; Profile section reports path/drift/credential-routes, only emitted in host+nono).
+* [x] Tests: `src/sandbox-config.test.ts`, `src/runtime/profile.test.ts`, `src/runtime/host-backend.test.ts`, `src/network-config.test.ts`. Full suite 444 green.
 
-**Commit 2 TODO (still Phase 3):**
-* [ ] Profile **drift detection**: compare existing `wpi.json` to the canonical; report differences in `doctor` and `build` (never overwrite — only warn).
-* [ ] Config mapping: `network.*` → nono `network` (allow_domain / network_profile / credentials), `workspace.access` → fs rules, `nono.*` → profile merges.
-* [ ] **Credential routes**: `network.credentials` + `custom_credentials` (move `ANTHROPIC_API_KEY` / Firecrawl to phantom-token routes; the `web` extension already accepts `*_BASE_URL`, so no extension change needed).
-* [ ] End-to-end live run with nono installed (slice 1 was unit-tested only — nono is not on the dev machine; `doctor` reports nono-missing as error exit 2).
+**Commit 2 (done):**
+* [x] Profile **drift detection**: `ensureWpiProfile` + `buildProfileSection` compare on-disk `wpi.json` to canonical; report `drift: in sync` / `warn` (differs, wpi won't overwrite — user deletes to regenerate) / `info` (no file yet). Warns at run/build on drift.
+* [x] Config mapping: `network.*` → nono `network` (`allow_domain`, `credentials`, `custom_credentials`; `mode: blocked`→`block: true`); `workspace.allowPaths/readPaths` + `nono.allowPaths/readPaths` → `filesystem.allow/read` (deduped, `~`/`$HOME`/`$WORKDIR` expanded).
+* [x] **Credential routes** (route wins): `network.credentials` (preset services validated against openai/anthropic/gemini/google-ai/github/gitlab) + `network.customCredentials` (custom APIs, e.g. Firecrawl). `environment.deny_vars` = env vars covered by routes → the REAL key is denied in the nono child; nono injects a phantom. `doctor` warns when a secret env key is also present in `docker.env` ("real key denied in sandbox, phantom injected").
+* [x] End-to-end **live-verified** with nono 0.73.0: `nono profile validate` accepts the generated `wpi.json`; `wpi --mode host -- --version` launches `nono run --profile wpi -- pi` under Landlock, supervised, with proxy + snapshots; pi prints `0.84.1` and exits 0. The anthropic credential route correctly attempted keystore load (not env), confirming route-wins/deny_vars.
 
 **Deviations / decisions noted:**
 * `checkPrerequisites(config)` now takes config and runs **post-config** (the plan's interface sketch already had a config arg). Docker's check ignores config; this moves the docker-missing error to after config load (minor, acceptable).
@@ -246,7 +246,7 @@ Unchanged from the original Phase 4.
 | 0     | `runtime.mode: docker\|host` (+ maybe `sandbox.backend`) | —                            | Low — **done (cf1b6e3)**                                  |
 | 1     | `RuntimeBackend` + `DockerBackend` extraction            | 0                            | **High** (regression) — **done (cd7f816)**                |
 | 2     | `wpi doctor` (Docker)                                    | 1                            | Low — **done**                                |
-| 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium — **slice 1 done; commit 2 TODO**                               |
+| 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium — **done (live-verified)**                               |
 | 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — profile must cover socket/mounts without over-granting |
 | 5     | Native package wiring                                    | 3                            | Medium (idempotency critical)                                        |
 | 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium (installers, sudo UX)                                         |

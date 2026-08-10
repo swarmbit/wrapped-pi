@@ -28,12 +28,15 @@ import {
 } from "./doctor";
 import { DockerBackend } from "./docker-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "../config";
 
 function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
     runtimeMode: "docker",
     sandboxBackend: "none",
+    network: EMPTY_NETWORK,
+    workspace: EMPTY_NONO,
+    nono: EMPTY_NONO,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],

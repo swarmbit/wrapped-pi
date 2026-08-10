@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { HostBackend } from "./host-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "../config";
 
 // Mock child_process so commandAvailable / version probes are deterministic and
 // never hang on a real pi/nono binary in the test environment.
@@ -31,6 +31,9 @@ function makeHostConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig
   return {
     runtimeMode: "host",
     sandboxBackend: "nono",
+    network: EMPTY_NETWORK,
+    workspace: EMPTY_NONO,
+    nono: EMPTY_NONO,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -105,7 +108,7 @@ describe("HostBackend.dryRun", () => {
     }
     expect(out).toContain("Nono run command:");
     expect(out).toContain("nono run --profile wpi --allow-cwd --rollback -- pi -p hi");
-    expect(out).toContain("profile: wpi (extends nolabs-ai/pi");
+    expect(out).toContain("profile: wpi (extends nolabs-ai/pi)");
   });
 
   it("renders the bare pi command when unsandboxed", () => {
@@ -167,8 +170,21 @@ describe("HostBackend.doctor", () => {
     });
   });
 
-  it("produces sections Runtime, Sandbox, Pi, Platform, Configuration", async () => {
+  it("produces sections Runtime, Sandbox, Profile, Pi, Platform, Configuration (nono)", async () => {
     const report = await backend.doctor(makeHostConfig());
+    expect(report.sections.map((s) => s.name)).toEqual([
+      "Runtime",
+      "Sandbox",
+      "Profile",
+      "Pi",
+      "Platform",
+      "Configuration",
+    ]);
+    expect(report.mode).toBe("host");
+  });
+
+  it("omits the Profile section when unsandboxed (host+none)", async () => {
+    const report = await backend.doctor(makeHostConfig({ sandboxBackend: "none" }));
     expect(report.sections.map((s) => s.name)).toEqual([
       "Runtime",
       "Sandbox",
@@ -176,7 +192,6 @@ describe("HostBackend.doctor", () => {
       "Platform",
       "Configuration",
     ]);
-    expect(report.mode).toBe("host");
   });
 
   it("Sandbox section reports nono backend (and whether the binary is present)", async () => {
@@ -199,5 +214,75 @@ describe("HostBackend.doctor", () => {
     const report = await backend.doctor(makeHostConfig());
     const platform = report.sections.find((s) => s.name === "Platform")!;
     expect(platform.checks.find((c) => c.label === "platform")?.status).toBe("info");
+  });
+});
+
+describe("HostBackend.doctor — Profile section & route wins", () => {
+  let backend: HostBackend;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    backend = new HostBackend();
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "pi --version") return "pi 0.84.1";
+      if (cmd === "nono --version") return "nono 0.73.0";
+      throw new Error("unexpected execSync: " + cmd);
+    });
+  });
+
+  it("includes a Profile section with a drift check (ok/info/warn are all valid; doctor is read-only)", async () => {
+    const report = await backend.doctor(makeHostConfig());
+    const profile = report.sections.find((s) => s.name === "Profile");
+    expect(profile).toBeDefined();
+    const drift = profile!.checks.find((c) => c.label === "drift");
+    // doctor never writes the profile; drift is ok (in sync), info (no file yet), or
+    // warn (on-disk differs from canonical). Any of these is a valid read-only result.
+    expect(["ok", "info", "warn"]).toContain(drift?.status);
+  });
+
+  it("reports enabled credential routes", async () => {
+    const cfg = makeHostConfig({
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic", "github"] },
+    });
+    const report = await backend.doctor(cfg);
+    const profile = report.sections.find((s) => s.name === "Profile")!;
+    expect(profile.checks.find((c) => c.label === "credential routes")?.detail).toBe("anthropic, github");
+  });
+
+  it("route wins: warns when a secret env key is covered by a credential route", async () => {
+    // Route covers ANTHROPIC_API_KEY, but the user also has it in env (docker.env). In host+nono
+    // the real key is denied and a phantom is injected; doctor surfaces this.
+    const cfg = makeHostConfig({
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic"] },
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+    });
+    const report = await backend.doctor(cfg);
+    const profile = report.sections.find((s) => s.name === "Profile")!;
+    const leaking = profile.checks.find((c) => c.label === "env ANTHROPIC_API_KEY");
+    expect(leaking?.status).toBe("warn");
+    expect(leaking?.detail).toMatch(/real key denied in sandbox, phantom injected/);
+  });
+
+  it("route wins: flags host+none leak when a route covers a secret in env", async () => {
+    const cfg = makeHostConfig({
+      sandboxBackend: "none",
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic"] },
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+    });
+    // sandbox=none omits the Profile section, but the Configuration section still
+    // surfaces the secret env; the route-wins warning belongs to the Profile section,
+    // which is absent here. Verify the secret is still flagged somewhere (Configuration).
+    const report = await backend.doctor(cfg);
+    const cfgSection = report.sections.find((s) => s.name === "Configuration")!;
+    expect(cfgSection.checks.some((c) => c.label === "env ANTHROPIC_API_KEY")).toBe(true);
+  });
+
+  it("does not warn about env keys not covered by any route", async () => {
+    const cfg = makeHostConfig({
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic"] },
+      env: { OLLAMA_HOST: "http://x" }, // not a secret name; not route-covered
+    });
+    const report = await backend.doctor(cfg);
+    const profile = report.sections.find((s) => s.name === "Profile")!;
+    expect(profile.checks.some((c) => c.label === "env OLLAMA_HOST")).toBe(false);
   });
 });

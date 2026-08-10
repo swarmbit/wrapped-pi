@@ -8,12 +8,15 @@ import * as fs from "fs";
 import * as os from "os";
 import { buildDockerRunArgs } from "./docker";
 import { generateDockerfile, generateEntrypoint } from "./templates";
-import { PiContainerConfig, PI_VERSION, PI_IMAGE } from "./config";
+import { PiContainerConfig, PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "./config";
 
 function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConfig {
   return {
     runtimeMode: "docker",
     sandboxBackend: "none",
+    network: EMPTY_NETWORK,
+    workspace: EMPTY_NONO,
+    nono: EMPTY_NONO,
     piVersion: PI_VERSION,
     ports: [],
     env: {},
@@ -22,7 +25,6 @@ function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConf
   };
 }
 
-// Runtime context needed by buildDockerRunArgs
 interface FullConfig extends PiContainerConfig {
   configDir: string;
   containerDir: string;
@@ -37,6 +39,9 @@ function makeFullConfig(overrides: Partial<FullConfig> = {}): FullConfig {
   return {
     runtimeMode: "docker",
     sandboxBackend: "none",
+    network: EMPTY_NETWORK,
+    workspace: EMPTY_NONO,
+    nono: EMPTY_NONO,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],

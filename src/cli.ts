@@ -89,6 +89,25 @@ Config file schema:
     user:
       name: John Doe
       email: john@example.com
+  network:            # host+nono only (Phase 3)
+    mode: filtered    # filtered (default) | open | blocked
+    allowDomains:
+      - api.anthropic.com
+      - github.com
+    credentials: [anthropic, github]   # preset services; real keys stay in the supervisor
+    customCredentials:                  # non-preset APIs (e.g. Firecrawl)
+      firecrawl:
+        upstream: https://api.firecrawl.dev
+        credentialKey: firecrawl_api_key   # keyring name | env://VAR | op://…
+        envVar: FIRECRAWL_API_KEY
+        injectHeader: Authorization
+        credentialFormat: "Bearer {}"
+  workspace:          # extra fs grants beyond read-write workdir (host+nono)
+    allowPaths: [~/src]
+    readPaths: [/etc]
+  nono:               # profile tuning (host+nono)
+    allowPaths: [/tmp/build]
+    readPaths: [~/.config]
 
 Path placeholders (usable in docker.mounts and docker.volumes):
   ~ or \${home}          host home directory  (e.g. /Users/alice)

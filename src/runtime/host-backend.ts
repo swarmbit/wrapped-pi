@@ -22,8 +22,18 @@
 import type { ResolvedConfig, RuntimeBackend } from "./backend";
 import { RuntimeMode, SandboxBackend, debugLog } from "../config";
 import { execSync, spawn } from "child_process";
+import * as fs from "fs";
 import * as os from "os";
-import { WPI_PROFILE_NAME, ensureWpiProfile } from "./profile";
+import {
+  WPI_PROFILE_NAME,
+  ensureWpiProfile,
+  buildWpiProfile,
+  serializeWpiProfile,
+  wpiProfilePath,
+  type ProfileInput,
+  type EnsureProfileResult,
+  credentialEnvVarNames,
+} from "./profile";
 import {
   buildReport,
   buildConfigurationSection,
@@ -73,7 +83,7 @@ export class HostBackend implements RuntimeBackend {
     // (when sandboxed). This keeps `wpi build --mode host` a useful no-op.
     this.checkPrerequisites(config);
     if (config.sandboxBackend === "nono") {
-      ensureWpiProfile(os.homedir(), this.wpiVersion());
+      this.ensureProfileOrWarn(config);
     }
     console.log(`✓ host mode ready (pi v${config.piVersion}, sandbox: ${config.sandboxBackend}) — no image build needed.`);
   }
@@ -88,7 +98,7 @@ export class HostBackend implements RuntimeBackend {
     const cmd = piArgs.length > 0 ? piArgs : [PI_BINARY];
 
     if (config.sandboxBackend === "nono") {
-      ensureWpiProfile(os.homedir(), this.wpiVersion());
+      this.ensureProfileOrWarn(config);
       const args = this.buildNonoRunArgs(config, cmd);
       debugLog(`Running: ${NONO_BINARY} ${args.join(" ")}`);
       const code = await this.spawnInherit(args);
@@ -115,7 +125,7 @@ export class HostBackend implements RuntimeBackend {
     const shellBin = process.env.SHELL || "/bin/bash";
 
     if (config.sandboxBackend === "nono") {
-      ensureWpiProfile(os.homedir(), this.wpiVersion());
+      this.ensureProfileOrWarn(config);
       const args = this.buildNonoShellArgs(config);
       debugLog(`Running: ${NONO_BINARY} ${args.join(" ")}`);
       const code = await this.spawnInherit(args);
@@ -150,7 +160,22 @@ export class HostBackend implements RuntimeBackend {
       const args = this.buildNonoRunArgs(config, cmd);
       console.log("Nono run command:");
       console.log(`  ${NONO_BINARY} ${args.join(" ")}`);
-      console.log(`  profile: ${WPI_PROFILE_NAME} (extends nolabs-ai/pi; written by wpi on first run)`);
+      console.log(`  profile: ${WPI_PROFILE_NAME} (extends nolabs-ai/pi)`);
+      // Surface the profile-derived policy so users see what config mapping produced.
+      const profile = buildWpiProfile(this.buildProfileInput(config));
+      const net = profile.network as Record<string, unknown> | undefined;
+      if (net) {
+        const parts: string[] = [];
+        if (net.block) parts.push("block");
+        if (Array.isArray(net.allow_domain) && net.allow_domain.length) parts.push(`allow_domain[${net.allow_domain.length}]`);
+        if (Array.isArray(net.credentials) && net.credentials.length) parts.push(`credentials[${net.credentials.length}]`);
+        if (net.custom_credentials && Object.keys(net.custom_credentials as object).length) parts.push(`custom_credentials[${Object.keys(net.custom_credentials as object).length}]`);
+        if (parts.length) console.log(`  network: ${parts.join(", ")}`);
+      }
+      const denied = profile.environment as Record<string, unknown> | undefined;
+      if (denied && Array.isArray(denied.deny_vars) && (denied.deny_vars as string[]).length) {
+        console.log(`  route-wins deny_vars: ${(denied.deny_vars as string[]).join(", ")}`);
+      }
     } else {
       console.log("Host run command (unsandboxed):");
       console.log(`  ${cmd.join(" ")}`);
@@ -167,6 +192,11 @@ export class HostBackend implements RuntimeBackend {
       this.buildPlatformSection(),
       buildConfigurationSection(config),
     ];
+    // Only surface the Profile section when nono is configured — docker uses no
+    // authored nono profile. Reports drift + route coverage.
+    if (config.sandboxBackend === "nono") {
+      sections.splice(2, 0, this.buildProfileSection(config));
+    }
     return buildReport(config.runtimeMode, sections);
   }
 
@@ -175,6 +205,37 @@ export class HostBackend implements RuntimeBackend {
   private wpiVersion(): string {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     return require("../../package.json").version;
+  }
+
+  /** Build the profile input from resolved config (host home for ~ expansion). */
+  private buildProfileInput(config: ResolvedConfig): ProfileInput {
+    const homeDir = os.homedir();
+    const denied = credentialEnvVarNames(config.network.credentials, config.network.customCredentials);
+    return {
+      wpiVersion: this.wpiVersion(),
+      homeDir,
+      workspaceDir: config.workspaceDir,
+      network: config.network,
+      workspace: config.workspace,
+      nono: config.nono,
+      deniedEnvVars: denied,
+    };
+  }
+
+  /**
+   * Ensure the wpi profile is on disk; warn loudly on drift (never overwrite).
+   * Returned result also feeds the doctor report in commit 2 (Drift check).
+   */
+  private ensureProfileOrWarn(config: ResolvedConfig): EnsureProfileResult {
+    const res = ensureWpiProfile(this.buildProfileInput(config));
+    if (res.drifted) {
+      console.error(
+        `⚠ wpi profile drift: ${res.path} differs from the canonical profile for your config. ` +
+          `Using the on-disk profile as-is (wpi never overwrites it). ` +
+          `To regenerate, delete the file and re-run.`
+      );
+    }
+    return res;
   }
 
   private commandAvailable(bin: string): boolean {
@@ -319,6 +380,77 @@ export class HostBackend implements RuntimeBackend {
       });
     }
     return { name: "Pi", checks };
+  }
+
+  /**
+   * Profile section: reports the wpi-authored nono profile path, drift status, and
+   * which credential routes are enabled (route wins → real keys denied in child).
+   */
+  private buildProfileSection(config: ResolvedConfig): DoctorSection {
+    const checks: DoctorCheck[] = [];
+
+    // Path presence
+    const p = wpiProfilePath(os.homedir());
+    if (fs.existsSync(p)) {
+      checks.push({ status: "info", label: "path", detail: p });
+    } else {
+      checks.push({ status: "info", label: "path", detail: `${p} (will be written on first run)` });
+    }
+
+    // Drift: compare on-disk to canonical (write nothing; doctor is read-only).
+    try {
+      const canonical = serializeWpiProfile(buildWpiProfile(this.buildProfileInput(config)));
+      const onDisk = fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : null;
+      if (onDisk === null) {
+        checks.push({ status: "info", label: "drift", detail: "no profile yet (canonical will be written)" });
+      } else if (onDisk === canonical) {
+        checks.push({ status: "ok", label: "drift", detail: "in sync with config" });
+      } else {
+        checks.push({
+          status: "warn",
+          label: "drift",
+          detail: "profile differs from canonical — wpi won't overwrite; delete to regenerate",
+        });
+      }
+    } catch (e) {
+      debugLog("doctor: drift check failed:", e);
+      checks.push({ status: "info", label: "drift", detail: "could not compute" });
+    }
+
+    // Credential routes enabled
+    const routes = [
+      ...config.network.credentials,
+      ...Object.keys(config.network.customCredentials),
+    ];
+    if (routes.length > 0) {
+      checks.push({
+        status: "ok",
+        label: "credential routes",
+        detail: routes.join(", "),
+      });
+      // Route wins: warn about real secret keys still in docker.env that are
+      // covered by a route (they'd leak into host+none; nono denies them in
+      // host+nono).
+      const covered = new Set<string>(
+        credentialEnvVarNames(config.network.credentials, config.network.customCredentials)
+      );
+      const leaking = Object.keys(config.env).filter((k) => covered.has(k));
+      for (const k of leaking) {
+        checks.push({
+          status: "warn",
+          label: `env ${k}`,
+          detail: `covered by credential route; ${
+            config.sandboxBackend === "nono"
+              ? "real key denied in sandbox, phantom injected"
+              : "host+none leaks the real key — switch to nono"
+          }`,
+        });
+      }
+    } else {
+      checks.push({ status: "info", label: "credential routes", detail: "(none)" });
+    }
+
+    return { name: "Profile", checks };
   }
 
   private buildPlatformSection(): DoctorSection {
