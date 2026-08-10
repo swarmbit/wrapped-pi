@@ -39,13 +39,17 @@ Options:
   --debug, -d       Enable debug logging
   --mode MODE       Runtime backend: docker (default) or host
                     Overrides runtime.mode in config for this run only
+  --sandbox BACKEND Sandbox backend: nono or none
+                    host mode defaults to nono; docker mode defaults to none (Phase 3)
+                    Overrides sandbox.backend in config for this run only
   -p, --port PORT   Publish container port to localhost (repeatable)
                     PORT can be a simple port (3000) or host:container (8080:3000)
 All arguments after -- are passed to pi.
 
 Examples:
   wpi                              # interactive session
-  wpi --mode host                  # run natively on the host (Phase 3+)
+  wpi --mode host                  # run natively on the host under nono
+  wpi --mode host --sandbox none   # run natively, unsandboxed (doctor warns)
   wpi -p 3000                      # expose port 3000
   wpi -p 8080:3000                # host 8080 → container 3000
   wpi -p 3000 -p 6006             # expose multiple ports
@@ -64,6 +68,8 @@ Port config precedence (highest wins):
 Config file schema:
   runtime:
     mode: docker        # docker | host (default: docker)
+  sandbox:
+    backend: none       # nono | none (host default: nono, docker default: none in Phase 3)
   pi:
     version: 0.76.0     # override the pi version used (default: baked-in)
   docker:
@@ -116,6 +122,7 @@ async function main(): Promise<void> {
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
   let cliMode: string | undefined;
+  let cliSandbox: string | undefined;
   let cliDebug = false;
 
   for (let i = 0; i < ourArgs.length; i++) {
@@ -147,6 +154,15 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       cliMode = value;
+      i++; // skip the value
+    } else if (arg === "--sandbox") {
+      const value = ourArgs[i + 1];
+      if (!value || value.startsWith("-")) {
+        console.error("Error: --sandbox requires a value (nono or none).");
+        console.error("Example: wpi --mode host --sandbox none");
+        process.exit(1);
+      }
+      cliSandbox = value;
       i++; // skip the value
     } else if (arg === "build") {
       command = "build";
@@ -181,25 +197,19 @@ async function main(): Promise<void> {
   // the default (docker) backend regardless of runtime mode.
   if (command === "shell" && shellContainerId) {
     const execBackend = resolveDefaultBackend();
-    execBackend.checkPrerequisites();
+    execBackend.checkPrerequisites({} as ResolvedConfig); // docker exec ignores config
     await execBackend.execShell(shellContainerId);
     return;
   }
 
-  // Prerequisite check runs before config load (matches pre-Phase-1 order) so a
-  // missing backend fails fast with the same error as before. Phase 1 only has
-  // the Docker backend (host mode dispatches to it too), so the default backend's
-  // check is the right one. Phase 3 will revisit this once checkPrerequisites is
-  // mode-aware (host needs nono/pi, not docker).
-  if (command !== "dry-run" && command !== "doctor") {
-    resolveDefaultBackend().checkPrerequisites();
-  }
+  // (Prerequisite check runs after config load below, so it is mode- and
+  // sandbox-aware.)
 
   // Load config from .pi/, user config
   debugLog("Loading config...");
   let config: ReturnType<typeof loadConfig>;
   try {
-    config = loadConfig({ cliPorts, cliMode, debug: cliDebug });
+    config = loadConfig({ cliPorts, cliMode, cliSandbox, debug: cliDebug });
   } catch (e) {
     console.error(`Error: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
@@ -242,8 +252,14 @@ async function main(): Promise<void> {
   }
 
   // Resolve the runtime backend from config.runtimeMode for dispatch.
-  // (Prerequisites were already checked before config load above.)
   const backend: RuntimeBackend = resolveBackend(config.runtimeMode);
+
+  // Mode- and sandbox-aware prerequisite check (host+nono needs nono+pi,
+  // docker needs docker). Skipped for dry-run (read-only) and doctor (runs
+  // its own checks). Runs after config load so it knows runtimeMode+sandbox.
+  if (command !== "dry-run" && command !== "doctor") {
+    backend.checkPrerequisites(config as ResolvedConfig);
+  }
 
   // Dispatch command
   debugLog(`Dispatching command: ${command}`);

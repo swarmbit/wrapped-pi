@@ -20,6 +20,7 @@
 import type { PiContainerConfig, RuntimeContext, RuntimeMode } from "../config";
 import { DEFAULT_RUNTIME_MODE } from "../config";
 import { DockerBackend } from "./docker-backend";
+import { HostBackend } from "./host-backend";
 import type { DoctorReport } from "./doctor";
 
 /** The fully-resolved config shape passed to backends (= loadConfig's return type). */
@@ -30,10 +31,10 @@ export interface RuntimeBackend {
   readonly mode: RuntimeMode;
   /**
    * Verify the backend's prerequisites are present (e.g. the docker CLI
-   * is reachable). Throws / exits on failure. Runs after config load so
-   * the backend can report mode-aware diagnostics in later phases.
+   * is reachable, or nono+pi for host mode). Throws / exits on failure.
+   * Runs after config load so the check is mode- and sandbox-aware.
    */
-  checkPrerequisites(): void;
+  checkPrerequisites(config: ResolvedConfig): void;
   /** Build/prepare the runtime environment (image build, etc.). */
   build(config: ResolvedConfig): void;
   /** Run the agent with the given pi arguments. Exits non-zero on failure. */
@@ -64,8 +65,7 @@ export function resolveBackend(mode: RuntimeMode): RuntimeBackend {
     case "docker":
       return new DockerBackend();
     case "host":
-      // Phase 3: return new HostBackend();
-      return new DockerBackend();
+      return new HostBackend();
     default: {
       // Unreachable in normal flow: parseRuntimeMode rejects unknown modes
       // at config load. Defensive only.

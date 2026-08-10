@@ -200,7 +200,7 @@ describe("CLI doctor", () => {
     }
     expect(output).toContain("wpi doctor — runtime mode: docker");
     expect(output).toContain("Runtime");
-    expect(output).toContain("sandbox: not configured");
+    expect(output).toContain("Sandbox");
     expect(output).toContain("Pi");
     expect(output).toContain("Docker");
     expect(output).toContain("Configuration");

@@ -18,7 +18,7 @@
 //   - Secret-looking YAML env values warn.
 // ============================================================
 
-import type { RuntimeMode } from "../config";
+import type { RuntimeMode, SandboxBackend } from "../config";
 import type { ResolvedConfig } from "./backend";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "info";
@@ -95,13 +95,31 @@ export function buildRuntimeSection(mode: RuntimeMode): DoctorSection {
     name: "Runtime",
     checks: [
       { status: "ok", label: "mode", detail: mode },
-      // Sandbox axis does not exist yet (Phase 3+). Reported as info so it
-      // never contributes to the exit code; the detail explains why.
-      {
-        status: "info",
-        label: "sandbox",
-        detail: "not configured (sandbox.backend lands in Phase 3+)",
-      },
+    ],
+  };
+}
+
+/**
+ * Build the Sandbox section for docker mode. In Phase 3 docker defaults to
+ * `none`; docker+nono lands in Phase 4, so an explicit nono is reported as
+ * info "not yet dispatched" rather than erroring in the report (the config
+ * loader already rejects docker+nono). host mode builds its own richer
+ * Sandbox section with a nono-binary check.
+ */
+export function buildDockerSandboxSection(sandbox: SandboxBackend): DoctorSection {
+  if (sandbox === "none") {
+    return {
+      name: "Sandbox",
+      checks: [
+        { status: "ok", label: "backend", detail: "none (docker default in Phase 3)" },
+        { status: "info", label: "docker+nono", detail: "lands in Phase 4" },
+      ],
+    };
+  }
+  return {
+    name: "Sandbox",
+    checks: [
+      { status: "info", label: "backend", detail: "nono (docker+nono dispatch lands in Phase 4)" },
     ],
   };
 }

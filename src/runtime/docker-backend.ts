@@ -22,12 +22,13 @@ import {
 } from "../docker";
 import { execSync, spawnSync } from "child_process";
 import type { DoctorReport, DoctorSection, DoctorStatus, DoctorCheck } from "./doctor";
-import { buildReport, buildRuntimeSection, buildConfigurationSection } from "./doctor";
+import { buildReport, buildRuntimeSection, buildConfigurationSection, buildDockerSandboxSection } from "./doctor";
 
 export class DockerBackend implements RuntimeBackend {
   readonly mode: RuntimeMode = "docker";
 
-  checkPrerequisites(): void {
+  checkPrerequisites(_config: ResolvedConfig): void {
+    void _config;
     try {
       const dockerVersion = execSync("docker --version", { stdio: "pipe" }).toString().trim();
       debugLog(`Docker found: ${dockerVersion}`);
@@ -79,6 +80,7 @@ export class DockerBackend implements RuntimeBackend {
   async doctor(config: ResolvedConfig): Promise<DoctorReport> {
     const sections: DoctorSection[] = [
       buildRuntimeSection(config.runtimeMode),
+      buildDockerSandboxSection(config.sandboxBackend),
       this.buildPiSection(config),
       this.buildDockerSection(),
       buildConfigurationSection(config),

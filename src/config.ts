@@ -86,6 +86,45 @@ export function parseRuntimeMode(value: string, source: string): RuntimeMode {
   );
 }
 
+// ── Sandbox axis (Phase 3) ────────────────────────────────────
+//
+// Per the dual-mode plan §0.1, sandbox.backend defaults to "nono" on BOTH
+// modes — but only *from the phase where each combination lands*:
+//   - host + nono  lands in Phase 3 → host defaults to "nono" now.
+//   - docker + nono lands in Phase 4 → docker still defaults to "none" until Phase 4.
+// Requesting docker+nono in Phase 3 is an explicit error ("lands in Phase 4"),
+// never a silent unsandboxed run.
+
+/** Sandbox backends supported by wpi. */
+export const SANDBOX_BACKENDS = ["nono", "none"] as const;
+export type SandboxBackend = (typeof SANDBOX_BACKENDS)[number];
+
+/**
+ * Default sandbox backend per runtime mode for the current phase.
+ * Phase 4 will flip docker → "nono" once docker+nono dispatch is implemented.
+ */
+export const DEFAULT_SANDBOX_FOR: Record<RuntimeMode, SandboxBackend> = {
+  docker: "none",
+  host: "nono",
+};
+
+/** Whether a (mode, sandbox) combination is implemented in the current phase. */
+export function isSandboxImplemented(mode: RuntimeMode, sandbox: SandboxBackend): boolean {
+  if (mode === "host") return true;
+  if (mode === "docker") return sandbox === "none"; // docker+nono lands in Phase 4
+  return false;
+}
+
+/** Validate a raw sandbox.backend value from config or CLI. Throws on invalid input. */
+export function parseSandboxBackend(value: string, source: string): SandboxBackend {
+  if ((SANDBOX_BACKENDS as readonly string[]).includes(value)) {
+    return value as SandboxBackend;
+  }
+  throw new Error(
+    `Invalid sandbox backend "${value}" in ${source}. Expected one of: ${SANDBOX_BACKENDS.join(", ")}.`
+  );
+}
+
 export interface PortMapping {
   /** Host port */
   host: number;
@@ -115,6 +154,8 @@ export interface VolumeMapping {
 export interface PiContainerConfig {
   /** Runtime backend mode (runtime.mode). Defaults to "docker". */
   runtimeMode: RuntimeMode;
+  /** Sandbox backend (sandbox.backend). Defaults to nono on host, none on docker (Phase 3). */
+  sandboxBackend: SandboxBackend;
   /** Pi version to use (pi.version). Defaults to the version baked into this wpi release. */
   piVersion: string;
   ports: PortMapping[];
@@ -152,6 +193,8 @@ export interface LoadConfigOptions {
   cliPorts?: string[];
   /** Runtime mode from CLI --mode flag (highest precedence). Overrides config files; never written back. */
   cliMode?: string;
+  /** Sandbox backend from CLI --sandbox flag (highest precedence). Overrides config files; never written back. */
+  cliSandbox?: string;
   /** Enable debug logging. */
   debug?: boolean;
 }
@@ -162,6 +205,10 @@ interface ConfigFile {
   runtime?: {
     /** Runtime backend: docker | host. Default: docker. */
     mode?: string;
+  };
+  sandbox?: {
+    /** Sandbox backend: nono | none. Default: nono on host, none on docker (Phase 3). */
+    backend?: string;
   };
   pi?: {
     /** Override the pi version used to build/run the container. */
@@ -263,6 +310,28 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
           )
         : DEFAULT_RUNTIME_MODE;
 
+  // Sandbox backend: CLI flag > user config > project config > mode default.
+  // docker+nono is not implemented until Phase 4 — requesting it now is an error
+  // with an actionable message, never a silent downgrade to unsandboxed.
+  const sandboxBackend: SandboxBackend = options?.cliSandbox
+    ? parseSandboxBackend(options.cliSandbox, "--sandbox flag")
+    : userConfig.sandbox?.backend
+      ? parseSandboxBackend(userConfig.sandbox.backend, getUserConfigPath(homeDir))
+      : projectConfig.sandbox?.backend
+        ? parseSandboxBackend(
+            projectConfig.sandbox.backend,
+            path.join(containerDir, "wpi.yml")
+          )
+        : DEFAULT_SANDBOX_FOR[runtimeMode];
+  if (!isSandboxImplemented(runtimeMode, sandboxBackend)) {
+    throw new Error(
+      `Sandbox backend "${sandboxBackend}" is not implemented for runtime mode "${runtimeMode}" in this version of wpi. ` +
+        (runtimeMode === "docker" && sandboxBackend === "nono"
+          ? "docker + nono lands in Phase 4. For now use sandbox: none (the docker default) or runtime.mode: host."
+          : "Use a supported combination: docker+none, host+nono, or host+none.")
+    );
+  }
+
   // Docker image tag derived from the resolved pi version (not user-configurable)
   const piImage = `pi-agent:${piVersion}`;
 
@@ -280,6 +349,7 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
 
   return {
     runtimeMode,
+    sandboxBackend,
     piVersion,
     ports,
     env,

@@ -22,6 +22,7 @@ import {
   computeExitCode,
   buildReport,
   buildRuntimeSection,
+  buildDockerSandboxSection,
   buildConfigurationSection,
   renderDoctorReport,
 } from "./doctor";
@@ -32,6 +33,7 @@ import { PI_VERSION, PI_IMAGE } from "../config";
 function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
     runtimeMode: "docker",
+    sandboxBackend: "none",
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -138,19 +140,29 @@ describe("computeExitCode", () => {
 // ── Shared sections ──────────────────────────────────────────
 
 describe("buildRuntimeSection", () => {
-  it("reports mode ok and sandbox as info 'not configured'", () => {
+  it("reports mode ok (sandbox is its own section in Phase 3)", () => {
     const section = buildRuntimeSection("docker");
     expect(section.name).toBe("Runtime");
-    expect(section.checks).toHaveLength(2);
-    expect(section.checks[0]).toEqual({ status: "ok", label: "mode", detail: "docker" });
-    expect(section.checks[1].label).toBe("sandbox");
-    expect(section.checks[1].status).toBe("info");
-    expect(section.checks[1].detail).toMatch(/not configured/);
+    expect(section.checks).toEqual([{ status: "ok", label: "mode", detail: "docker" }]);
   });
 
   it("works for host mode", () => {
     const section = buildRuntimeSection("host");
     expect(section.checks[0]).toEqual({ status: "ok", label: "mode", detail: "host" });
+  });
+});
+
+describe("buildDockerSandboxSection", () => {
+  it("reports none (docker default) with Phase 4 note for docker+none", () => {
+    const section = buildDockerSandboxSection("none");
+    expect(section.name).toBe("Sandbox");
+    expect(section.checks.find((c) => c.label === "backend")?.status).toBe("ok");
+    expect(section.checks.find((c) => c.label === "docker+nono")?.detail).toMatch(/Phase 4/);
+  });
+
+  it("reports nono as info (not dispatched) for docker+nono", () => {
+    const section = buildDockerSandboxSection("nono");
+    expect(section.checks.find((c) => c.label === "backend")?.status).toBe("info");
   });
 });
 
@@ -203,6 +215,7 @@ describe("renderDoctorReport", () => {
   it("renders section headers, status icons, and summary", () => {
     const report = buildReport("docker", [
       buildRuntimeSection("docker"),
+      buildDockerSandboxSection("none"),
       {
         name: "Docker",
         checks: [
@@ -214,8 +227,8 @@ describe("renderDoctorReport", () => {
     const out = renderDoctorReport(report);
     expect(out).toContain("wpi doctor — runtime mode: docker");
     expect(out).toContain("Runtime");
-    expect(out).toContain("• sandbox: not configured");
     expect(out).toContain("✓ mode: docker");
+    expect(out).toContain("Sandbox");
     expect(out).toContain("Docker");
     expect(out).toContain("✗ docker daemon: not running");
     expect(out).toContain("Summary: 1 error(s), 0 warning(s) (exit 2)");
@@ -328,13 +341,14 @@ describe("DockerBackend.doctor", () => {
     expect(piSection.checks.find((c) => c.label === "image")?.status).toBe("warn");
   });
 
-  it("section order is Runtime, Pi, Docker, Configuration", async () => {
+  it("section order is Runtime, Sandbox, Pi, Docker, Configuration", async () => {
     mockedExecSync.mockReturnValue("Docker version 29.7.2");
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
 
     const report = await backend.doctor(makeConfig());
     expect(report.sections.map((s) => s.name)).toEqual([
       "Runtime",
+      "Sandbox",
       "Pi",
       "Docker",
       "Configuration",

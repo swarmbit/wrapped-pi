@@ -1,17 +1,19 @@
 // ============================================================
-// Tests for runtime backend factory — Phase 1
+// Tests for runtime backend factory — Phase 1 / Phase 3
 // ============================================================
-// Locks in the dispatch contract introduced in Phase 1:
+// Locks in the dispatch contract:
 //   - resolveBackend("docker") -> DockerBackend
-//   - resolveBackend("host")   -> DockerBackend (Phase 1 fallthrough;
-//                                  HostBackend lands in Phase 3)
+//   - resolveBackend("host")   -> HostBackend  (Phase 3 replaced the
+//                                            Phase 1 Docker fallthrough)
 //   - resolveBackend(unknown)  -> throws (defensive; parseRuntimeMode
 //                                  rejects unknown modes earlier)
+//   - resolveDefaultBackend() -> DockerBackend (default mode)
 // ============================================================
 
 import { describe, it, expect } from "vitest";
 import { resolveBackend, resolveDefaultBackend } from "./backend";
 import { DockerBackend } from "./docker-backend";
+import { HostBackend } from "./host-backend";
 import { DEFAULT_RUNTIME_MODE } from "../config";
 
 describe("resolveBackend", () => {
@@ -21,13 +23,10 @@ describe("resolveBackend", () => {
     expect(backend.mode).toBe("docker");
   });
 
-  it("falls back to DockerBackend for host mode (Phase 1; Phase 3 adds HostBackend)", () => {
+  it("returns HostBackend for host mode (Phase 3)", () => {
     const backend = resolveBackend("host");
-    // Phase 1 contract: host is parsed + visible but not yet dispatched,
-    // so it still executes via the Docker backend. Update this test in
-    // Phase 3 when HostBackend lands.
-    expect(backend).toBeInstanceOf(DockerBackend);
-    expect(backend.mode).toBe("docker");
+    expect(backend).toBeInstanceOf(HostBackend);
+    expect(backend.mode).toBe("host");
   });
 
   it("throws for an unknown mode (defensive — parseRuntimeMode guards earlier)", () => {
