@@ -17,10 +17,8 @@
 // ============================================================
 
 import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
-import { buildImage, runContainer, shellInContainer, execInContainer, buildDockerRunArgs } from "./docker";
+import { resolveBackend, resolveDefaultBackend, type RuntimeBackend, type ResolvedConfig } from "./runtime/backend";
 import * as fs from "fs";
-import * as path from "path";
-import { execSync } from "child_process";
 
 function printHelp(): void {
   const userConfigPath = getUserConfigPath();
@@ -173,33 +171,23 @@ async function main(): Promise<void> {
     debugLog("CLI args:", { ourArgs, piArgs, command });
   }
 
-  // If shell was given a container ID, exec directly (no config needed)
+  // If shell was given a container ID, exec directly into it (no config needed).
+  // `wpi shell <id>` is a docker exec against an existing container, so it uses
+  // the default (docker) backend regardless of runtime mode.
   if (command === "shell" && shellContainerId) {
-    // Check Docker is available
-    try {
-      const dockerVersion = execSync("docker --version", { stdio: "pipe" }).toString().trim();
-      debugLog(`Docker found: ${dockerVersion}`);
-    } catch (e) {
-      debugLog("Docker check failed:", e);
-      console.error("Error: Docker is not installed or not running.");
-      console.error("Please install Docker and ensure it's accessible.");
-      process.exit(1);
-    }
-    await execInContainer(shellContainerId);
+    const execBackend = resolveDefaultBackend();
+    execBackend.checkPrerequisites();
+    await execBackend.execShell(shellContainerId);
     return;
   }
 
-  // Check that Docker is available (skip for dry-run)
+  // Prerequisite check runs before config load (matches pre-Phase-1 order) so a
+  // missing backend fails fast with the same error as before. Phase 1 only has
+  // the Docker backend (host mode dispatches to it too), so the default backend's
+  // check is the right one. Phase 3 will revisit this once checkPrerequisites is
+  // mode-aware (host needs nono/pi, not docker).
   if (command !== "dry-run") {
-    try {
-      const dockerVersion = execSync("docker --version", { stdio: "pipe" }).toString().trim();
-      debugLog(`Docker found: ${dockerVersion}`);
-    } catch (e) {
-      debugLog("Docker check failed:", e);
-      console.error("Error: Docker is not installed or not running.");
-      console.error("Please install Docker and ensure it's accessible.");
-      process.exit(1);
-    }
+    resolveDefaultBackend().checkPrerequisites();
   }
 
   // Load config from .pi/, user config
@@ -243,20 +231,24 @@ async function main(): Promise<void> {
     }
   }
 
+  // Resolve the runtime backend from config.runtimeMode for dispatch.
+  // (Prerequisites were already checked before config load above.)
+  const backend: RuntimeBackend = resolveBackend(config.runtimeMode);
+
   // Dispatch command
   debugLog(`Dispatching command: ${command}`);
   switch (command) {
     case "build":
-      buildImage(config);
+      backend.build(config);
       break;
     case "shell":
-      await shellInContainer(config);
+      await backend.shell(config);
       break;
     case "run":
-      await runContainer(config, piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"]);
+      await backend.run(config, piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"]);
       break;
     case "dry-run":
-      printDryRun(config, piArgs);
+      printDryRun(config, piArgs, backend);
       break;
   }
 }
@@ -272,7 +264,7 @@ async function checkPorts(ports: { host: number; container: number }[]): Promise
   return conflicts;
 }
 
-function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): void {
+function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[], backend: RuntimeBackend): void {
   const userConfigPath = getUserConfigPath();
   const userConfigExists = fs.existsSync(userConfigPath);
 
@@ -321,22 +313,9 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
   console.log(`  User config:    ${userConfigPath} ${userConfigExists ? "(found)" : "(not found)"}`);
   console.log(`  Project config: ${config.containerDir ? config.containerDir + "/wpi.yml" : "(no .pi dir)"}`);
   console.log();
-  const cmd = piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"];
-  const runArgs = buildDockerRunArgs(config, cmd);
-  console.log("Docker run command:");
-  console.log(`  docker ${runArgs.join(" ")}`);
-  console.log();
-  const buildArgs = [
-    "docker",
-    "build",
-    "--build-arg",
-    `PI_VERSION=${config.piVersion}`,
-    "-t",
-    config.piImage,
-    ".",
-  ];
-  console.log("Docker build command (would be run in temp build context):");
-  console.log(`  ${buildArgs.join(" ")}`);
+  // Backend-specific command preview (DockerBackend prints the docker run/build
+  // commands). Host mode will render its own commands here in Phase 3.
+  backend.dryRun(config as ResolvedConfig, piArgs);
 }
 
 main();
