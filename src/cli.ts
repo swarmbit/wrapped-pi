@@ -37,12 +37,15 @@ Options:
   --help, -h        Show this help
   --version         Show version
   --debug, -d       Enable debug logging
+  --mode MODE       Runtime backend: docker (default) or host
+                    Overrides runtime.mode in config for this run only
   -p, --port PORT   Publish container port to localhost (repeatable)
                     PORT can be a simple port (3000) or host:container (8080:3000)
 All arguments after -- are passed to pi.
 
 Examples:
   wpi                              # interactive session
+  wpi --mode host                  # run natively on the host (Phase 3+)
   wpi -p 3000                      # expose port 3000
   wpi -p 8080:3000                # host 8080 → container 3000
   wpi -p 3000 -p 6006             # expose multiple ports
@@ -58,6 +61,8 @@ Port config precedence (highest wins):
   3. Project config: .pi/wpi.yml
 
 Config file schema:
+  runtime:
+    mode: docker        # docker | host (default: docker)
   pi:
     version: 0.76.0     # override the pi version used (default: baked-in)
   docker:
@@ -109,6 +114,7 @@ async function main(): Promise<void> {
   let command: "run" | "build" | "shell" | "dry-run" = "run";
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
+  let cliMode: string | undefined;
   let cliDebug = false;
 
   for (let i = 0; i < ourArgs.length; i++) {
@@ -131,6 +137,15 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       cliPorts.push(value);
+      i++; // skip the value
+    } else if (arg === "--mode") {
+      const value = ourArgs[i + 1];
+      if (!value || value.startsWith("-")) {
+        console.error("Error: --mode requires a value (docker or host).");
+        console.error("Example: wpi --mode host");
+        process.exit(1);
+      }
+      cliMode = value;
       i++; // skip the value
     } else if (arg === "build") {
       command = "build";
@@ -189,8 +204,15 @@ async function main(): Promise<void> {
 
   // Load config from .pi/, user config
   debugLog("Loading config...");
-  const config = loadConfig({ cliPorts, debug: cliDebug });
+  let config: ReturnType<typeof loadConfig>;
+  try {
+    config = loadConfig({ cliPorts, cliMode, debug: cliDebug });
+  } catch (e) {
+    console.error(`Error: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
   debugLog("Config loaded:", {
+    runtimeMode: config.runtimeMode,
     ports: config.ports,
     envKeys: Object.keys(config.env),
     mounts: config.mounts,
@@ -255,6 +277,7 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
   const userConfigExists = fs.existsSync(userConfigPath);
 
   console.log("Configuration:");
+  console.log(`  runtime mode:   ${config.runtimeMode}`);
   console.log(`  version:        ${config.piVersion}`);
   console.log(`  image:          ${config.piImage}`);
   console.log(`  projectDir:     ${config.projectDir}`);
