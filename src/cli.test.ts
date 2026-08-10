@@ -173,3 +173,57 @@ describe("CLI dry-run", () => {
     expect(output).toContain("8080:80");
   });
 });
+
+// `wpi doctor` is exercised end-to-end through the real CLI binary here.
+// The exact exit code depends on whether the Docker daemon is reachable on
+// the host running the tests, so we assert on stable output shape rather than
+// the exit code.
+describe("CLI doctor", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cli-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("renders the four sections and a Summary line", () => {
+    // doctor never exits 0 here unless docker is fully healthy AND no warnings;
+    // swallow the exit code and inspect stdout+stderr regardless.
+    let output = "";
+    try {
+      output = runCli("doctor", { cwd: tmpDir });
+    } catch (e: any) {
+      output = (e.stdout || "") + (e.stderr || "");
+    }
+    expect(output).toContain("wpi doctor — runtime mode: docker");
+    expect(output).toContain("Runtime");
+    expect(output).toContain("sandbox: not configured");
+    expect(output).toContain("Pi");
+    expect(output).toContain("Docker");
+    expect(output).toContain("Configuration");
+    expect(output).toContain("Summary:");
+  });
+
+  it("warns on secret-looking env values", () => {
+    const containerDir = path.join(tmpDir, ".pi");
+    fs.mkdirSync(containerDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  env:\n    ANTHROPIC_API_KEY: sk-test\n    FOO: bar"
+    );
+
+    let output = "";
+    try {
+      output = runCli("doctor", { cwd: tmpDir });
+    } catch (e: any) {
+      output = (e.stdout || "") + (e.stderr || "");
+    }
+    expect(output).toContain("env ANTHROPIC_API_KEY");
+    expect(output).toMatch(/credential routes/);
+    // FOO is not secret-looking — must not be flagged.
+    expect(output).not.toContain("env FOO");
+  });
+});

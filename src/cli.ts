@@ -18,6 +18,7 @@
 
 import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
 import { resolveBackend, resolveDefaultBackend, type RuntimeBackend, type ResolvedConfig } from "./runtime/backend";
+import { renderDoctorReport } from "./runtime/doctor";
 import * as fs from "fs";
 
 function printHelp(): void {
@@ -30,6 +31,7 @@ Commands:
   build         Build or rebuild the Docker image
   shell [id]    Open a shell in a new container, or exec into an existing one by ID/name
   dry-run       Print resolved config and docker commands without executing
+  doctor        Check runtime/docker/config health (exit 0 healthy, 1 warn, 2 error)
 
 Options:
   --help, -h        Show this help
@@ -52,6 +54,7 @@ Examples:
   wpi build                        # build image
   wpi shell                        # container shell
   wpi shell my-container           # exec into an existing container
+  wpi doctor                       # health check (runtime/docker/config)
 
 Port config precedence (highest wins):
   1. CLI flags (-p, --port)
@@ -109,7 +112,7 @@ async function main(): Promise<void> {
   }
 
   // Parse our args
-  let command: "run" | "build" | "shell" | "dry-run" = "run";
+  let command: "run" | "build" | "shell" | "dry-run" | "doctor" = "run";
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
   let cliMode: string | undefined;
@@ -157,6 +160,8 @@ async function main(): Promise<void> {
       }
     } else if (arg === "dry-run") {
       command = "dry-run";
+    } else if (arg === "doctor") {
+      command = "doctor";
     } else {
       console.error(`Unknown argument: ${arg}`);
       console.error("Run 'wpi --help' for usage.");
@@ -186,7 +191,7 @@ async function main(): Promise<void> {
   // the Docker backend (host mode dispatches to it too), so the default backend's
   // check is the right one. Phase 3 will revisit this once checkPrerequisites is
   // mode-aware (host needs nono/pi, not docker).
-  if (command !== "dry-run") {
+  if (command !== "dry-run" && command !== "doctor") {
     resolveDefaultBackend().checkPrerequisites();
   }
 
@@ -212,7 +217,12 @@ async function main(): Promise<void> {
     debug: config.debug,
   });
 
-  fs.mkdirSync(config.configDir + "/agent", { recursive: true });
+  // Ensure the agent config dir exists for commands that actually launch pi.
+  // doctor is read-only and must not create directories; dry-run preserves its
+  // pre-existing behavior of ensuring the dir.
+  if (command !== "doctor") {
+    fs.mkdirSync(config.configDir + "/agent", { recursive: true });
+  }
 
   // Check port availability before running
   if ((command === "run" || command === "shell") && config.ports.length > 0) {
@@ -250,6 +260,12 @@ async function main(): Promise<void> {
     case "dry-run":
       printDryRun(config, piArgs, backend);
       break;
+    case "doctor": {
+      const report = await backend.doctor(config as ResolvedConfig);
+      console.log(renderDoctorReport(report));
+      process.exit(report.exitCode);
+      break;
+    }
   }
 }
 

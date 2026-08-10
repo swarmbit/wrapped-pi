@@ -125,46 +125,56 @@ Current codebase facts (from `swarmbit/wrapped-pi` @ `main`):
 
 5. **Never silently mutate user state** — no overwriting customized nono profiles, no `sudo` installs without confirmation, no removing user-added Pi packages.
 
-## Phase 0 — Branch & scaffolding *(PR #7, needs revision)*
+## Phase 0 — Branch & scaffolding  ✅ done (commit cf1b6e3)
 
-**Goal:** config schema + CLI for the two axes, zero behavior change.
+**Goal:** config schema + CLI for the runtime mode axis, zero behavior change.
 
-* [ ] `runtime.mode: docker | nono` → revise to `runtime.mode: docker | host` on the Phase 0 branch before merge.
-* [ ] Add `sandbox.backend: nono | none` to the schema with per-mode defaults (see open questions) — or defer `sandbox` to Phase 3 if that keeps Phase 0 minimal; decide in PR review.
-* [ ] `--mode <docker|host>` CLI flag, invocation-only, never written back.
-* [ ] Tests: config parsing, precedence, CLI override, invalid rejection (the existing 20 tests carry over with `nono` → `host`).
+* [x] `runtime.mode: docker | host` (revised from `docker | nono`).
+* [x] `sandbox.backend` **deferred to Phase 3** — Phase 0 keeps the runtime axis only; `doctor` reports sandbox as "not configured (Phase 3+)".
+* [x] `--mode <docker|host>` CLI flag, invocation-only, never written back.
+* [x] Tests: `src/runtime-mode.test.ts` — config parsing, precedence, CLI override, invalid rejection with source-labeled errors.
+* [x] Manual verification: `docs/verification-plan-phase0.md` checklist sections 2–5 passed (live-Docker items in §1 pending a running daemon).
 
-**Exit criteria:** `npm test` green; `wpi --mode docker` identical to `wpi` today.
+**Exit criteria met:** `npm test` green (340 tests); `wpi --mode docker` identical to `wpi` today — dry-run diff vs `main` is exactly one added `runtime mode:` line.
 
-## Phase 1 — RuntimeBackend interface + DockerBackend extraction
+## Phase 1 — RuntimeBackend interface + DockerBackend extraction  ✅ done (commit cd7f816)
 
-Pure refactor, behavior-identical. Unchanged from the original plan.
+Pure refactor, behavior-identical.
 
 ```typescript
 // src/runtime/backend.ts
 export interface RuntimeBackend {
-  readonly mode: "docker" | "host";
-  checkPrerequisites(config: ResolvedConfig): Promise<PrereqReport>;
-  setup(config: ResolvedConfig, opts: SetupOpts): Promise<SetupResult>;
-  run(piArgs: string[], config: ResolvedConfig): Promise<number>;
-  buildOrPrepare(config: ResolvedConfig): Promise<PrepareResult>;
-  shell(config: ResolvedConfig): Promise<number>;
-  doctor(config: ResolvedConfig): Promise<DoctorReport>;
-  dryRun(config: ResolvedConfig): Promise<DryRunReport>;
+  readonly mode: RuntimeMode;
+  checkPrerequisites(): void;
+  build(config: ResolvedConfig): void;
+  run(config: ResolvedConfig, piArgs: string[]): Promise<void>;
+  shell(config: ResolvedConfig): Promise<void>;
+  execShell(containerId: string): Promise<void>;
+  dryRun(config: ResolvedConfig, piArgs: string[]): void;
+  doctor(config: ResolvedConfig): Promise<DoctorReport>;  // added in Phase 2
 }
 ```
 
-* [ ] `DockerBackend` in `src/runtime/docker-backend.ts` owns all Docker calls; `cli.ts` delegates via `resolveBackend(mode)`.
-* [ ] Existing `docker.test.ts` passes against `DockerBackend`; `wpi dry-run` output byte-identical to `main`.
+* [x] `DockerBackend` in `src/runtime/docker-backend.ts` delegates to `docker.ts`; `cli.ts` delegates via `resolveBackend(mode)`.
+* [x] `--mode host` still dispatches to `DockerBackend` (Phase 3 adds `HostBackend`) — Phase 0 limitation preserved.
+* [x] Existing `docker.test.ts` passes unchanged; `wpi dry-run` output byte-identical to `main` (only the `runtime mode:` line differs).
+* [x] New `src/runtime/backend.test.ts` locks the dispatch contract.
 
-**Exit criteria:** suite green; manual dry-run/build parity.
+**Deviations from the original sketch (noted for later phases):**
+* `run`/`shell`/`execShell` return `Promise<void>` and exit internally (today's `process.exit` behavior), **not** `Promise<number>`. Exit-code propagation is a behavior change deferred to a later phase.
+* `checkPrerequisites()` takes no `config` argument (Phase 1 only needs the default-backend check); Phase 3 will make it mode-aware and likely move it post-config.
 
-## Phase 2 — Mode-aware doctor (Docker only)
+**Exit criteria met:** suite green (344 tests); manual dry-run parity verified across default, full-config, and `--` pi-args scenarios.
 
-Unchanged from the original plan, plus sandbox-awareness in the report shape:
+## Phase 2 — Mode-aware doctor (Docker only)  ✅ done
 
-* [ ] `wpi doctor` sections: Runtime, Sandbox, Pi, Docker, Configuration — the Sandbox section reports "not configured" gracefully until Phase 3 lands.
-* [ ] Exit codes `0/1/2`; secret-looking YAML `env` values warn.
+* [x] `wpi doctor` sections: **Runtime, Pi, Docker, Configuration**. A **Sandbox** sub-check lives under Runtime as `info` ("not configured — Phase 3+") and never affects the exit code; it becomes a full section in Phase 3.
+* [x] Exit codes `0/1/2`: `0` healthy, `1` warn (non-blocking: secret-looking env, image not built), `2` error (blocking: Docker CLI missing or daemon unreachable). Error dominates warn.
+* [x] Secret-looking YAML `env` values warn — `looksLikeSecretKey` matches `KEY`/`API_KEY`/`TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`/`PRIVATE`; message pushes users toward nono credential routes (Phase 3+).
+* [x] `DoctorReport` is backend-produced and CLI-rendered (`renderDoctorReport`); `DockerBackend.doctor` shells out for the Docker CLI/daemon/image checks.
+* [x] Tests: `src/runtime/doctor.test.ts` (24 cases — secret detection, exit codes, sections, rendering, mocked Docker checks) + 2 end-to-end CLI cases in `cli.test.ts`.
+
+**Exit criteria met:** suite green (370 tests); manual `wpi doctor` confirmed with daemon-down (exit 2) and secret-env (warn) scenarios; no dry-run regression.
 
 ## Phase 3 — Host mode with nono *(was: "nono mode")*
 
@@ -218,9 +228,9 @@ Unchanged from the original Phase 4.
 
 | Phase | Deliverable                                              | Depends on                   | Risk                                                                 |
 | ----- | -------------------------------------------------------- | ---------------------------- | -------------------------------------------------------------------- |
-| 0     | `runtime.mode: docker\|host` (+ maybe `sandbox.backend`) | —                            | Low — **revise PR #7 before merge**                                  |
-| 1     | `RuntimeBackend` + `DockerBackend` extraction            | 0                            | **High** (regression) — pure refactor                                |
-| 2     | `wpi doctor` (Docker)                                    | 1                            | Low                                                                  |
+| 0     | `runtime.mode: docker\|host` (+ maybe `sandbox.backend`) | —                            | Low — **done (cf1b6e3)**                                  |
+| 1     | `RuntimeBackend` + `DockerBackend` extraction            | 0                            | **High** (regression) — **done (cd7f816)**                |
+| 2     | `wpi doctor` (Docker)                                    | 1                            | Low — **done**                                |
 | 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium                                                               |
 | 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — profile must cover socket/mounts without over-granting |
 | 5     | Native package wiring                                    | 3                            | Medium (idempotency critical)                                        |

@@ -20,6 +20,7 @@
 import type { PiContainerConfig, RuntimeContext, RuntimeMode } from "../config";
 import { DEFAULT_RUNTIME_MODE } from "../config";
 import { DockerBackend } from "./docker-backend";
+import type { DoctorReport } from "./doctor";
 
 /** The fully-resolved config shape passed to backends (= loadConfig's return type). */
 export type ResolvedConfig = PiContainerConfig & RuntimeContext;
@@ -43,6 +44,12 @@ export interface RuntimeBackend {
   execShell(containerId: string): Promise<void>;
   /** Print backend-specific dry-run output (command preview). No execution. */
   dryRun(config: ResolvedConfig, piArgs: string[]): void;
+  /**
+   * Produce a mode-aware health report (Phase 2). Never exits on its own —
+   * cli.ts renders the report and exits with report.exitCode (0 healthy,
+   * 1 warn, 2 error).
+   */
+  doctor(config: ResolvedConfig): Promise<DoctorReport>;
 }
 
 /**

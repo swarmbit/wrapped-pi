@@ -18,8 +18,11 @@ import {
   shellInContainer,
   execInContainer,
   buildDockerRunArgs,
+  imageExists,
 } from "../docker";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
+import type { DoctorReport, DoctorSection, DoctorStatus, DoctorCheck } from "./doctor";
+import { buildReport, buildRuntimeSection, buildConfigurationSection } from "./doctor";
 
 export class DockerBackend implements RuntimeBackend {
   readonly mode: RuntimeMode = "docker";
@@ -71,5 +74,103 @@ export class DockerBackend implements RuntimeBackend {
     ];
     console.log("Docker build command (would be run in temp build context):");
     console.log(`  ${buildArgs.join(" ")}`);
+  }
+
+  async doctor(config: ResolvedConfig): Promise<DoctorReport> {
+    const sections: DoctorSection[] = [
+      buildRuntimeSection(config.runtimeMode),
+      this.buildPiSection(config),
+      this.buildDockerSection(),
+      buildConfigurationSection(config),
+    ];
+    return buildReport(config.runtimeMode, sections);
+  }
+
+  // ── Doctor: Docker-specific sections ────────────────────────
+
+  private buildPiSection(config: ResolvedConfig): DoctorSection {
+    const checks: DoctorSection extends never ? never : { status: import("./doctor").DoctorStatus; label: string; detail: string }[] = [];
+    void checks; // placeholder removed below
+    return this.assemblePiSection(config);
+  }
+
+  private assemblePiSection(config: ResolvedConfig): DoctorSection {
+    const checks: { status: import("./doctor").DoctorStatus; label: string; detail: string }[] = [
+      { status: "ok", label: "version", detail: config.piVersion },
+    ];
+
+    // Image presence — Docker-specific (uses `docker image inspect`).
+    let imageStatus: import("./doctor").DoctorStatus = "ok";
+    let imageDetail: string;
+    try {
+      if (imageExists(config.piImage)) {
+        imageDetail = `built (${config.piImage})`;
+      } else {
+        imageStatus = "warn";
+        imageDetail = `not built — run \`wpi build\` (will build on next run)`;
+      }
+    } catch (e) {
+      // imageExists shells out to docker; if docker is unreachable, downgrade to info
+      // so the Docker section's error is the authoritative one.
+      imageStatus = "info";
+      imageDetail = "could not check (docker unreachable)";
+      debugLog("doctor: imageExists failed:", e);
+    }
+    checks.push({ status: imageStatus, label: "image", detail: imageDetail });
+
+    return { name: "Pi", checks };
+  }
+
+  private buildDockerSection(): DoctorSection {
+    const checks: DoctorCheck[] = [];
+
+    // Docker CLI
+    try {
+      const cliVersion = execSync("docker --version", { stdio: "pipe" }).toString().trim();
+      checks.push({ status: "ok", label: "docker cli", detail: cliVersion });
+    } catch (e) {
+      debugLog("doctor: docker cli check failed:", e);
+      checks.push({
+        status: "error",
+        label: "docker cli",
+        detail: "not installed or not on PATH",
+      });
+      // No point checking the daemon if the CLI is missing.
+      checks.push({
+        status: "error",
+        label: "docker daemon",
+        detail: "unreachable (docker cli missing)",
+      });
+      return { name: "Docker", checks };
+    }
+
+    // Docker daemon (requires the CLI to be present)
+    try {
+      // `docker info --format` only succeeds when the daemon is reachable.
+      const result = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
+        stdio: "pipe",
+        timeout: 10_000,
+      });
+      if (result.status === 0 && result.stdout) {
+        const serverVersion = result.stdout.toString().trim();
+        checks.push({
+          status: "ok",
+          label: "docker daemon",
+          detail: `running (server ${serverVersion || "unknown"})`,
+        });
+      } else {
+        checks.push({
+          status: "error",
+          label: "docker daemon",
+          detail: "not running — start Docker Desktop or the docker daemon",
+        });
+      }
+    } catch (e) {
+      debugLog("doctor: docker daemon check failed:", e);
+      checks.push({
+        status: "error", label: "docker daemon", detail: "not running" });
+    }
+
+    return { name: "Docker", checks };
   }
 }
