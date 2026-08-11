@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // ============================================================
-// wpi — Run Pi Coding Agent in Docker
+// wpi — Run Pi Coding Agent in Docker or on the host (dual-mode)
 // ============================================================
 // Usage:
-//   wpi                          # interactive session
+//   wpi                          # interactive session (docker+nono default)
 //   wpi -- -p "Summarize this"   # print mode
 //   wpi -- -r                     # resume session
-//   wpi build                    # build/rebuild image
-//   wpi shell                    # drop into container shell
-//   wpi shell <container-id>     # exec into an existing container
+//   wpi --mode host              # native host mode (nono sandboxed)
+//   wpi build                    # docker: build image · host: provision
+//   wpi setup                    # provision + verify the combination
+//   wpi shell                    # docker: container shell · host: sandboxed shell
+//   wpi shell <container-id>     # docker only: exec into an existing container
 //
 // Port config precedence (highest wins):
 //   1. CLI flags              (-p, --port)
@@ -28,11 +30,12 @@ function printHelp(): void {
 Usage: wpi [command] [options] [-- PI_ARGS...]
 
 Commands:
-  (default)     Run pi in Docker (interactive session)
-  build         Build or rebuild the Docker image
-  shell [id]    Open a shell in a new container, or exec into an existing one by ID/name
-  dry-run       Print resolved config and docker commands without executing
-  doctor        Check runtime/docker/config health (exit 0 healthy, 1 warn, 2 error)
+  (default)     Run pi (interactive session) in the configured mode (docker default)
+  build         docker: build/rebuild the image · host: no-op (provisions profile + package)
+  shell [id]    Open a shell: docker — new container (or exec into <id>);
+                host — sandboxed native shell
+  dry-run       Print resolved config and commands without executing
+  doctor        Check runtime/sandbox/docker/config health (exit 0 healthy, 1 warn, 2 error)
   setup         Provision and verify the current runtime/sandbox combination
                 (exit 0 ready, 1 warn, 2 error)
 

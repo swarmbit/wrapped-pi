@@ -27,8 +27,9 @@ vi.mock("child_process", () => ({
   execSync: vi.fn(),
   spawn: vi.fn(),
 }));
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 const mockedExecSync = vi.mocked(execSync);
+const mockedSpawn = vi.mocked(spawn);
 
 function makeHostConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
@@ -437,5 +438,71 @@ describe("HostBackend — ensurePackageWiringOrWarn via build", () => {
 
     expect(fs.statSync(settingsPath).mtimeMs).toBe(before);
     expect(logs.join(" ")).not.toContain("wired bundled package"); // no re-wire noise
+  });
+});
+
+// ── HostBackend.shell per combination (Phase 7) ─────────────
+
+describe("HostBackend.shell", () => {
+  let backend: HostBackend;
+  let tmpHome: string;
+  let tmpSource: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-shell-")));
+    tmpSource = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-shell-src-")));
+    vi.stubEnv("HOME", tmpHome);
+    fs.mkdirSync(path.join(tmpSource, "extensions"), { recursive: true });
+    fs.writeFileSync(path.join(tmpSource, "package.json"), JSON.stringify({ name: "wpi-defaults" }));
+    fs.writeFileSync(path.join(tmpSource, "extensions/sample.ts"), "export const x = 1;\n");
+    backend = new HostBackend({ packageSourceDir: tmpSource });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpSource, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it("host+nono: launches `nono shell --profile wpi` (sandboxed interactive shell)", async () => {
+    mockedExecSync.mockReturnValue("ok" as never); // pi/nono probes
+    // spawnInherit resolves on child "close"; fire it synchronously with exit 0.
+    const spawnSpy = mockedSpawn.mockImplementation((() => ({
+      on: (event: string, cb: (code?: number) => void) => {
+        if (event === "close") cb(0);
+        return undefined;
+      },
+    })) as never);
+
+    const config = makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "nono" });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await backend.shell(config);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+
+    expect(spawnSpy).toHaveBeenCalledWith("nono", ["shell", "--profile", "wpi", "--allow-cwd", "--rollback"], { stdio: "inherit" });
+  });
+
+  it("host+none: launches $SHELL natively with an unsandboxed notice", async () => {
+    mockedExecSync.mockReturnValue("ok" as never);
+    const spawnSpy = mockedSpawn.mockImplementation((() => ({
+      on: (event: string, cb: (code?: number) => void) => {
+        if (event === "close") cb(0);
+        return undefined;
+      },
+    })) as never);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    process.env.SHELL = "/bin/bash";
+
+    await backend.shell(makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "none" }));
+
+    const errOutput = errSpy.mock.calls.flat().join(" ");
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    expect(errOutput).toContain("UNSANDBOXED");
+    expect(spawnSpy).toHaveBeenCalledWith("/bin/bash", ["/bin/bash"], { stdio: "inherit" });
   });
 });

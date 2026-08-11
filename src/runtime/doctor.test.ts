@@ -427,3 +427,24 @@ describe("DockerBackend.doctor", () => {
     ]);
   });
 });
+describe("buildConfigurationSection — cross-mode warnings (Phase 7)", () => {
+  it("warns when network.* is configured but mode is docker (host+nono only)", () => {
+    const config = makeConfig({
+      runtimeMode: "docker",
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic"], allowDomains: ["api.anthropic.com"] },
+    });
+    const section = buildConfigurationSection(config);
+    const net = section.checks.find((c) => c.label === "network.*");
+    expect(net?.status).toBe("warn");
+    expect(net?.detail).toMatch(/host\+nono only/);
+  });
+
+  it("does not warn about network.* in host mode", () => {
+    const config = makeConfig({
+      runtimeMode: "host",
+      network: { ...EMPTY_NETWORK, credentials: ["anthropic"] },
+    });
+    const section = buildConfigurationSection(config);
+    expect(section.checks.some((c) => c.label === "network.*")).toBe(false);
+  });
+});

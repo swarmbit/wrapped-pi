@@ -1,25 +1,55 @@
 # wpi
 
-Run [Pi Coding Agent](https://pi.dev/) in Docker with a safety extension and default settings baked into the image.
+Run [Pi Coding Agent](https://pi.dev/) with team-standard extensions and settings —
+**in Docker or natively on your host**, and **sandboxed by [nono](https://nono.sh) by default** on both.
+
+`wpi` is two independent axes, never conflated:
+
+| Axis | Values | Meaning |
+|---|---|---|
+| `runtime.mode` | `docker` (default) \| `host` | Where pi executes: container userspace vs. native host process |
+| `sandbox.backend` | `nono` (default on **both**) \| `none` | Whether the launched process tree runs under nono supervision |
+
+| Mode | Sandbox | What runs | When to use |
+|---|---|---|---|
+| `docker` | `nono` | `nono run --profile wpi-docker -- docker run pi` | **Default** — Docker reproducibility **plus** kernel-enforced fs/socket limits on the container's host-side access |
+| `docker` | `none` | `docker run pi` (classic wpi) | Explicit opt-out — `doctor` warns |
+| `host` | `nono` | `nono run --profile wpi -- pi` | The lightweight native path: no image, Landlock/Seatbelt isolation, credential injection, audit, rollback |
+| `host` | `none` | `pi` directly | Debugging / environments where nono can't run — `doctor` warns loudly |
+
+> **Breaking change (wpi ≥ 1.0):** `sandbox.backend` now defaults to `nono` on
+> both modes. `sandbox: none` is an explicit opt-out, never a silent fallback.
+> See [Upgrading](#upgrading).
 
 ## Why
 
-Running pi in Docker ensures every team member uses the same environment — same pi version, same safety gates.
-
-`wpi` makes this simple:
-
-- **CWD-respect mounts**: uses `docker run` directly, so `$(pwd)/` is always mounted as `/<dirname>`
-- **Identity mirroring**: the container user and home directory match the host — paths are the same inside and outside the container
-- **One install**: `npm install -g wpi` works from any directory
-- **Baked-in defaults**: safety extension, github theme, and sensible settings — no setup required
-- **Port forwarding**: expose container ports for web dev with `-p`
+- **One environment per team**: docker mode bakes the same pi version, safety
+  gates, extensions, and settings into every container.
+- **Host mode when you want native speed**: run pi directly on macOS/Linux with
+  kernel sandboxing instead of a container.
+- **Sandboxed by default**: nono constrains what the launched process tree can
+  touch — on the host (pi) *and* around the docker client (socket + mounts).
+- **Secrets via credential routes**: nono holds the real keys; pi gets phantoms.
+- **CWD-respect mounts** (docker): `$(pwd)/` is always mounted as `/<dirname>`,
+  and the container user/home mirror the host — identical paths inside and out.
+- **Baked-in defaults**: safety extension, github theme, sensible settings.
+- **One install**: `npm install -g wpi` works from any directory.
 
 ## Install
+
+### Prerequisites
+
+- Node.js ≥ 22 (runtime + build)
+- **Docker** — required for `docker` mode (build and run containers)
+- **nono** — required for `sandbox: nono` (the default):
+  `curl -fsSL https://nono.sh/install.sh | sh`
+- **pi** — required for `host` mode: `npm install -g @earendil-works/pi-coding-agent`
 
 ### From npm (recommended)
 
 ```bash
 npm install -g wpi
+wpi setup          # verify + provision the default (docker+nono) combination
 ```
 
 ### From source
@@ -27,11 +57,6 @@ npm install -g wpi
 ```bash
 git clone https://github.com/swarmbit/wrapped-pi.git
 cd wpi
-
-# Required dependencies:
-#   - Node.js >= 22  (runtime + TypeScript compilation)
-#   - Docker         (build and run containers)
-#   - npm            (package manager)
 
 npm install        # install TypeScript, vitest, and runtime deps
 npm run build      # compile TypeScript → dist/
@@ -50,25 +75,44 @@ wpi build
 ## Usage
 
 ```bash
-# From any project directory:
+# From any project directory — docker+nono is the default:
 cd my-project
 wpi                    # interactive session
 wpi -- -p "Summarize"  # print mode
 wpi -- -r              # resume session
 
-# With port forwarding for web dev:
+# Host mode (native, sandboxed by nono):
+wpi --mode host
+
+# Explicitly unsandboxed (doctor will warn):
+wpi --mode host --sandbox none
+
+# With port forwarding for web dev (docker mode):
 wpi -p 3000              # expose port 3000
 wpi -p 3000 -p 6006    # expose multiple ports
 wpi -p 8080:3000        # host 8080 → container 3000
 
 # Management:
-wpi build              # build/rebuild the image
-wpi shell              # open a shell in a new container
-wpi shell <id>         # exec into an existing container
-wpi dry-run            # print config and docker commands (debugging)
+wpi build              # docker: build/rebuild the image · host: no-op, provisions profile + package
+wpi setup              # verify + provision the current mode/sandbox combination (exit 0/1/2)
+wpi doctor             # health check (runtime/sandbox/docker/pi/config) (exit 0/1/2)
+wpi shell              # docker: shell in a new container · host: sandboxed native shell
+wpi shell <id>         # docker only: exec into an existing container
+wpi dry-run            # print resolved config and the exact commands (debugging)
 ```
 
+### `wpi shell` per combination
+
+| Combination | Command |
+|---|---|
+| docker + none | `docker run … /bin/bash` (classic) |
+| docker + nono | `nono run --profile wpi-docker … -- docker run … /bin/bash` |
+| host + nono | `nono shell --profile wpi --allow-cwd --rollback` |
+| host + none | `$SHELL` natively + `⚠ UNSANDBOXED` notice |
+
 ## How it works
+
+### Docker mode
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -76,189 +120,210 @@ wpi dry-run            # print config and docker commands (debugging)
 │                                                          │
 │  ┌─────────────────────────────────────────┐             │
 │  │  /opt/pi-package/                       │  ◄── Baked  │
-│  │    ├── package.json                      │      into   │
-│  │    ├── extensions/                       │      image  │
-│  │    │   ├── confirm-dangerous/           │             │
-│  │    │   ├── tool-sanitizer/              │             │
-│  │    │   ├── worktree/                    │             │
-│  │    │   ├── llm-log/                     │             │
-│  │    │   ├── tps/                         │             │
-│  │    │   ├── git-files/                   │             │
-│  │    │   └── web/                         │             │
+│  │    ├── package.json                     │      into   │
+│  │    ├── extensions/                      │      image  │
 │  │    └── themes/                          │             │
-│  │        └── github.json                  │             │
 │  └─────────────────────────────────────────┘             │
 │         │                                                  │
 │         │ pi install /opt/pi-package                      │
 │         │ (registers extensions, themes in settings)      │
 │         ▼                                                  │
-│  ┌─────────────────────────────────────────┐             │
-│  │  <host-home>/.pi/       ◄── Host mount (path mirrored) │
-│  │  (e.g. /Users/<user>/.pi on macOS)                    │
-│  │    └── agent/                                         │
-│  │        ├── settings.json   (shared w/ native pi)      │
-│  │        ├── auth.json       (shared w/ native pi)      │
-│  │        ├── sessions/       (shared w/ native pi)      │
-│  │        ├── extensions/                                │
-│  │        ├── npm/                                       │
-│  │        └── skills/                                    │
-│  └─────────────────────────────────────────┘             │
-│                                                          │
-│  ┌─────────────────────────────────────────┐             │
-│  │  /<project-dir>/               ◄── CWD mount         │
-│  │    (your project directory)             │             │
-│  └─────────────────────────────────────────┘             │
+│  <host-home>/.pi  ◄── Host mount (path mirrored)          │
+│  /<project-dir>   ◄── CWD mount                           │
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Baked into the image**: pi binary (pinned version), default pi package (safety extension, github theme), default settings
-- **Installed on startup**: `pi install /opt/pi-package` registers the built-in package — extensions and themes are discovered by pi automatically
-- **Additional packages**: use `pi install` inside the container to add packages at runtime
-- **Mounted from host** (persists across runs): `~/.pi` (settings, auth, sessions, extensions) — mounted at `<host-home>/.pi` so the path is identical inside and outside the container
-- **Mounted from CWD** (your project): mounts `$(pwd)` as `/<dirname>` (e.g., `/myproject`)
-- **Identity mirroring**: the container creates a user and home directory that match the host (username, UID/GID, and home path), so all paths are consistent between host and container
-- **Port forwarding** (optional): `-p` flags expose container ports on `localhost`
+When `sandbox: nono`, the whole `docker …` invocation runs under
+`nono run --profile wpi-docker --allow-cwd --rollback -- docker …`. The
+`wpi-docker` profile (authored by wpi at `~/.config/nono/profiles/wpi-docker.json`,
+extends nono's `default`) scopes the **client's host-side footprint**: the daemon
+socket (`docker.socket`), build-context temp dirs, declared `docker.mounts`
+(ro → read, rw → read-write), and `~/.pi`. Everything else is denied. nono does
+**not** filter in-container traffic — that boundary is Docker's.
 
-Each invocation creates a fresh container. Multiple instances can run simultaneously (no `--name` collision).
+### Host mode
+
+```
+nono run --profile wpi --allow-cwd --rollback -- pi <args>
+```
+
+pi runs natively. The `wpi` profile (authored at
+`~/.config/nono/profiles/wpi.json`, extends the signed `nolabs-ai/pi` pack)
+grants the workspace read-write plus whatever `workspace.*` / `nono.*` fs paths
+you declared, and maps `network.*` to nono's proxy + credential routes. The
+bundled package is wired natively to `~/.pi/wpi-package/<wpi-version>/` and
+registered in `~/.pi/agent/settings.json`.
+
+### Both modes
+
+- **Baked-in package**: default extensions (confirm-dangerous, tool-sanitizer,
+  worktree, llm-log, tps, git-files, web), the github theme, and the commit
+  skill — from the `package/` dir shipped in the wpi npm package.
+- **Shared state**: `~/.pi` (settings, auth, sessions) is used by both modes and
+  by native pi directly.
+- Each docker invocation creates a fresh container (`--rm`); multiple instances
+  can run simultaneously.
 
 ## Configuration
 
-wpi reads config from two files (both in YAML format) and CLI flags. All settings are optional — zero config works out of the box.
-
-### Config files
+wpi reads config from two files (YAML) plus CLI flags. All settings are
+optional — zero config works out of the box (docker + nono).
 
 | File | Purpose | Committed? |
-|------|---------|------------|
+|---|---|---|
 | `.pi/wpi.yml` | Project-level defaults (team-shared) | Yes |
 | `~/.pi/wpi.yml` | Personal overrides (all projects) | No |
 
-### Precedence (highest wins)
-
-1. CLI flags (`-p`, `--port`)
-2. User config (`~/.pi/wpi.yml`)
-3. Project config (`.pi/wpi.yml`)
-
-For `docker.env`, user keys override project keys with the same name. For `docker.mounts` and `docker.volumes`, user entries override project entries on matching container paths and add new entries for different paths.
-
----
+**Precedence (highest wins):** CLI flags (`-p`, `--mode`, `--sandbox`) → user
+config → project config. `docker.env` user keys override project keys; mounts
+and volumes merge (user wins on matching container paths).
 
 ### Full config reference
 
-Here is every supported key in a `wpi.yml` file:
-
 ```yaml
+# ── Runtime & sandbox (two axes) ──────────────────────────
+runtime:
+  mode: docker        # docker | host (default: docker)
+sandbox:
+  backend: nono       # nono | none (default: nono on BOTH modes; none = opt-out)
+
 # ── Pi settings ────────────────────────────────────────────
 pi:
-  version: 0.79.1   # pin to a specific pi version (default: baked-in)
+  version: 0.79.1     # docker mode: pin the image's pi (default: baked-in)
 
-# ── Docker settings ────────────────────────────────────────
+# ── Docker settings (docker mode) ──────────────────────────
 docker:
-  # Expose container ports on localhost so you can access web
-  # apps running inside the container from your browser.
-  # Formats: simple port, host:container, or range.
-  ports:
-    - 3000            # localhost:3000 → container:3000
-    - 8080:80         # localhost:8080 → container:80
-    - 9000-9010       # port range — expands to 11 entries
+  socket: /var/run/docker.sock  # daemon socket — granted in the wpi-docker profile
+                                # ($DOCKER_HOST unix:// form is honoured)
 
-  # Mount arbitrary host paths into the container.
-  # Format: HOST_PATH:CONTAINER_PATH[:MODE]
-  # Supported placeholders: ~ or ${home} (host home dir), ${workspaceDir} (project dir)
-  # User mounts override project mounts on matching container paths.
+  # Expose container ports on localhost (simple, host:container, or range).
+  ports:
+    - 3000
+    - 8080:80
+    - 9000-9010
+
+  # Mount arbitrary host paths. HOST:CONTAINER[:MODE]
+  # Placeholders: ~ or ${home}, ${workspaceDir}
   mounts:
     - /var/run/docker.sock:/var/run/docker.sock  # Docker-out-of-Docker
     - ~/.ssh:~/.ssh:ro                           # SSH keys (read-only)
 
-  # Named Docker volumes that persist across all wpi containers.
-  # Useful for caching build artifacts (Maven, Gradle, npm, etc.).
-  # Format: VOLUME_NAME:CONTAINER_PATH[:MODE]
-  # Supported placeholders: ~ or ${home} (host home dir), ${workspaceDir} (project dir)
+  # Named Docker volumes that persist across containers.
   volumes:
     - wpi-m2:${home}/.m2
-    - wpi-gradle:${home}/.gradle
 
-  # Limit container memory (docker run --memory / --memory-swap).
   memory: 4g
   memorySwap: 4g
 
-  # Environment variables injected into the container at runtime.
+  # Environment variables injected into the container (docker mode).
+  # In host mode these are NOT injected — use network.credentials instead.
   env:
     CUSTOM_VAR: some-value
-    NODE_ENV: development
 
   # Extra Dockerfile instructions appended at image build time.
-  # Use this to install system packages or tools. After changing
-  # this, rebuild the image with `wpi build`.
   extension: |
     RUN apt-get update && apt-get install -y python3 pip
-    ENV PYTHONUNBUFFERED=1
 
-# ── Git settings ───────────────────────────────────────────
-# Set the Git author identity for commits made inside the container.
-# If not set, wpi infers them from the host git config.
-# Precedence: project config > user config > host git config.
+# ── Git settings (docker mode; host uses your git config) ──
 git:
   user:
     name: John Doe
     email: john@example.com
+
+# ── Network / credential routes (host + nono) ──────────────
+network:
+  mode: filtered      # filtered (default) | open | blocked
+  allowDomains:
+    - api.anthropic.com
+    - github.com
+  credentials: [anthropic, github]   # preset services; real keys stay in the supervisor
+  customCredentials:                 # non-preset APIs (e.g. Firecrawl)
+    firecrawl:
+      upstream: https://api.firecrawl.dev
+      credentialKey: firecrawl_api_key   # keyring name | env://VAR | op://…
+      envVar: FIRECRAWL_API_KEY
+      injectHeader: Authorization
+      credentialFormat: "Bearer {}"
+
+# ── Extra fs grants beyond the read-write workdir (host + nono) ──
+workspace:
+  allowPaths: [~/src]
+  readPaths: [/etc]
+
+# ── nono profile tuning ────────────────────────────────────
+nono:
+  allowPaths: [/tmp/build]
+  readPaths: [~/.config]
+  dockerProfile: wpi-docker  # profile name used when sandboxing docker mode
 ```
 
-> **Important:** After changing `docker.extension` or updating wpi,
-> you must rebuild the image with `wpi build`. The image is not
-> rebuilt automatically on each run — it's only built when it doesn't exist yet.
+> **Important (docker mode):** after changing `docker.extension` or updating
+> wpi, rebuild the image with `wpi build` — it is only built when missing.
 
 ### Settings reference
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `pi.version` | `string` | *(baked-in)* | Pin to a specific pi version. Overrides the version bundled with this wpi release. |
-| `docker.ports` | `list` | `[]` | Container ports to expose on `127.0.0.1`. Accepts simple ports (`3000`), host:container mappings (`8080:80`), and ranges (`9000-9010`). |
-| `docker.mounts` | `list` | `[]` | Custom host-to-container volume mounts. Each entry is `HOST:CONTAINER[:MODE]` (e.g., `/var/run/docker.sock:/var/run/docker.sock` or `~/.ssh:~/.ssh:ro`). Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). User mounts override project mounts on matching container paths. |
-| `docker.volumes` | `list` | `[]` | Named Docker volumes created and mounted into the container. Each entry is `VOLUME_NAME:CONTAINER_PATH[:MODE]`. Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). Volumes persist across runs — useful for caches like `.m2`, `.gradle`, or `node_modules`. |
-| `docker.memory` | `string` | — | Maximum memory for the container (`docker run --memory`). Example: `4g`. |
-| `docker.memorySwap` | `string` | — | Memory+swap limit for the container (`docker run --memory-swap`). Example: `4g`. |
-| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables via `docker run -e`. User config overrides project config per-key. |
-| `docker.extension` | `string` | — | Extra Dockerfile content appended during `wpi build`. Use it to install system packages or set image-level `ENV` vars. Requires a manual rebuild. |
-| `git.user.name` | `string` | *(host git config)* | Git author name for commits inside the container. Falls back to `git config user.name` from the host. |
-| `git.user.email` | `string` | *(host git config)* | Git author email for commits inside the container. Falls back to `git config user.email` from the host. |
+| Key | Default | Mode | Description |
+|---|---|---|---|
+| `runtime.mode` | `docker` | both | `docker` (container) or `host` (native process) |
+| `sandbox.backend` | `nono` | both | `nono` (default) or `none` (explicit opt-out; doctor warns) |
+| `pi.version` | *(baked-in)* | docker | Pin the image's pi version (host mode uses the installed `pi`) |
+| `docker.socket` | `/var/run/docker.sock` | docker+nono | Daemon socket granted in the wpi-docker profile |
+| `docker.ports` | `[]` | docker | Container ports exposed on `127.0.0.1` (host mode: simple ports → `--listen-port` grants) |
+| `docker.mounts` | `[]` | docker | Host→container mounts; host side also granted in the wpi-docker profile |
+| `docker.volumes` | `[]` | docker | Named volumes (daemon-side; no host grant needed) |
+| `docker.memory` / `memorySwap` | — | docker | `docker run --memory / --memory-swap` |
+| `docker.env` | `{}` | docker | Container env vars (host mode: not injected — see matrix) |
+| `docker.extension` | — | docker | Extra Dockerfile instructions (host mode: warned + ignored) |
+| `git.user.name` / `email` | *(host git config)* | docker | Git identity inside the container |
+| `network.mode` | `filtered` | host+nono | Proxy mode: filtered / open / blocked |
+| `network.allowDomains` | `[]` | host+nono | Domains allowed through the proxy |
+| `network.credentials` | `[]` | host+nono | Preset services (openai, anthropic, gemini, google-ai, github, gitlab) |
+| `network.customCredentials` | `{}` | host+nono | Custom credential routes (any API) |
+| `workspace.allowPaths` / `readPaths` | `[]` | host+nono | Extra fs grants beyond the read-write workdir |
+| `nono.allowPaths` / `readPaths` | `[]` | host+nono | Merged with `workspace.*` into the wpi profile |
+| `nono.dockerProfile` | `wpi-docker` | docker+nono | Profile name used when sandboxing docker mode |
+
+For the complete behavior of every setting in every combination
+(apply / warn / error), see **[docs/behavior-matrix.md](docs/behavior-matrix.md)**.
 
 ### CLI flags
 
 | Flag | Description |
-|------|-------------|
-| `-p`, `--port PORT` | Publish a container port on localhost (repeatable). Formats: `3000` or `8080:3000`. Port ranges are not supported via CLI — use the config file. |
-| `--debug`, `-d` | Enable debug logging. Prints resolved config, docker commands, and container output to stderr. |
+|---|---|
+| `--mode MODE` | `docker` (default) or `host` — overrides config for this run only |
+| `--sandbox BACKEND` | `nono` (default) or `none` — overrides config for this run only |
+| `-p`, `--port PORT` | Publish a container port on localhost (repeatable). `3000` or `8080:3000`. Ranges are config-only. |
+| `--debug`, `-d` | Debug logging (resolved config + commands to stderr) |
 
 ### Commands
 
 | Command | Description |
-|---------|-------------|
-| *(default)* | Run pi interactively in a new container |
-| `build` | Build or rebuild the Docker image. Run this after changing `docker.extension` or updating wpi. |
-| `shell` | Open a bash shell in a new container (useful for debugging or running arbitrary commands) |
-| `shell <id>` | Exec into an existing running container by ID or name. |
-| `dry-run` | Print the resolved config and the docker commands that would run, without executing anything. Useful for debugging config resolution. |
-
-### Port details
-
-All ports bind to `127.0.0.1` (localhost only) for security. Ranges (`9000-9010`) are supported in config files but not via CLI flags. If a host port is already in use, `wpi` will report the conflict and exit.
+|---|---|
+| *(default)* | Run pi in the configured mode/sandbox |
+| `setup` | Provision + verify the combination (profiles, pack, package wiring, smoke test). Exit 0 ready / 1 warn / 2 error |
+| `doctor` | Read-only health check (runtime, sandbox, profile, pi, docker, package, config). Exit 0 healthy / 1 warn / 2 error |
+| `build` | docker: build/rebuild the image · host: no-op (provisions profile + package) |
+| `shell` | docker: bash in a new container · host: sandboxed native shell |
+| `shell <id>` | docker only: exec into an existing container |
+| `dry-run` | Print resolved config + exact commands without executing |
 
 ### Example: full project config
 
 ```yaml
 # .pi/wpi.yml — committed to git, shared by the team
+runtime:
+  mode: docker
+
 docker:
   ports:
     - 3000            # Next.js dev server
     - 6006            # Storybook
-    - 8080:80         # Reverse proxy
 
   mounts:
     - /var/run/docker.sock:/var/run/docker.sock
 
   env:
     NODE_ENV: development
-    CUSTOM_API_URL: https://api.example.com
 
   extension: |
     RUN apt-get update && apt-get install -y python3
@@ -269,176 +334,108 @@ git:
     email: bot@example.com
 ```
 
-After adding `docker.extension`, rebuild the image:
-
-```bash
-wpi build
-```
-
-### Example: personal override
+### Example: host mode with credential routes
 
 ```yaml
-# ~/.pi/wpi.yml — not committed, personal overrides
-docker:
-  ports:
-    - 3000
+# .pi/wpi.yml
+runtime:
+  mode: host
 
-  env:
-    CUSTOM_VAR: personal-value
+network:
+  mode: filtered
+  allowDomains:
+    - api.anthropic.com
+  credentials: [anthropic]
 ```
 
-## Multiple instances
+## Secrets
 
-Each `wpi` invocation creates a new ephemeral container (`docker run --rm`). Containers don't interfere with each other. The pi config directory (`~/.pi`) is shared on the host, so settings and auth persist across runs.
-
-If you need to run two agents on the same project simultaneously, that's a workflow concern (like two editors on the same files), not a container concern.
-
-## Where config lives
-
-| Host path | Container path | Contents |
-|-----------|---------------|----------|
-| `$(pwd)` | `/<basename>` | Your project (CWD mount, named after directory) |
-| `~/.pi` | `<host-home>/.pi` | Full pi config (mounted at the same path as host) |
-| `~/.pi/agent/settings.json` | `<host-home>/.pi/agent/settings.json` | Model, thinking level, preferences |
-| `~/.pi/agent/auth.json` | `<host-home>/.pi/agent/auth.json` | OAuth tokens |
-| `~/.pi/agent/sessions/` | `<host-home>/.pi/agent/sessions/` | Conversation history |
-| `~/.pi/agent/extensions/` | `<host-home>/.pi/agent/extensions/` | User extensions |
-| `~/.pi/agent/npm/` | `<host-home>/.pi/agent/npm/` | Installed package data |
-| `~/.pi/wpi.yml` | *(not mounted)* | User-level wpi config |
-
-> **Note:** `<host-home>` is the host user's home directory (e.g. `/Users/<user>` on macOS, `/home/<user>` on Linux). The container creates a user with the same username, UID/GID, and home path, so all paths are identical inside and outside the container.
-
-If you use pi both natively and in the container, they share the same config.
+- `docker.env` values that look like secrets are flagged by `doctor` — prefer
+  nono credential routes.
+- **host+nono**: `network.credentials` / `customCredentials` hold the real keys
+  in nono's keystore; the covered `env` var is denied in the child and a phantom
+  is injected (route wins).
+- **host+none**: `docker.env` is not injected at all — a covered key in env
+  would leak nothing (it's ignored) but `doctor` still warns you to move it to a
+  route.
 
 ## Bundled Extensions
 
-The default package includes several extensions:
+The default package includes:
 
-- **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, etc.), writes to system paths, and modifications to the pi config directory
-- **tool-sanitizer** — Repairs malformed tool arguments before execution (disabled by default, toggle with `/tool-sanitizer:enable`)
-- **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
-- **llm-log** — Logs all LLM I/O as Markdown (`/llmlog on|off|status`)
-- **tps** — Displays tokens-per-second metrics after each agent run
-- **git-files** — TUI widget showing changed git files, with `/git-diff` picker
-- **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
+- **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, …)
+- **tool-sanitizer** — Repairs malformed tool arguments (disabled by default, `/tool-sanitizer:enable`)
+- **worktree** — Git worktree management (`/worktree:create`, …)
+- **llm-log** — Logs LLM I/O as Markdown (`/llmlog on|off|status`)
+- **tps** — Tokens-per-second metrics after each run
+- **git-files** — TUI widget of changed git files, `/git-diff` picker
+- **web** — Firecrawl-backed `web_fetch`, `web_search`, `web_screenshot`
+
+The package ships in the wpi npm package (`package/`). Docker mode bakes it into
+the image (`/opt/pi-package`); host mode copies it to
+`~/.pi/wpi-package/<wpi-version>/` and wires it into settings (idempotent,
+never overwrites — delete to regenerate). Extensions that shell out to native
+binaries declare them in `package.json` (`wpi.nativeBinaries`); `doctor` and
+`setup` verify them on the host.
 
 ### Web Extension (Firecrawl)
 
-The **web** extension provides three LLM-callable tools backed by the [Firecrawl](https://firecrawl.dev) API:
+The **web** extension provides three LLM-callable tools backed by the
+[Firecrawl](https://firecrawl.dev) API:
 
 | Tool | Description |
-|------|-------------|
+|---|---|
 | `web_fetch` | Fetch a URL and extract content as clean markdown |
 | `web_search` | Search the web and return results with page content |
 | `web_screenshot` | Capture a screenshot of a web page |
 
-**Configuration** (environment variables, set via `docker.env` in `wpi.yml` or passed at runtime):
+**Configuration** (environment variables):
 
-- `FIRECRAWL_API_KEY` — API key (required for cloud). If missing, tools return a helpful error.
-- `FIRECRAWL_BASE_URL` — Base URL for the Firecrawl API. Defaults to `https://api.firecrawl.dev` (cloud). Set to your self-hosted instance URL to use that instead.
-- `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (e.g. `github.com,docs.firecrawl.dev`). If set, only these domains (and their subdomains) may be fetched/screenshotted. Empty/unset = all domains allowed.
-- `FIRECRAWL_CACHE_TTL` — Cache time-to-live in seconds for repeated fetches. Default 300 (5 min). Set to 0 to disable caching.
+- `FIRECRAWL_API_KEY` — API key (required for cloud; set via `docker.env` or as a credential route in host mode)
+- `FIRECRAWL_BASE_URL` — Base URL; default `https://api.firecrawl.dev`; set to a self-hosted instance to use it
+- `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (empty = all)
+- `FIRECRAWL_CACHE_TTL` — Cache TTL seconds (default 300)
+- `WEB_VERIFY_ENABLED` / `WEB_VERIFY_MODEL` / `WEB_VERIFY_MAX_CHARS` / `WEB_VERIFY_TIMEOUT_MS` — optional opt-in guard-LLM verification of fetched content
 
-**Prompt injection defenses** (always active):
-- Fetched content is sanitized — HTML/XML tags stripped, `<web_content>` delimiter tags removed to prevent forgery
-- Content truncated to 50KB (`web_fetch`) / 2KB per result (`web_search`)
-- Content wrapped in `<web_content>` delimiters signaling the LLM it's external data
-- System prompt guidelines explicitly tell the LLM to treat web content as untrusted
+Prompt-injection defenses are always active (sanitized content, truncation,
+`<web_content>` delimiters, system-prompt trust guidance). Check status with
+`/web:status`.
 
-**LLM verification** (optional, opt-in):
-- `WEB_VERIFY_ENABLED` — Set to `"true"` to enable. Disabled by default.
-- `WEB_VERIFY_MODEL` — Model ID for the guard LLM (e.g. `gpt-4o-mini`). Must be a model already configured in Pi via `/login` or `models.json`. Uses Pi's built-in auth — **no separate API key or base URL needed**.
-- `WEB_VERIFY_MAX_CHARS` — Max chars sent to guard (default 5000). Injections are usually at the top.
-- `WEB_VERIFY_TIMEOUT_MS` — Guard request timeout (default 10000).
+#### Self-hosted Firecrawl
 
-When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. Uses Pi's `completeSimple()` API and model registry for authentication — the guard model must already be configured in Pi. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
-
-Check status at any time with the `/web:status` slash command.
-
-Example `wpi.yml` with Firecrawl cloud configured:
-
-```yaml
-docker:
-  env:
-    FIRECRAWL_API_KEY: fc-your-key-here
-    FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev,stackoverflow.com
-    FIRECRAWL_CACHE_TTL: 600
-```
-
-### Self-Hosted Firecrawl
-
-Firecrawl is [AGPL-3.0](https://github.com/firecrawl/firecrawl/blob/main/LICENSE) licensed and free to self-host. This avoids API costs and keeps all data on your infrastructure. No API key required for self-hosted instances.
-
-A ready-to-use Docker Compose setup is included in `example/firecrawl/`. It runs Firecrawl **with SearXNG** for privacy-preserving search:
+Firecrawl is [AGPL-3.0](https://github.com/firecrawl/firecrawl/blob/main/LICENSE)
+and free to self-host (no API key needed). A Docker Compose setup (Firecrawl +
+SearXNG + Redis + PostgreSQL + Playwright) ships in `example/firecrawl/`:
 
 ```bash
 cd example/firecrawl
-cp .env.example .env          # adjust if needed (defaults work for local dev)
-docker compose up -d          # starts Firecrawl + SearXNG
+cp .env.example .env          # defaults work for local dev
+docker compose up -d
 ```
 
-Services started:
-
-| Service | URL | Purpose |
-|---------|-----|---------|
-| Firecrawl API | `http://localhost:3002` | Scrape, search, screenshot endpoints |
-| SearXNG UI | `http://localhost:8081` | Search engine aggregation (Brave, Startpage, Wikipedia, Wolfram Alpha) |
-| Redis | (internal) | Firecrawl job queue |
-| PostgreSQL | (internal) | Firecrawl database |
-| Playwright | (internal) | Headless browser for JS-rendered pages |
-
-Then point wpi at it — copy `wpi-firecrawl.yml` to your project as `.pi/wpi.yml`:
+Then point wpi at it:
 
 ```yaml
 docker:
   env:
     FIRECRAWL_BASE_URL: http://localhost:3002
-    # No API key needed for self-hosted
     FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev
     FIRECRAWL_CACHE_TTL: 600
 ```
 
-Verify it's running:
+## Upgrading
 
-```bash
-# Test Firecrawl scrape
-curl -X POST http://localhost:3002/v2/scrape \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "https://example.com", "formats": ["markdown"]}'
-
-# Test SearXNG search
-curl 'http://localhost:8081/search?format=json&q=pi+coding+agent'
-```
-
-#### SearXNG
-
-SearXNG is a privacy-focused metasearch engine that aggregates results from multiple search engines without tracking. It's included in the compose and wired to Firecrawl by default — the `/v2/search` endpoint uses SearXNG instead of Google.
-
-**Default engines** (enabled out of the box): Brave, Startpage, Wikipedia, Wikidata, Wolfram Alpha. Google/Bing/DuckDuckGo are disabled by default because they rate-limit or block self-hosted instances. You can enable them by editing `searxng-settings.yml`.
-
-**Customizing engines:** edit `example/firecrawl/searxng-settings.yml` and add an `engines` section:
-
-```yaml
-use_default_settings: true
-
-server:
-  bind_address: "0.0.0.0"
-  port: 8080
-  secret_key: "your-secret-key"
-
-search:
-  formats:
-    - html
-    - json
-
-engines:
-  - name: google
-    disabled: false
-  - name: duckduckgo
-    disabled: false
-```
-
-See `example/firecrawl/` for the full setup including `.env.example` with all configurable options.
+- **wpi ≥ 1.0 flips `sandbox.backend` to `nono` by default on both modes.** If
+  you were running plain docker, add `sandbox: { backend: none }` to
+  `~/.pi/wpi.yml` to keep the old behavior — `doctor` will warn until you
+  sandbox.
+- Missing nono with the default config is an **error** (with the install
+  command), never a silent downgrade to unsandboxed.
+- Docker-mode `~/.pi/agent/settings.json` may contain a stale `/opt/pi-package`
+  entry from older runs; host mode replaces it with the host package path when
+  `/opt/pi-package` does not exist on the host.
+- Host mode wires the package to `~/.pi/wpi-package/<wpi-version>/` — upgrading
+  wpi lands a new versioned copy; delete an old one when you no longer need it.
 
 ## Development
 

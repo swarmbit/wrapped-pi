@@ -258,11 +258,18 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 * Known edge (nono-side, not a wpi bug): the `wpi-docker` profile grants `$TMPDIR`/`/tmp` (build context), and nono refuses to sandbox when HOME is nested inside a granted dir (its state root under `$HOME/.local/state/nono` would overlap). Only reachable with a pathological HOME under `/tmp`; normal homes are unaffected.
 * `checkPrerequisites` is skipped for setup (each prerequisite is reported as a step) — same pattern as doctor.
 
-## Phase 7 — Shell, docs, migration polish
+## Phase 7 — Shell, docs, migration polish ✅ done
 
-* [ ] `wpi shell` per combination: docker+none (today), docker+nono (wrapped exec), host+nono (`nono run --profile wpi -- shell`), host+none (native shell + warning).
-* [ ] README: two-axis model, combination table from §0, config example.
-* [ ] Every mode×sandbox combination has documented behavior for every `docker.*`/`nono.*` setting (apply / warn / error).
+* [x] `wpi shell` per combination — implemented in Phases 3/4, now locked by tests:
+  * docker+none: `docker run … /bin/bash` (today) — `docker-backend.test.ts`
+  * docker+nono: wrapped exec (`nono run --profile wpi-docker … -- docker run …`) — `shell()` arms the sandbox prefix, tested
+  * host+nono: **`nono shell --profile wpi --allow-cwd --rollback`** (deviation: the plan sketch said `nono run … -- shell`; `nono shell` is nono's dedicated interactive-shell command — kept from Phase 3) — `host-backend.test.ts`
+  * host+none: native `$SHELL` + `⚠ UNSANDBOXED` notice — tested
+* [x] README rewritten: two-axis model + combination table (§0), mode diagrams, dual-mode config reference (`runtime`/`sandbox`/`docker.socket`/`network.*`/`workspace.*`/`nono.dockerProfile`), commands incl. `setup`/`doctor`, secrets section, package wiring, and an **Upgrading** note for the breaking nono-by-default change. Firecrawl/self-host sections preserved.
+* [x] Behavior matrix: **`docs/behavior-matrix.md`** — every `docker.*`/`nono.*`/`network.*`/`workspace.*` setting × every mode×sandbox combination with apply / warn / error semantics, plus a warnings-at-a-glance table and honest rationale for the surprising cells (docker.env not injected on host, network.* docker-only, pi.version docker-only, ports-as-grants on host).
+* [x] New doctor warning: `network.*` set in docker mode → `Configuration` warn (host+nono only; no effect in docker) — closes the last silent-ignore gap.
+* [x] CLI help/header now mode-aware (shell per mode, build per mode, setup).
+* [x] Migration documented in README §Upgrading (nono default flip, stale `/opt/pi-package` settings entry, versioned package dirs).
 
 ## Phase summary & dependencies
 
@@ -275,7 +282,7 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 | 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — **done (live-verified with nono 0.73.0)**                 |
 | 5     | Native package wiring                                    | 3                            | Medium — **done (live-verified)**                                       |
 | 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium — **done (live-verified)**                                     |
-| 7     | Shell, docs, migration                                   | 3–6                          | Low                                                                  |
+| 7     | Shell, docs, migration                                   | 3–6                          | Low — **done**                                                       |
 
 ## Resolved design decisions
 

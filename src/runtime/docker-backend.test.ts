@@ -42,6 +42,7 @@ import {
   buildImage,
   imageExists,
   setDockerSandboxPrefix,
+  shellInContainer,
 } from "../docker";
 import { wpiDockerProfilePath, WPI_DOCKER_PROFILE_NAME } from "./docker-profile";
 
@@ -130,6 +131,26 @@ describe("DockerBackend sandbox wrapping", () => {
   it("does NOT arm the prefix for sandbox: none (bare docker)", () => {
     backend.build(makeConfig({ sandboxBackend: "none" }));
     expect(mockedBuildImage).toHaveBeenCalledTimes(1);
+    imageExists("pi-agent:test");
+    expect(mockedSpawnSync).toHaveBeenCalledWith("docker", ["image", "inspect", "pi-agent:test"], expect.anything());
+  });
+
+  it("shell() arms the nono prefix (wrapped docker run for a new shell)", async () => {
+    const shellSpy = vi.mocked(shellInContainer);
+    await backend.shell(makeConfig());
+    expect(shellSpy).toHaveBeenCalledTimes(1);
+    // The real shellInContainer path spawns via nono when the prefix is armed.
+    shellSpy.mockClear();
+    imageExists("pi-agent:test");
+    expect(mockedSpawnSync).toHaveBeenCalledWith(
+      "nono",
+      [...NONO_PREFIX, "--", "docker", "image", "inspect", "pi-agent:test"],
+      expect.anything()
+    );
+  });
+
+  it("shell() stays direct (bare docker) for sandbox: none", async () => {
+    await backend.shell(makeConfig({ sandboxBackend: "none" }));
     imageExists("pi-agent:test");
     expect(mockedSpawnSync).toHaveBeenCalledWith("docker", ["image", "inspect", "pi-agent:test"], expect.anything());
   });
