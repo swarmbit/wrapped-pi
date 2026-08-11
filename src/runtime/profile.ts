@@ -21,8 +21,8 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { debugLog } from "../config";
+import { serializeCanonicalJson } from "./canonical-json";
 import type {
   NetworkConfig,
   NonoConfig,
@@ -68,8 +68,9 @@ export interface ProfileInput {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type WpiProfile = Record<string, any>;
 
-/** Expand ~ / $HOME / $WORKDIR in a path. Keeps non-expanding paths verbatim. */
-export function expandFsPath(p: string, homeDir: string, workspaceDir: string): string {
+/** Expand ~ / $HOME / $WORKDIR in a path. Keeps non-expanding paths verbatim.
+ *  `workspaceDir` defaults to the current working directory (the workspace). */
+export function expandFsPath(p: string, homeDir: string, workspaceDir: string = process.cwd()): string {
   return p
     .replace(/^~(?=$|\/|\\)/, homeDir)
     .replace(/\$\{?HOME\}?/g, homeDir)
@@ -167,23 +168,7 @@ function profileCustomCredentials(custom: Record<string, CustomCredentialDef>): 
  * newline). Deterministic so byte-for-byte comparison works for drift detection.
  */
 export function serializeWpiProfile(profile: WpiProfile): string {
-  // Stable key ordering via sorted-object stringify.
-  return JSON.stringify(sortKeys(profile), null, 2) + "\n";
-}
-
-// Deep-sort object keys deterministically. Arrays preserve order.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function sortKeys(obj: any): any {
-  if (Array.isArray(obj)) return obj.map(sortKeys);
-  if (obj && typeof obj === "object") {
-    return Object.keys(obj)
-      .sort()
-      .reduce((acc, k) => {
-        acc[k] = sortKeys(obj[k]);
-        return acc;
-      }, {} as Record<string, unknown>);
-  }
-  return obj;
+  return serializeCanonicalJson(profile);
 }
 
 // ── Write & drift detection ─────────────────────────────────
@@ -197,9 +182,6 @@ export interface EnsureProfileResult {
   /** True if a profile existed and matched canonical. */
   inSync: boolean;
 }
-
-const _voidHomeDeprecated = os; // keep import referenced for older callers
-void _voidHomeDeprecated;
 
 /**
  * Ensure the wpi profile exists on disk AND report drift if it's stale.

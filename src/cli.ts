@@ -99,7 +99,7 @@ Config file schema:
     user:
       name: John Doe
       email: john@example.com
-  network:            # host+nono only (Phase 3)
+  network:            # host+nono only
     mode: filtered    # filtered (default) | open | blocked
     allowDomains:
       - api.anthropic.com
@@ -291,7 +291,7 @@ async function main(): Promise<void> {
   // its own checks) and setup (reports each prerequisite as a step). Runs
   // after config load so it knows runtimeMode+sandbox.
   if (command !== "dry-run" && command !== "doctor" && command !== "setup") {
-    backend.checkPrerequisites(config as ResolvedConfig);
+    backend.checkPrerequisites(config);
   }
 
   // Dispatch command
@@ -310,13 +310,13 @@ async function main(): Promise<void> {
       printDryRun(config, piArgs, backend);
       break;
     case "doctor": {
-      const report = await backend.doctor(config as ResolvedConfig);
+      const report = await backend.doctor(config);
       console.log(renderDoctorReport(report));
       process.exit(report.exitCode);
       break;
     }
     case "setup": {
-      const report = await backend.setup(config as ResolvedConfig);
+      const report = await backend.setup(config);
       console.log(renderSetupReport(report));
       process.exit(report.exitCode);
       break;
@@ -341,8 +341,13 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[], ba
 
   console.log("Configuration:");
   console.log(`  runtime mode:   ${config.runtimeMode}`);
-  console.log(`  version:        ${config.piVersion}`);
-  console.log(`  image:          ${config.piImage}`);
+  console.log(`  sandbox:        ${config.sandboxBackend}`);
+  if (config.runtimeMode === "docker") {
+    console.log(`  version:        ${config.piVersion}`);
+    console.log(`  image:          ${config.piImage}`);
+  } else {
+    console.log(`  pi:             host binary on PATH (pi.version is docker-only)`);
+  }
   console.log(`  projectDir:     ${config.projectDir}`);
   console.log(`  workspaceDir:   ${config.workspaceDir}`);
   console.log(`  configDir:      ${config.configDir}`);
@@ -384,9 +389,9 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[], ba
   console.log(`  User config:    ${userConfigPath} ${userConfigExists ? "(found)" : "(not found)"}`);
   console.log(`  Project config: ${config.containerDir ? config.containerDir + "/wpi.yml" : "(no .pi dir)"}`);
   console.log();
-  // Backend-specific command preview (DockerBackend prints the docker run/build
-  // commands). Host mode will render its own commands here in Phase 3.
-  backend.dryRun(config as ResolvedConfig, piArgs);
+  // Backend-specific command preview (docker run/build for DockerBackend,
+  // nono run/shell for HostBackend).
+  backend.dryRun(config, piArgs);
 }
 
 main();

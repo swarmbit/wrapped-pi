@@ -29,6 +29,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { debugLog, DEFAULT_NONO_DOCKER_PROFILE, type MountMapping } from "../config";
+import { serializeCanonicalJson } from "./canonical-json";
+import { expandFsPath } from "./profile";
 
 /** Profile name wpi authors and passes to `nono run --profile wpi-docker`. */
 export const WPI_DOCKER_PROFILE_NAME = DEFAULT_NONO_DOCKER_PROFILE;
@@ -56,26 +58,6 @@ export interface DockerProfileInput {
   mounts: readonly MountMapping[];
   /** Profile file name (nono.dockerProfile). Defaults to wpi-docker. */
   profileName?: string;
-}
-
-/** Expand ~ / $HOME / $WORKDIR in a path (shared convention with the host profile). */
-export function expandFsPath(p: string, homeDir: string): string {
-  return p
-    .replace(/^~(?=$|\/|\\)/, homeDir)
-    .replace(/\$\{?HOME\}?/g, homeDir)
-    .replace(/\$\{?WORKDIR\}?/g, process.cwd());
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function sortKeys(obj: any): any {
-  if (Array.isArray(obj)) return obj.map(sortKeys);
-  if (obj && typeof obj === "object") {
-    return Object.keys(obj).sort().reduce((acc, k) => {
-      acc[k] = sortKeys(obj[k]);
-      return acc;
-    }, {} as Record<string, unknown>);
-  }
-  return obj;
 }
 
 /**
@@ -133,7 +115,7 @@ export function buildWpiDockerProfile(input: DockerProfileInput): WpiDockerProfi
 
 /** Deterministic serialisation (sorted keys + trailing newline). */
 export function serializeWpiDockerProfile(profile: WpiDockerProfile): string {
-  return JSON.stringify(sortKeys(profile), null, 2) + "\n";
+  return serializeCanonicalJson(profile);
 }
 
 export interface EnsureDockerProfileResult {

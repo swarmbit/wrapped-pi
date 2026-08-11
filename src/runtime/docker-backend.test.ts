@@ -135,6 +135,14 @@ describe("DockerBackend sandbox wrapping", () => {
     expect(mockedSpawnSync).toHaveBeenCalledWith("docker", ["image", "inspect", "pi-agent:test"], expect.anything());
   });
 
+  it("prints the UNSANDBOXED opt-out notice for sandbox: none (parity with host mode)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    backend.build(makeConfig({ sandboxBackend: "none" }));
+    const errOutput = errSpy.mock.calls.flat().join(" ");
+    errSpy.mockRestore();
+    expect(errOutput).toContain("UNSANDBOXED");
+  });
+
   it("shell() arms the nono prefix (wrapped docker run for a new shell)", async () => {
     const shellSpy = vi.mocked(shellInContainer);
     await backend.shell(makeConfig());

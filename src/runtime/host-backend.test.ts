@@ -159,6 +159,19 @@ describe("HostBackend.run port validation", () => {
     exitSpy.mockRestore();
     errSpy.mockRestore();
   });
+
+  it("shell() also rejects host:container port mismatch", async () => {
+    const backend = new HostBackend();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+    const config = makeHostConfig({ ports: [{ host: 8080, container: 3000 }] });
+    await expect(backend.shell(config)).rejects.toThrow(/exit:1/);
+    expect(errSpy.mock.calls[0][0]).toMatch(/host:container port mapping/);
+    exitSpy.mockRestore();
+    errSpy.mockRestore();
+  });
 });
 
 describe("HostBackend.doctor", () => {

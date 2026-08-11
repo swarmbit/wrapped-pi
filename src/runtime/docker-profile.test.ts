@@ -21,12 +21,12 @@ import {
   serializeWpiDockerProfile,
   ensureWpiDockerProfile,
   checkProfileGrants,
-  expandFsPath,
   wpiDockerProfilePath,
   WPI_DOCKER_PROFILE_NAME,
   WPI_DOCKER_PROFILE_EXTENDS,
   type DockerProfileInput,
 } from "./docker-profile";
+import { expandFsPath } from "./profile";
 
 let homeDir: string;
 

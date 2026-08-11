@@ -1,9 +1,8 @@
 // ============================================================
-// wpi — Doctor report types & shared helpers (Phase 2)
+// wpi — Doctor report types & shared helpers
 // ============================================================
-// Mode-aware doctor (Docker only in Phase 2). Backends produce a
-// DoctorReport; cli.ts renders it and exits with the report's
-// exit code.
+// Mode-aware doctor. Backends produce a DoctorReport; cli.ts renders
+// it and exits with the report's exit code.
 //
 // Exit codes:
 //   0  healthy  — all checks passed
@@ -12,12 +11,12 @@
 //   2  error    — blocking prerequisites missing (e.g. Docker CLI
 //                 or daemon unavailable)
 //
-// Per docs/dual-mode-implementation-plan.md Phase 2:
-//   - Sections: Runtime, Sandbox, Pi, Docker, Configuration.
-//   - Sandbox reports "not configured" gracefully until Phase 3.
-//   - Secret-looking YAML env values warn.
+// Sections: Runtime + Configuration are mode-agnostic (built here);
+// Sandbox / Pi / Docker / Platform / Package / Profile are built by
+// the respective backends.
 // ============================================================
 
+import * as fs from "fs";
 import type { RuntimeMode } from "../config";
 import type { ResolvedConfig } from "./backend";
 
@@ -134,7 +133,7 @@ export function buildConfigurationSection(config: ResolvedConfig): DoctorSection
         status: "warn",
         label: `env ${key}`,
         detail:
-          "looks like a secret in env — prefer nono credential routes (Phase 3+)",
+          "looks like a secret in env — prefer nono credential routes (network.credentials / customCredentials)",
       });
     }
   } else if (Object.keys(config.env).length > 0) {
@@ -188,8 +187,6 @@ const ICON: Record<DoctorStatus, string> = {
 
 function safeExists(p: string): boolean {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fs = require("fs");
     return fs.existsSync(p);
   } catch {
     return false;

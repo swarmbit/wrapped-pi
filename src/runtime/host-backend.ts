@@ -1,22 +1,24 @@
 // ============================================================
-// wpi — HostBackend (Phase 3, slice 1)
+// wpi — HostBackend
 // ============================================================
 // Runs pi natively on the host, sandboxed by nono (the default) or
 // unsandboxed when sandbox.backend == "none" (allowed, doctor warns).
 //
-// Slice 1 scope:
 //   - checkPrerequisites: platform (Seatbelt/Landlock), nono binary
 //     (only when sandbox=nono), pi binary.
 //   - run:   nono run --profile wpi --allow-cwd --rollback -- pi <args>
 //            (or bare `pi <args>` + unsandboxed notice when sandbox=none)
-//   - shell: nono shell --profile wpi --allow-cwd   (or bare $SHELL)
+//   - shell: nono shell --profile wpi --allow-cwd --rollback   (or bare $SHELL)
 //   - build: no image build; ensure pi present + wpi profile (if nono)
+//     + bundled package wiring (Phase 5)
 //   - execShell: error (host mode has no container IDs)
 //   - dryRun: print the resolved command
-//   - doctor: Runtime, Sandbox, Pi, Platform, Configuration
+//   - doctor: Runtime, Sandbox, [Profile], Pi, Platform, Package, Configuration
+//   - setup:  provision + verify the combination (Phase 6)
 //
-// Credential routes / network.* mapping / workspace.access fs-rule
-// mapping / profile drift detection land in Phase 3 commit 2.
+// Credential routes / network.* mapping / workspace fs grants / profile
+// drift detection: src/runtime/profile.ts. Package copy + settings wiring:
+// src/runtime/package-wiring.ts.
 // ============================================================
 
 import type { ResolvedConfig, RuntimeBackend } from "./backend";
@@ -40,7 +42,6 @@ import {
   type DoctorReport,
   type DoctorSection,
   type DoctorCheck,
-  type DoctorStatus,
 } from "./doctor";
 import { buildSetupReport, runSmoke, firstLine, type SetupReport, type SetupStep } from "./setup";
 import {
@@ -91,11 +92,10 @@ export class HostBackend implements RuntimeBackend {
         console.error(`Opt out:  add \`sandbox: { backend: none }\` to ~/.pi/wpi.yml (unsandboxed — doctor will warn)`);
         process.exit(1);
       }
-    } else {
-      // sandbox=none: allowed but loud. Don't fail the prereq check (user opted in),
-      // but print a one-line notice so it's never silent.
-      console.error("⚠ host mode is running UNSANDBOXED (sandbox.backend: none).");
     }
+    // sandbox=none: allowed but loud. run()/shell() print the unsandboxed
+    // notice at the moment of launch; prerequisites only fail on what is
+    // actually missing, so the opt-out never blocks.
   }
 
   // ── Build / prepare ─────────────────────────────────────────
@@ -147,6 +147,7 @@ export class HostBackend implements RuntimeBackend {
   // ── Shell ───────────────────────────────────────────────────
 
   async shell(config: ResolvedConfig): Promise<void> {
+    this.assertPortsOkForHost(config);
     this.ensurePackageWiringOrWarn(config);
     const shellBin = process.env.SHELL || "/bin/bash";
 

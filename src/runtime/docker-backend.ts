@@ -92,9 +92,13 @@ export class DockerBackend implements RuntimeBackend {
   /**
    * Ensure the wpi-docker profile + activate the sandbox prefix for the duration
    * of this dispatch. Only call from build/run/shell (not dry-run/doctor).
+   * sandbox=none prints the same loud opt-out notice host mode prints.
    */
   private enableSandboxOrWarn(config: ResolvedConfig): void {
-    if (config.sandboxBackend !== "nono") return;
+    if (config.sandboxBackend !== "nono") {
+      console.error("⚠ docker mode is running UNSANDBOXED (sandbox.backend: none).");
+      return;
+    }
     const input = this.buildDockerProfileInput(config);
     const res = ensureWpiDockerProfile(input);
     if (res.drifted) {
@@ -169,6 +173,15 @@ export class DockerBackend implements RuntimeBackend {
     const cmd = piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"];
     const runArgs = buildDockerRunArgs(config, cmd);
 
+    const buildArgs = [
+      "build",
+      "--build-arg",
+      `PI_VERSION=${config.piVersion}`,
+      "-t",
+      config.piImage,
+      ".",
+    ];
+
     if (config.sandboxBackend === "nono") {
       const prefix = this.nonoPrefix(config).join(" ");
       console.log("Docker run command (sandboxed by nono):");
@@ -180,14 +193,6 @@ export class DockerBackend implements RuntimeBackend {
       }
       console.log();
 
-      const buildArgs = [
-        "build",
-        "--build-arg",
-        `PI_VERSION=${config.piVersion}`,
-        "-t",
-        config.piImage,
-        ".",
-      ];
       console.log("Docker build command (sandboxed, would run in temp build context):");
       console.log(`  nono ${prefix} -- docker ${buildArgs.join(" ")}`);
       return;
@@ -197,14 +202,6 @@ export class DockerBackend implements RuntimeBackend {
     console.log(`  docker ${runArgs.join(" ")}`);
     console.log();
 
-    const buildArgs = [
-      "build",
-      "--build-arg",
-      `PI_VERSION=${config.piVersion}`,
-      "-t",
-      config.piImage,
-      ".",
-    ];
     console.log("Docker build command (would be run in temp build context):");
     console.log(`  docker ${buildArgs.join(" ")}`);
   }

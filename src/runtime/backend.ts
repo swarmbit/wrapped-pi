@@ -1,20 +1,14 @@
 // ============================================================
-// wpi — Runtime backend interface & factory (Phase 1)
+// wpi — Runtime backend interface & factory
 // ============================================================
 // RuntimeBackend abstracts how pi is launched. cli.ts delegates all
 // execution to a backend resolved from config.runtimeMode via
-// resolveBackend().
-//
-// Phase 1 scope (per docs/dual-mode-implementation-plan.md):
-//   - Only DockerBackend exists.
-//   - Host mode is accepted (parsed in Phase 0) but still dispatches
-//     to the Docker backend, preserving the documented Phase 0
-//     limitation: "--mode host for run/build/shell still executes the
-//     Docker backend ... Dispatch lands in Phase 1 (RuntimeBackend
-//     factory)." The factory lands here; HostBackend lands in Phase 3.
-//
-// Exit criteria: npm test green; wpi dry-run output byte-identical
-// to main (only the Phase 0 "runtime mode:" line differs).
+// resolveBackend():
+//   - DockerBackend (runtime.mode: docker) — image build + container run,
+//     optionally wrapped in nono (Phase 4).
+//   - HostBackend   (runtime.mode: host)   — native pi, optionally wrapped
+//     in nono (Phase 3).
+// Both backends also implement doctor (Phase 2) and setup (Phase 6).
 // ============================================================
 
 import type { PiContainerConfig, RuntimeContext, RuntimeMode } from "../config";
@@ -64,10 +58,8 @@ export interface RuntimeBackend {
 
 /**
  * Resolve the backend for a runtime mode.
- *
- * Phase 1: only Docker is implemented. `host` dispatches to the Docker
- * backend until HostBackend lands in Phase 3; this keeps `--mode host`
- * behaviour identical to Phase 0 (resolved + visible, still docker).
+ * Both modes are implemented; the default branch is defensive only
+ * (parseRuntimeMode rejects unknown modes at config load).
  */
 export function resolveBackend(mode: RuntimeMode): RuntimeBackend {
   switch (mode) {

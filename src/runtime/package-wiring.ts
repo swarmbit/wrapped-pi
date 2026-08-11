@@ -208,8 +208,8 @@ function readSettings(settingsPath: string): Record<string, unknown> {
     const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
-    // Malformed settings: don't destroy the file — treat as empty and only add
-    // our entry (the caller wrote the file back, preserving nothing we can't read).
+    // Unreachable via wireSettings (guarded by isParsableJson first); defensive
+    // for direct callers. Treat as empty rather than throwing.
     return {};
   }
 }

@@ -179,25 +179,7 @@ export async function runContainer(config: PiContainerConfig & RuntimeContext, p
   debugLog("runContainer called with piArgs:", piArgs);
   buildIfNeeded(config);
 
-  // Ensure named docker volumes exist
-  if (config.volumes && config.volumes.length > 0) {
-    for (const v of config.volumes) {
-      debugLog(`Ensuring docker volume exists: ${v.name}`);
-      try {
-        // `docker volume create` is idempotent — it will succeed if the volume exists
-        const volCreate = dockerSpawnArgs(["volume", "create", v.name]);
-        const res = spawnSync(volCreate.bin, volCreate.args, { stdio: isDebug() ? "pipe" : "ignore" });
-        if (isDebug() && res.stdout) {
-          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
-        }
-        if (isDebug() && res.stderr) {
-          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
-        }
-      } catch (e) {
-        debugLog(`Error creating docker volume ${v.name}: ${e}`);
-      }
-    }
-  }
+  ensureNamedVolumes(config);
 
   const args = buildDockerRunArgs(config, piArgs);
   debugLog(`Running: docker ${args.join(" ")}`);
@@ -212,28 +194,34 @@ export async function runContainer(config: PiContainerConfig & RuntimeContext, p
 
 // ── Shell ───────────────────────────────────────────────────
 
+/**
+ * Ensure declared named docker volumes exist. `docker volume create` is
+ * idempotent; failures are logged (debug) and left to `docker run` to surface.
+ */
+function ensureNamedVolumes(config: PiContainerConfig): void {
+  if (!config.volumes || config.volumes.length === 0) return;
+  for (const v of config.volumes) {
+    debugLog(`Ensuring docker volume exists: ${v.name}`);
+    try {
+      const volCreate = dockerSpawnArgs(["volume", "create", v.name]);
+      const res = spawnSync(volCreate.bin, volCreate.args, { stdio: isDebug() ? "pipe" : "ignore" });
+      if (isDebug() && res.stdout) {
+        debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
+      }
+      if (isDebug() && res.stderr) {
+        debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
+      }
+    } catch (e) {
+      debugLog(`Error creating docker volume ${v.name}: ${e}`);
+    }
+  }
+}
+
 export async function shellInContainer(config: PiContainerConfig & RuntimeContext): Promise<void> {
   debugLog("shellInContainer called");
   buildIfNeeded(config);
 
-  // Ensure named docker volumes exist
-  if (config.volumes && config.volumes.length > 0) {
-    for (const v of config.volumes) {
-      debugLog(`Ensuring docker volume exists: ${v.name}`);
-      try {
-        const volCreate = dockerSpawnArgs(["volume", "create", v.name]);
-        const res = spawnSync(volCreate.bin, volCreate.args, { stdio: isDebug() ? "pipe" : "ignore" });
-        if (isDebug() && res.stdout) {
-          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
-        }
-        if (isDebug() && res.stderr) {
-          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
-        }
-      } catch (e) {
-        debugLog(`Error creating docker volume ${v.name}: ${e}`);
-      }
-    }
-  }
+  ensureNamedVolumes(config);
 
   console.log("🐚 Opening shell in pi container...");
   const args = buildDockerRunArgs(config, ["/bin/bash"]);

@@ -13,6 +13,8 @@
 // Config file schema:
 //   runtime:
 //     mode: docker         # docker | host (default: docker)
+//   sandbox:
+//     backend: nono        # nono | none (default: nono on both modes; none = opt-out)
 //   pi:
 //     version: 0.83.0      # override pi version (default: baked-in)
 //   docker:
@@ -30,10 +32,23 @@
 //     memorySwap: 4g
 //     extension: |
 //       RUN apt-get install -y python3
+//     socket: /var/run/docker.sock
 //   git:
 //     user:
 //       name: John Doe
 //       email: john@example.com
+//   network:               # host+nono only
+//     mode: filtered       # filtered | open | blocked
+//     allowDomains: [api.anthropic.com]
+//     credentials: [anthropic]
+//     customCredentials: {}
+//   workspace:             # host+nono fs grants beyond the read-write workdir
+//     allowPaths: [~/src]
+//     readPaths: [/etc]
+//   nono:
+//     allowPaths: []
+//     readPaths: []
+//     dockerProfile: wpi-docker   # profile name when sandboxing docker mode
 // ============================================================
 
 import * as path from "path";
@@ -235,7 +250,7 @@ export interface VolumeMapping {
 export interface PiContainerConfig {
   /** Runtime backend mode (runtime.mode). Defaults to "docker". */
   runtimeMode: RuntimeMode;
-  /** Sandbox backend (sandbox.backend). Defaults to nono on host, none on docker (Phase 3). */
+  /** Sandbox backend (sandbox.backend). Defaults to nono on BOTH modes (none = opt-out). */
   sandboxBackend: SandboxBackend;
   /** Resolved `network:` section (Phase 3 commit 2); host+nono only takes effect there. */
   network: NetworkConfig;
@@ -296,7 +311,7 @@ interface ConfigFile {
     mode?: string;
   };
   sandbox?: {
-    /** Sandbox backend: nono | none. Default: nono on host, none on docker (Phase 3). */
+    /** Sandbox backend: nono | none. Default: nono on both modes (none = opt-out). */
     backend?: string;
   };
   pi?: {
@@ -430,9 +445,9 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
           )
         : DEFAULT_RUNTIME_MODE;
 
-  // Sandbox backend: CLI flag > user config > project config > mode default.
-  // docker+nono is not implemented until Phase 4 — requesting it now is an error
-  // with an actionable message, never a silent downgrade to unsandboxed.
+  // Sandbox backend: CLI flag > user config > project config > mode default
+  // (nono on both modes; `none` is the explicit opt-out — never a silent
+  // downgrade from a missing nono install).
   const sandboxBackend: SandboxBackend = options?.cliSandbox
     ? parseSandboxBackend(options.cliSandbox, "--sandbox flag")
     : userConfig.sandbox?.backend
@@ -468,7 +483,7 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
 
   // Network section (Phase 3 commit 2). Preset service names are validated
   // against PRESET_CREDENTIAL_SERVICES; custom credentials merge user-over-project.
-  const network = resolveNetwork(projectConfig.network, userConfig.network, homeDir);
+  const network = resolveNetwork(projectConfig.network, userConfig.network);
 
   // Workspace + nono fs grants (arrays merged project ++ user, deduped, order preserved).
   const workspace = resolveFsGrants(projectConfig.workspace, userConfig.workspace);
@@ -816,10 +831,8 @@ function parsePresetService(value: string, source: string): PresetCredentialServ
 
 function resolveNetwork(
   project: RawNetworkSection | undefined,
-  user: RawNetworkSection | undefined,
-  homeDir: string
+  user: RawNetworkSection | undefined
 ): NetworkConfig {
-  void homeDir; // reserved for future uri validation
   const projectMode = project?.mode ? parseNetworkMode(project.mode, ".pi/wpi.yml") : undefined;
   const userMode = user?.mode ? parseNetworkMode(user.mode, "~/.pi/wpi.yml") : undefined;
   const mode: NetworkMode = userMode ?? projectMode ?? "filtered";
