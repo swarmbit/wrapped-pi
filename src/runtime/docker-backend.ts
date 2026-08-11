@@ -31,6 +31,7 @@ import {
 import { execSync, spawnSync } from "child_process";
 import type { DoctorReport, DoctorSection, DoctorStatus, DoctorCheck } from "./doctor";
 import { buildReport, buildRuntimeSection, buildConfigurationSection } from "./doctor";
+import { buildSetupReport, runSmoke, firstLine, type SetupReport, type SetupStep } from "./setup";
 import {
   ensureWpiDockerProfile,
   wpiDockerProfilePath,
@@ -39,6 +40,7 @@ import {
   checkProfileGrants,
   type DockerProfileInput,
   type ProfileGrantCheck,
+  type EnsureDockerProfileResult,
 } from "./docker-profile";
 import * as os from "os";
 import * as fs from "fs";
@@ -218,6 +220,107 @@ export class DockerBackend implements RuntimeBackend {
     return buildReport(config.runtimeMode, sections);
   }
 
+  // ── Setup (Phase 6) ───────────────────────────────────────
+
+  /**
+   * `wpi setup` for docker mode. Verifies docker cli + daemon; for docker+nono
+   * additionally provisions the wpi-docker profile, validates socket/mount
+   * grants, and smoke-tests nono supervising the docker client. Writes the
+   * profile (write-if-absent) — unlike doctor, setup is not read-only.
+   */
+  async setup(config: ResolvedConfig): Promise<SetupReport> {
+    const steps: SetupStep[] = [];
+
+    const cliVersion = this.dockerCliVersion();
+    if (!cliVersion) {
+      steps.push({ status: "error", label: "docker cli", detail: "not installed or not on PATH" });
+      steps.push({ status: "error", label: "docker daemon", detail: "unreachable (docker cli missing)" });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+    steps.push({ status: "ok", label: "docker cli", detail: cliVersion });
+
+    const daemon = this.dockerDaemonDetail();
+    if (daemon) {
+      steps.push({ status: "ok", label: "docker daemon", detail: daemon });
+    } else {
+      steps.push({ status: "error", label: "docker daemon", detail: "not running — start Docker Desktop or the docker daemon" });
+    }
+
+    if (config.sandboxBackend === "none") {
+      steps.push({
+        status: "warn",
+        label: "unsandboxed",
+        detail: "docker runs without nono — host-side socket/mount access unrestricted (opt-out)",
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+
+    // docker+nono
+    if (!this.commandAvailable(NONO_BINARY)) {
+      steps.push({
+        status: "error",
+        label: "nono binary",
+        detail: "not installed — `curl -fsSL https://nono.sh/install.sh | sh` (or add `sandbox: { backend: none }` to opt out)",
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+    steps.push({ status: "ok", label: "nono binary", detail: this.nonoVersion() });
+
+    // Derive the wpi-docker profile (write-if-absent; drift is reported).
+    const input = this.buildDockerProfileInput(config);
+    const profileRes = ensureWpiDockerProfile(input);
+    steps.push(this.dockerProfileStep(profileRes));
+
+    // Validate socket + mount grants against the profile on disk.
+    try {
+      const onDisk = JSON.parse(fs.readFileSync(profileRes.path, "utf-8"));
+      const grants = checkProfileGrants(input, onDisk);
+      const missing = grants.filter((g) => !g.granted);
+      if (missing.length === 0) {
+        const mounts = config.mounts.length > 0 ? `${config.mounts.length} mount(s), ` : "";
+        steps.push({ status: "ok", label: "profile grants", detail: `${mounts}socket ${config.dockerSocket} — all granted` });
+      } else {
+        steps.push({
+          status: "error",
+          label: "profile grants",
+          detail: `missing: ${missing.map((m) => `${m.kind} ${m.path}`).join(", ")} — delete ${profileRes.path} to regenerate`,
+        });
+      }
+    } catch (e) {
+      debugLog("setup: could not read on-disk profile:", e);
+      steps.push({ status: "error", label: "profile grants", detail: `could not read ${profileRes.path}` });
+    }
+
+    // Smoke test: nono supervises the docker client end-to-end.
+    const smoke = runSmoke(NONO_BINARY, [...this.nonoPrefix(config), "--", "docker", "--version"]);
+    steps.push(
+      smoke.ok
+        ? { status: "ok", label: "smoke test", detail: `nono run --profile ${config.nono.dockerProfile} -- docker --version → ${firstLine(smoke.output)}` }
+        : { status: "error", label: "smoke test", detail: smoke.output }
+    );
+
+    return buildSetupReport(config.runtimeMode, steps);
+  }
+
+  /** Step for the wpi-docker profile provisioning result. */
+  private dockerProfileStep(res: EnsureDockerProfileResult): SetupStep {
+    if (res.written) return { status: "ok", label: "wpi-docker profile", detail: `written to ${res.path}` };
+    if (res.inSync) return { status: "ok", label: "wpi-docker profile", detail: `in sync (${res.path})` };
+    return {
+      status: "warn",
+      label: "wpi-docker profile",
+      detail: `drifted (${res.path}) — wpi won't overwrite; delete to regenerate`,
+    };
+  }
+
+  private nonoVersion(): string {
+    try {
+      return execSync(`${NONO_BINARY} --version`, { stdio: "pipe" }).toString().trim();
+    } catch {
+      return "installed";
+    }
+  }
+
   // ── Doctor section builders (docker) ───────────────────────
 
   /**
@@ -336,11 +439,11 @@ export class DockerBackend implements RuntimeBackend {
     const checks: DoctorCheck[] = [];
 
     // Docker CLI
-    try {
-      const cliVersion = execSync("docker --version", { stdio: "pipe" }).toString().trim();
+    const cliVersion = this.dockerCliVersion();
+    if (cliVersion) {
       checks.push({ status: "ok", label: "docker cli", detail: cliVersion });
-    } catch (e) {
-      debugLog("doctor: docker cli check failed:", e);
+    } else {
+      debugLog("doctor: docker cli check failed");
       checks.push({
         status: "error",
         label: "docker cli",
@@ -356,6 +459,34 @@ export class DockerBackend implements RuntimeBackend {
     }
 
     // Docker daemon (requires the CLI to be present)
+    const daemon = this.dockerDaemonDetail();
+    if (daemon) {
+      checks.push({ status: "ok", label: "docker daemon", detail: daemon });
+    } else {
+      checks.push({
+        status: "error",
+        label: "docker daemon",
+        detail: "not running — start Docker Desktop or the docker daemon",
+      });
+    }
+
+    return { name: "Docker", checks };
+  }
+
+  // ── Docker CLI / daemon probes (shared doctor + setup) ───
+
+  /** `docker --version` output, or null when the CLI is missing. */
+  private dockerCliVersion(): string | null {
+    try {
+      return execSync("docker --version", { stdio: "pipe" }).toString().trim();
+    } catch (e) {
+      debugLog("docker --version failed:", e);
+      return null;
+    }
+  }
+
+  /** `docker info` server version detail, or null when the daemon is unreachable. */
+  private dockerDaemonDetail(): string | null {
     try {
       // `docker info --format` only succeeds when the daemon is reachable.
       const result = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
@@ -364,24 +495,12 @@ export class DockerBackend implements RuntimeBackend {
       });
       if (result.status === 0 && result.stdout) {
         const serverVersion = result.stdout.toString().trim();
-        checks.push({
-          status: "ok",
-          label: "docker daemon",
-          detail: `running (server ${serverVersion || "unknown"})`,
-        });
-      } else {
-        checks.push({
-          status: "error",
-          label: "docker daemon",
-          detail: "not running — start Docker Desktop or the docker daemon",
-        });
+        return `running (server ${serverVersion || "unknown"})`;
       }
+      return null;
     } catch (e) {
-      debugLog("doctor: docker daemon check failed:", e);
-      checks.push({
-        status: "error", label: "docker daemon", detail: "not running" });
+      debugLog("docker daemon check failed:", e);
+      return null;
     }
-
-    return { name: "Docker", checks };
   }
 }

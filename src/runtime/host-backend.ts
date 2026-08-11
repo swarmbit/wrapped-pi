@@ -42,6 +42,7 @@ import {
   type DoctorCheck,
   type DoctorStatus,
 } from "./doctor";
+import { buildSetupReport, runSmoke, firstLine, type SetupReport, type SetupStep } from "./setup";
 import {
   ensurePackageWiring,
   ensureWpiPackageCopy,
@@ -225,6 +226,172 @@ export class HostBackend implements RuntimeBackend {
       sections.splice(2, 0, this.buildProfileSection(config));
     }
     return buildReport(config.runtimeMode, sections);
+  }
+
+  // ── Setup (Phase 6) ───────────────────────────────────────
+
+  /**
+   * `wpi setup` for host mode: platform → pi binary → (nono binary, pack,
+   * wpi profile, package wiring, network, smoke test) or unsandboxed warning.
+   * Writes the profile + package wiring (write-if-absent) — unlike doctor,
+   * setup is not read-only. No silent sudo: missing installs are reported with
+   * their exact command, never auto-run.
+   */
+  async setup(config: ResolvedConfig): Promise<SetupReport> {
+    const steps: SetupStep[] = [];
+
+    // Platform support (Seatbelt / Landlock).
+    const platform = os.platform();
+    if (platform === "darwin" || platform === "linux") {
+      steps.push({ status: "ok", label: "platform", detail: `${platform} (${platform === "darwin" ? "Seatbelt" : "Landlock"})` });
+    } else {
+      steps.push({
+        status: "error",
+        label: "platform",
+        detail: `host mode requires macOS (Seatbelt) or Linux (Landlock); got "${platform}"`,
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+
+    // pi binary (mandatory in host mode).
+    if (this.commandAvailable(PI_BINARY)) {
+      steps.push({ status: "ok", label: "pi binary", detail: this.binVersion(PI_BINARY) });
+    } else {
+      steps.push({
+        status: "error",
+        label: "pi binary",
+        detail: `not installed or not on PATH — npm install -g @earendil-works/pi-coding-agent`,
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+
+    if (config.sandboxBackend === "none") {
+      steps.push({
+        status: "warn",
+        label: "unsandboxed",
+        detail: "host mode runs without nono — kernel isolation off (explicit opt-out)",
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+
+    // host+nono
+    if (!this.commandAvailable(NONO_BINARY)) {
+      steps.push({
+        status: "error",
+        label: "nono binary",
+        detail: "not installed — `curl -fsSL https://nono.sh/install.sh | sh` (or add `sandbox: { backend: none }` to opt out)",
+      });
+      return buildSetupReport(config.runtimeMode, steps);
+    }
+    steps.push({ status: "ok", label: "nono binary", detail: this.binVersion(NONO_BINARY) });
+
+    // nono pack the wpi profile extends (nolabs-ai/pi). Pulls when missing.
+    steps.push(this.ensureNonoPack());
+
+    // Derive the wpi profile (write-if-absent; drift is reported).
+    const profileRes = ensureWpiProfile(this.buildProfileInput(config));
+    steps.push(this.hostProfileStep(profileRes));
+
+    // Wire the bundled package (copy + settings entry).
+    steps.push(this.packageWiringStep(config));
+
+    // Network config surface (credentials / domains sanity).
+    steps.push(this.networkStep(config));
+
+    // Smoke test: nono supervises pi end-to-end.
+    const smoke = runSmoke(NONO_BINARY, this.buildNonoRunArgs(config, [PI_BINARY, "--version"]));
+    steps.push(
+      smoke.ok
+        ? { status: "ok", label: "smoke test", detail: `nono run --profile ${WPI_PROFILE_NAME} -- pi --version → ${firstLine(smoke.output)}` }
+        : { status: "error", label: "smoke test", detail: smoke.output }
+    );
+
+    return buildSetupReport(config.runtimeMode, steps);
+  }
+
+  /** Ensure the nolabs-ai/pi pack the wpi profile extends is installed. */
+  private ensureNonoPack(): SetupStep {
+    try {
+      const installed = execSync(`${NONO_BINARY} list --installed`, { stdio: "pipe", encoding: "utf-8" });
+      if (installed.includes("nolabs-ai/pi")) {
+        return { status: "ok", label: "nono pack", detail: "nolabs-ai/pi installed" };
+      }
+    } catch (e) {
+      debugLog("setup: nono list --installed failed:", e);
+    }
+    // Missing (or unreadable): pull the signed pack. Idempotent, no sudo.
+    const pull = runSmoke(NONO_BINARY, ["pull", "nolabs-ai/pi"], 60_000);
+    if (pull.ok) return { status: "ok", label: "nono pack", detail: "pulled nolabs-ai/pi" };
+    return { status: "error", label: "nono pack", detail: `pull failed: ${pull.output}` };
+  }
+
+  /** Step for the wpi profile provisioning result. */
+  private hostProfileStep(res: EnsureProfileResult): SetupStep {
+    if (res.written) return { status: "ok", label: "wpi profile", detail: `written to ${res.path}` };
+    if (res.inSync) return { status: "ok", label: "wpi profile", detail: `in sync (${res.path})` };
+    return {
+      status: "warn",
+      label: "wpi profile",
+      detail: `drifted (${res.path}) — wpi won't overwrite; delete to regenerate`,
+    };
+  }
+
+  /** Step for the package copy + settings wiring result. */
+  private packageWiringStep(config: ResolvedConfig): SetupStep {
+    const wiring = ensurePackageWiring(
+      this.packageSourceDir,
+      os.homedir(),
+      this.wpiVersion(),
+      agentSettingsPath(config.configDir)
+    );
+    if (wiring.copy.action === "collision") {
+      return {
+        status: "warn",
+        label: "package wiring",
+        detail: `copy collision at ${wiring.copy.path} (${wiring.copy.differing.length} file(s) differ) — on-disk kept; delete to regenerate`,
+      };
+    }
+    if (wiring.wire?.action === "skipped-malformed") {
+      return {
+        status: "error",
+        label: "package wiring",
+        detail: `${agentSettingsPath(config.configDir)} is not valid JSON — fix it and re-run setup`,
+      };
+    }
+    const copyDetail = wiring.copy.action === "copied" ? "copied" : "in sync";
+    const wireDetail =
+      wiring.wire?.action === "already"
+        ? "settings already wired"
+        : wiring.wire?.action === "replaced" && wiring.wire.replacedFrom
+        ? `settings wired (replaced ${wiring.wire.replacedFrom})`
+        : "settings wired";
+    return { status: "ok", label: "package wiring", detail: `${wiring.copy.path} (${copyDetail}); ${wireDetail}` };
+  }
+
+  /** Surface the resolved network config; warn when filtered blocks everything. */
+  private networkStep(config: ResolvedConfig): SetupStep {
+    const creds = [...config.network.credentials, ...Object.keys(config.network.customCredentials)];
+    const domains = config.network.allowDomains;
+    if (config.network.mode === "filtered" && domains.length === 0 && creds.length === 0) {
+      return {
+        status: "warn",
+        label: "network",
+        detail: "mode=filtered with no allowDomains or credentials — outbound API calls will be blocked",
+      };
+    }
+    const parts: string[] = [`mode=${config.network.mode}`];
+    if (creds.length > 0) parts.push(`credentials: ${creds.join(", ")}`);
+    if (domains.length > 0) parts.push(`allowDomains: ${domains.length} (${domains.join(", ")})`);
+    if (parts.length === 1) parts.push("open (no restrictions)");
+    return { status: "ok", label: "network", detail: parts.join("; ") };
+  }
+
+  private binVersion(bin: string): string {
+    try {
+      return execSync(`${bin} --version`, { stdio: "pipe" }).toString().trim();
+    } catch {
+      return "installed";
+    }
   }
 
   // ── private helpers ─────────────────────────────────────────

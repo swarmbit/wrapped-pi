@@ -241,14 +241,22 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 * `wpi.nativeBinaries` is a wpi-owned manifest key on the bundled package (the union of binaries its extensions shell out to); docker mode bakes those into the image instead, host mode verifies them on PATH.
 * Collision/never-overwrite applies to wpi's own copy: since the path is versioned, collisions only occur on same-version source changes or user edits.
 
-## Phase 6 — Setup command (both modes, both sandbox states)
+## Phase 6 — Setup command (both modes, both sandbox states) ✅ done (live-verified)
 
-* [ ] `wpi setup [--mode host] [--sandbox nono]`.
-* [ ] Docker+none: current behavior.
-* [ ] Docker+nono: additionally check/install nono, derive `wpi-docker` profile, validate mount grants.
-* [ ] Host+nono: platform check → nono install → Pi install → pull pack → derive profile → wire package → validate credentials/domains → smoke test `nono run --profile wpi -- pi --version`.
-* [ ] Host+none: verify Pi binary only; print unsandboxed warning.
-* [ ] Idempotent; no silent sudo.
+* [x] `wpi setup [--mode host] [--sandbox nono]` — new command, per-backend `setup()` on `RuntimeBackend`, step-by-step report (exit 0 ready / 1 warn / 2 error), rendered by `renderSetupReport` (`src/runtime/setup.ts`).
+* [x] Docker+none: docker cli + daemon; unsandboxed warning step.
+* [x] Docker+nono: + nono binary, derive `wpi-docker` profile (write-if-absent, drift reported), validate socket/mount grants against the on-disk profile, smoke test `nono run --profile wpi-docker -- docker --version`.
+* [x] Host+nono: platform check → pi binary → nono binary → **pull pack** (`nono pull nolabs-ai/pi` when `nono list --installed` lacks it) → derive `wpi` profile → wire package (copy + settings) → network config surface (warns when filtered allows nothing) → smoke test `nono run --profile wpi -- pi --version`.
+* [x] Host+none: platform + pi binary only; unsandboxed warning.
+* [x] Idempotent: re-running setup is a no-op (profiles in sync, settings already wired, pack installed) — it provisions the same artifacts a first build/run would write (doctor stays read-only). No silent sudo: missing installs are reported with their exact command (`curl … nono.sh/install.sh | sh`, `npm install -g @earendil-works/pi-coding-agent`) as error steps — never auto-run. The nono pack pull is the one automatic provisioning (idempotent, no sudo).
+* [x] Tests: `src/runtime/setup.test.ts` (report primitives, both backends × both sandbox states, missing binaries, pack pull path, network-blocked warning) + CLI e2e with a fast pi stub on PATH (real pi startup fetches model catalogs in fresh homes — flaky under test).
+* [x] **Live-verified** (isolated HOME): host+nono full stack green — pack pulled, `wpi.json` written, package wired, smoke test runs `nono run --profile wpi -- pi --version` under Landlock. docker+nono: profile written, grants ok, smoke `nono run --profile wpi-docker -- docker --version` → `Docker version 29.7.2`; daemon-down reported as a genuine error (exit 2).
+
+**Deviations / decisions noted:**
+* Setup is the **write-triggered counterpart of doctor**: same checks, plus artifact provisioning (profiles, package copy/settings) and the smoke test. Doctor never writes; setup does.
+* Smoke output is filtered for nono log noise (timestamps/WARN/ANSI) so the step reports the actual signal (e.g. `pi 0.84.1`, `Docker version …`).
+* Known edge (nono-side, not a wpi bug): the `wpi-docker` profile grants `$TMPDIR`/`/tmp` (build context), and nono refuses to sandbox when HOME is nested inside a granted dir (its state root under `$HOME/.local/state/nono` would overlap). Only reachable with a pathological HOME under `/tmp`; normal homes are unaffected.
+* `checkPrerequisites` is skipped for setup (each prerequisite is reported as a step) — same pattern as doctor.
 
 ## Phase 7 — Shell, docs, migration polish
 
@@ -266,7 +274,7 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 | 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium — **done (live-verified)**                               |
 | 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — **done (live-verified with nono 0.73.0)**                 |
 | 5     | Native package wiring                                    | 3                            | Medium — **done (live-verified)**                                       |
-| 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium (installers, sudo UX)                                         |
+| 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium — **done (live-verified)**                                     |
 | 7     | Shell, docs, migration                                   | 3–6                          | Low                                                                  |
 
 ## Resolved design decisions

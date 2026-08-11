@@ -22,6 +22,7 @@ import { DEFAULT_RUNTIME_MODE } from "../config";
 import { DockerBackend } from "./docker-backend";
 import { HostBackend } from "./host-backend";
 import type { DoctorReport } from "./doctor";
+import type { SetupReport } from "./setup";
 
 /** The fully-resolved config shape passed to backends (= loadConfig's return type). */
 export type ResolvedConfig = PiContainerConfig & RuntimeContext;
@@ -51,6 +52,14 @@ export interface RuntimeBackend {
    * 1 warn, 2 error).
    */
   doctor(config: ResolvedConfig): Promise<DoctorReport>;
+  /**
+   * Phase 6: provision artifacts (profiles, package wiring) and verify the
+   * (mode, sandbox) combination is ready to run, step by step. WRITES the
+   * artifacts a first build/run would write (doctor is read-only; setup is not).
+   * Never exits on its own — cli.ts renders the report and exits with
+   * report.exitCode (0 ready, 1 warn, 2 error).
+   */
+  setup(config: ResolvedConfig): Promise<SetupReport>;
 }
 
 /**

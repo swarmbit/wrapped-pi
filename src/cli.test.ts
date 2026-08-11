@@ -40,6 +40,35 @@ describe("CLI", () => {
     expect(output).toContain("wpi");
   });
 
+  it("setup is a recognized command (host+none: unsandboxed warning → exit 1, never unknown-arg)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cli-setup-"));
+    try {
+      // Fast, deterministic pi stub on PATH (real pi startup can fetch model
+      // catalogs over the network in fresh homes — flaky in tests).
+      fs.mkdirSync(path.join(tmpDir, "bin"));
+      fs.writeFileSync(path.join(tmpDir, "bin", "pi"), "#!/bin/sh\necho 'pi 0.84.1'\n");
+      fs.chmodSync(path.join(tmpDir, "bin", "pi"), 0o755);
+      const env = { ...process.env as Record<string, string>, HOME: tmpDir, PATH: `${path.join(tmpDir, "bin")}:${process.env.PATH}` };
+      const output = execSync(`node ${CLI_PATH} setup --mode host --sandbox none`, {
+        encoding: "utf-8",
+        cwd: tmpDir,
+        env,
+        timeout: 20_000,
+      });
+      // host+none always warns (unsandboxed) → exit 1.
+      expect(output).toContain("wpi setup — runtime mode: host");
+      expect(output).toContain("unsandboxed");
+    } catch (e: any) {
+      // execSync throws on non-zero exit — setup exits 1 (warn); the report
+      // must still be on stdout and never an unknown-argument error.
+      const output = e.stdout || e.stderr || e.message || "";
+      expect(output).toContain("wpi setup — runtime mode: host");
+      expect(output).not.toContain("Unknown argument");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("prints help with -h", () => {
     const output = execSync(`node ${CLI_PATH} -h`, { encoding: "utf-8" });
     expect(output).toContain("wpi [command]");

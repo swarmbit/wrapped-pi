@@ -19,6 +19,7 @@
 import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
 import { resolveBackend, resolveDefaultBackend, type RuntimeBackend, type ResolvedConfig } from "./runtime/backend";
 import { renderDoctorReport } from "./runtime/doctor";
+import { renderSetupReport } from "./runtime/setup";
 import * as fs from "fs";
 
 function printHelp(): void {
@@ -32,6 +33,8 @@ Commands:
   shell [id]    Open a shell in a new container, or exec into an existing one by ID/name
   dry-run       Print resolved config and docker commands without executing
   doctor        Check runtime/docker/config health (exit 0 healthy, 1 warn, 2 error)
+  setup         Provision and verify the current runtime/sandbox combination
+                (exit 0 ready, 1 warn, 2 error)
 
 Options:
   --help, -h        Show this help
@@ -60,6 +63,8 @@ Examples:
   wpi shell                        # container shell
   wpi shell my-container           # exec into an existing container
   wpi doctor                       # health check (runtime/docker/config)
+  wpi setup                        # provision + verify (docker+nono default)
+  wpi setup --mode host            # host+nono: profile, pack, package, smoke test
 
 Port config precedence (highest wins):
   1. CLI flags (-p, --port)
@@ -140,7 +145,7 @@ async function main(): Promise<void> {
   }
 
   // Parse our args
-  let command: "run" | "build" | "shell" | "dry-run" | "doctor" = "run";
+  let command: "run" | "build" | "shell" | "dry-run" | "doctor" | "setup" = "run";
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
   let cliMode: string | undefined;
@@ -200,6 +205,8 @@ async function main(): Promise<void> {
       command = "dry-run";
     } else if (arg === "doctor") {
       command = "doctor";
+    } else if (arg === "setup") {
+      command = "setup";
     } else {
       console.error(`Unknown argument: ${arg}`);
       console.error("Run 'wpi --help' for usage.");
@@ -277,9 +284,10 @@ async function main(): Promise<void> {
   const backend: RuntimeBackend = resolveBackend(config.runtimeMode);
 
   // Mode- and sandbox-aware prerequisite check (host+nono needs nono+pi,
-  // docker needs docker). Skipped for dry-run (read-only) and doctor (runs
-  // its own checks). Runs after config load so it knows runtimeMode+sandbox.
-  if (command !== "dry-run" && command !== "doctor") {
+  // docker needs docker). Skipped for dry-run (read-only), doctor (runs
+  // its own checks) and setup (reports each prerequisite as a step). Runs
+  // after config load so it knows runtimeMode+sandbox.
+  if (command !== "dry-run" && command !== "doctor" && command !== "setup") {
     backend.checkPrerequisites(config as ResolvedConfig);
   }
 
@@ -301,6 +309,12 @@ async function main(): Promise<void> {
     case "doctor": {
       const report = await backend.doctor(config as ResolvedConfig);
       console.log(renderDoctorReport(report));
+      process.exit(report.exitCode);
+      break;
+    }
+    case "setup": {
+      const report = await backend.setup(config as ResolvedConfig);
+      console.log(renderSetupReport(report));
       process.exit(report.exitCode);
       break;
     }
