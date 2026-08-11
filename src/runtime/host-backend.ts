@@ -42,12 +42,33 @@ import {
   type DoctorCheck,
   type DoctorStatus,
 } from "./doctor";
+import {
+  ensurePackageWiring,
+  ensureWpiPackageCopy,
+  agentSettingsPath,
+  wpiPackageDir,
+  wpiPackageSourceDir,
+  readNativeBinaries,
+  readSettingsForDoctor,
+  type WiringResult,
+} from "./package-wiring";
+import * as path from "path";
 
 const PI_BINARY = "pi";
 const NONO_BINARY = "nono";
 
 export class HostBackend implements RuntimeBackend {
   readonly mode: RuntimeMode = "host";
+
+  /**
+   * Injectable for tests: where the bundled package (package/) lives.
+   * Defaults to the wpi npm package's package/ dir relative to this module.
+   */
+  private readonly packageSourceDir: string;
+
+  constructor(options?: { packageSourceDir?: string }) {
+    this.packageSourceDir = options?.packageSourceDir ?? wpiPackageSourceDir();
+  }
 
   // ── Prerequisites ──────────────────────────────────────────
 
@@ -80,11 +101,13 @@ export class HostBackend implements RuntimeBackend {
 
   build(config: ResolvedConfig): void {
     // Host mode has no image to build. Ensure prerequisites + the wpi profile
-    // (when sandboxed). This keeps `wpi build --mode host` a useful no-op.
+    // (when sandboxed) + the bundled package wiring. This keeps
+    // `wpi build --mode host` a useful no-op.
     this.checkPrerequisites(config);
     if (config.sandboxBackend === "nono") {
       this.ensureProfileOrWarn(config);
     }
+    this.ensurePackageWiringOrWarn(config);
     console.log(`✓ host mode ready (pi v${config.piVersion}, sandbox: ${config.sandboxBackend}) — no image build needed.`);
   }
 
@@ -92,6 +115,7 @@ export class HostBackend implements RuntimeBackend {
 
   async run(config: ResolvedConfig, piArgs: string[]): Promise<void> {
     this.assertPortsOkForHost(config);
+    this.ensurePackageWiringOrWarn(config);
 
     // cli.ts prepends "pi" to piArgs (same contract as DockerBackend/docker.ts),
     // so piArgs is already the full command. Default to ["pi"] if empty.
@@ -122,6 +146,7 @@ export class HostBackend implements RuntimeBackend {
   // ── Shell ───────────────────────────────────────────────────
 
   async shell(config: ResolvedConfig): Promise<void> {
+    this.ensurePackageWiringOrWarn(config);
     const shellBin = process.env.SHELL || "/bin/bash";
 
     if (config.sandboxBackend === "nono") {
@@ -180,6 +205,7 @@ export class HostBackend implements RuntimeBackend {
       console.log("Host run command (unsandboxed):");
       console.log(`  ${cmd.join(" ")}`);
     }
+    console.log(`  package: ${wpiPackageDir(os.homedir(), this.wpiVersion())} (wired on first run)`);
   }
 
   // ── Doctor ──────────────────────────────────────────────────
@@ -190,6 +216,7 @@ export class HostBackend implements RuntimeBackend {
       this.buildSandboxSection(config.sandboxBackend),
       this.buildPiSection(),
       this.buildPlatformSection(),
+      this.buildPackageSection(config),
       buildConfigurationSection(config),
     ];
     // Only surface the Profile section when nono is configured — docker uses no
@@ -236,6 +263,110 @@ export class HostBackend implements RuntimeBackend {
       );
     }
     return res;
+  }
+
+  /**
+   * Phase 5: wire the bundled pi package for host mode — versioned copy at
+   * ~/.pi/wpi-package/<wpi-version>/ + settings.json packages entry. Idempotent;
+   * never overwrites. Collisions and replacements are reported.
+   */
+  private ensurePackageWiringOrWarn(config: ResolvedConfig): WiringResult {
+    const res = ensurePackageWiring(
+      this.packageSourceDir,
+      os.homedir(),
+      this.wpiVersion(),
+      agentSettingsPath(config.configDir)
+    );
+    if (res.copy.action === "collision") {
+      console.error(
+        `⚠ package copy collision at ${res.copy.path}: ${res.copy.differing.length} file(s) differ from the bundled package. ` +
+          `Using the on-disk copy as-is (wpi never overwrites it). To regenerate, delete the directory and re-run.`
+      );
+    }
+    if (res.wire?.action === "added") {
+      console.log(`✓ wired bundled package ${res.wire.packagePath}`);
+    } else if (res.wire?.action === "replaced" && res.wire.replacedFrom) {
+      console.log(`✓ wired bundled package ${res.wire.packagePath} (replaced ${res.wire.replacedFrom})`);
+    } else if (res.wire?.action === "skipped-malformed") {
+      console.error(
+        `⚠ not wiring bundled package: ${agentSettingsPath(config.configDir)} exists but is not valid JSON. ` +
+          `Fix it, then re-run.`
+      );
+    }
+    return res;
+  }
+
+  /**
+   * Doctor's Package section (host mode, read-only): reports the versioned copy
+   * state, settings wiring state, and manifest-declared native binaries.
+   */
+  private buildPackageSection(config: ResolvedConfig): DoctorSection {
+    const checks: DoctorCheck[] = [];
+    const homeDir = os.homedir();
+    const version = this.wpiVersion();
+    const pkgDir = wpiPackageDir(homeDir, version);
+    const settingsPath = agentSettingsPath(config.configDir);
+
+    checks.push({ status: "info", label: "path", detail: pkgDir });
+
+    // Versioned copy state (read-only).
+    if (!fs.existsSync(this.packageSourceDir)) {
+      checks.push({ status: "info", label: "package copy", detail: `bundled package not found at ${this.packageSourceDir}` });
+    } else if (!fs.existsSync(pkgDir)) {
+      checks.push({ status: "info", label: "package copy", detail: "not present — will be copied on first run/build" });
+    } else {
+      const copy = ensureWpiPackageCopy(this.packageSourceDir, homeDir, version);
+      checks.push(
+        copy.action === "in-sync"
+          ? { status: "ok", label: "package copy", detail: "in sync with bundled package" }
+          : {
+              status: "warn",
+              label: "package copy",
+              detail: `differs from bundled package (${copy.differing.length} file(s)) — wpi won't overwrite; delete to regenerate`,
+            }
+      );
+    }
+
+    // Settings wiring state (read-only; doctor never writes).
+    if (!fs.existsSync(settingsPath)) {
+      checks.push({ status: "info", label: "settings", detail: `${settingsPath} (will be created on first run)` });
+    } else {
+      const settings = readSettingsForDoctor(settingsPath);
+      if (settings === null) {
+        checks.push({ status: "warn", label: "settings", detail: `${settingsPath} exists but is not valid JSON — not wiring` });
+      } else {
+        const packages = Array.isArray(settings.packages) ? settings.packages : [];
+        const wired = packages.some(
+          (p) => typeof p === "string" && path.resolve(path.dirname(settingsPath), p) === pkgDir
+        );
+        checks.push(
+          wired
+            ? { status: "ok", label: "settings", detail: `${settingsPath} (package wired)` }
+            : { status: "info", label: "settings", detail: `${settingsPath} (will wire on first run)` }
+        );
+      }
+    }
+
+    // Manifest-declared native binaries (docker mode bakes them into the image;
+    // host mode needs them on PATH — docker.extension in host mode already warns).
+    const bins = readNativeBinaries(this.packageSourceDir);
+    if (bins.length === 0) {
+      checks.push({ status: "ok", label: "native binaries", detail: "(none declared)" });
+    } else {
+      for (const bin of bins) {
+        if (this.commandAvailable(bin)) {
+          checks.push({ status: "ok", label: `binary ${bin}`, detail: "found on PATH" });
+        } else {
+          checks.push({
+            status: "error",
+            label: `binary ${bin}`,
+            detail: `not found on PATH — a bundled extension requires it`,
+          });
+        }
+      }
+    }
+
+    return { name: "Package", checks };
   }
 
   private commandAvailable(bin: string): boolean {

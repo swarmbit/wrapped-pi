@@ -13,7 +13,10 @@
 // pure argument-assembly and doctor logic, plus the execShell error path.
 // ============================================================
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { HostBackend } from "./host-backend";
 import type { ResolvedConfig } from "./backend";
 import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO, DEFAULT_DOCKER_SOCKET } from "../config";
@@ -171,7 +174,7 @@ describe("HostBackend.doctor", () => {
     });
   });
 
-  it("produces sections Runtime, Sandbox, Profile, Pi, Platform, Configuration (nono)", async () => {
+  it("produces sections Runtime, Sandbox, Profile, Pi, Platform, Package, Configuration (nono)", async () => {
     const report = await backend.doctor(makeHostConfig());
     expect(report.sections.map((s) => s.name)).toEqual([
       "Runtime",
@@ -179,6 +182,7 @@ describe("HostBackend.doctor", () => {
       "Profile",
       "Pi",
       "Platform",
+      "Package",
       "Configuration",
     ]);
     expect(report.mode).toBe("host");
@@ -191,6 +195,7 @@ describe("HostBackend.doctor", () => {
       "Sandbox",
       "Pi",
       "Platform",
+      "Package",
       "Configuration",
     ]);
   });
@@ -285,5 +290,152 @@ describe("HostBackend.doctor — Profile section & route wins", () => {
     const report = await backend.doctor(cfg);
     const profile = report.sections.find((s) => s.name === "Profile")!;
     expect(profile.checks.some((c) => c.label === "env OLLAMA_HOST")).toBe(false);
+  });
+});
+// ── HostBackend — Phase 5 package wiring ─────────────────────
+
+import {
+  ensureWpiPackageCopy,
+  wireSettings,
+  wpiPackageDir,
+  agentSettingsPath,
+} from "./package-wiring";
+
+describe("HostBackend — Package section (doctor, read-only)", () => {
+  let backend: HostBackend;
+  let tmpHome: string;
+  let tmpSource: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-home-")));
+    tmpSource = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-src-")));
+    vi.stubEnv("HOME", tmpHome);
+    fs.mkdirSync(path.join(tmpSource, "extensions"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpSource, "package.json"),
+      JSON.stringify({ name: "wpi-defaults", wpi: { nativeBinaries: ["git"] } })
+    );
+    fs.writeFileSync(path.join(tmpSource, "extensions/sample.ts"), "export const x = 1;\n");
+    backend = new HostBackend({ packageSourceDir: tmpSource });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpSource, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  function hostConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
+    return makeHostConfig({ configDir: path.join(tmpHome, ".pi"), ...overrides });
+  }
+
+  it("reports not-present copy, will-wire settings, and missing native binary", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "pi --version") return "pi 0.84.1";
+      if (cmd === "nono --version") return "nono 0.73.0";
+      throw new Error("unexpected: " + cmd); // git --version → missing
+    });
+    const report = await backend.doctor(hostConfig());
+    const pkg = report.sections.find((s) => s.name === "Package")!;
+    expect(pkg.checks.find((c) => c.label === "package copy")?.status).toBe("info");
+    expect(pkg.checks.find((c) => c.label === "settings")?.detail).toMatch(/will be created on first run/);
+    expect(pkg.checks.find((c) => c.label === "binary git")?.status).toBe("error");
+  });
+
+  it("reports in-sync copy, wired settings, and found native binary", async () => {
+    // Pre-wire exactly what a first run would write (doctor itself never writes).
+    ensureWpiPackageCopy(tmpSource, tmpHome, "1.0.0");
+    wireSettings(agentSettingsPath(path.join(tmpHome, ".pi")), wpiPackageDir(tmpHome, "1.0.0"), tmpHome);
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "pi --version") return "pi 0.84.1";
+      if (cmd === "nono --version") return "nono 0.73.0";
+      if (cmd === "git --version") return "git version 2.39.0";
+      throw new Error("unexpected: " + cmd);
+    });
+
+    const report = await backend.doctor(hostConfig());
+    const pkg = report.sections.find((s) => s.name === "Package")!;
+    expect(pkg.checks.find((c) => c.label === "package copy")?.status).toBe("ok");
+    expect(pkg.checks.find((c) => c.label === "settings")?.status).toBe("ok");
+    expect(pkg.checks.find((c) => c.label === "binary git")?.status).toBe("ok");
+  });
+
+  it("warns on a collision between on-disk copy and bundled source", async () => {
+    const dest = wpiPackageDir(tmpHome, "1.0.0");
+    ensureWpiPackageCopy(tmpSource, tmpHome, "1.0.0");
+    fs.writeFileSync(path.join(dest, "extensions/sample.ts"), "// user edit\n");
+
+    const report = await backend.doctor(hostConfig());
+    const pkg = report.sections.find((s) => s.name === "Package")!;
+    const copy = pkg.checks.find((c) => c.label === "package copy")!;
+    expect(copy.status).toBe("warn");
+    expect(copy.detail).toMatch(/won't overwrite/);
+  });
+
+  it("reports (none declared) when the manifest declares no native binaries", async () => {
+    fs.writeFileSync(path.join(tmpSource, "package.json"), JSON.stringify({ name: "wpi-defaults" }));
+    const report = await backend.doctor(hostConfig());
+    const pkg = report.sections.find((s) => s.name === "Package")!;
+    expect(pkg.checks.find((c) => c.label === "native binaries")?.detail).toBe("(none declared)");
+  });
+});
+
+describe("HostBackend — ensurePackageWiringOrWarn via build", () => {
+  let backend: HostBackend;
+  let tmpHome: string;
+  let tmpSource: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-build-")));
+    tmpSource = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-src2-")));
+    vi.stubEnv("HOME", tmpHome);
+    fs.mkdirSync(path.join(tmpSource, "extensions"), { recursive: true });
+    fs.writeFileSync(path.join(tmpSource, "package.json"), JSON.stringify({ name: "wpi-defaults" }));
+    fs.writeFileSync(path.join(tmpSource, "extensions/sample.ts"), "export const x = 1;\n");
+    // build() → checkPrerequisites probes pi; sandbox=none skips the profile.
+    mockedExecSync.mockReturnValue("ok" as never);
+    backend = new HostBackend({ packageSourceDir: tmpSource });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpSource, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it("copies the bundled package and wires settings on first build", () => {
+    const config = makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "none" });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    backend.build(config);
+    const logged = logSpy.mock.calls.flat().join(" ");
+    errSpy.mockRestore();
+    logSpy.mockRestore();
+
+    const dest = wpiPackageDir(tmpHome, "1.0.0");
+    expect(fs.existsSync(path.join(dest, "extensions/sample.ts"))).toBe(true);
+    const settings = JSON.parse(fs.readFileSync(agentSettingsPath(path.join(tmpHome, ".pi")), "utf-8"));
+    expect(settings.packages).toContain(dest);
+    expect(logged).toContain("wired bundled package");
+  });
+
+  it("is idempotent: a second build reports in-sync and does not rewrite settings", () => {
+    const config = makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "none" });
+    const quiet = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    backend.build(config);
+    quiet.mockRestore();
+    const settingsPath = agentSettingsPath(path.join(tmpHome, ".pi"));
+    const before = fs.statSync(settingsPath).mtimeMs;
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => logs.push(a.join(" ")));
+    backend.build(config);
+    spy.mockRestore();
+    errSpy.mockRestore();
+
+    expect(fs.statSync(settingsPath).mtimeMs).toBe(before);
+    expect(logs.join(" ")).not.toContain("wired bundled package"); // no re-wire noise
   });
 });

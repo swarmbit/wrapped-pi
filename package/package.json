@@ -9,6 +9,9 @@
     "themes": ["./themes"],
     "skills": ["./skills"]
   },
+  "wpi": {
+    "nativeBinaries": ["git"]
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   }

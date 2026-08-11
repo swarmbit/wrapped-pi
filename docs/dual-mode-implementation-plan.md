@@ -222,13 +222,24 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 * `--sandbox` CLI flag exists (from Phase 3) and now applies to docker mode; `wpi shell <id>` and `doctor` never arm the sandbox prefix (module state stays `[]`).
 * `nono run` (supervised), not `nono wrap` — same convention as host mode.
 
-## Phase 5 — Native package wiring for host mode
+## Phase 5 — Native package wiring for host mode ✅ done (live-verified)
 
-Unchanged from the original Phase 4.
+* [x] Default package source stays in the `wpi` npm package (`package/` shipped via `files`, same dir the Docker image bakes in).
+* [x] Host mode: versioned `~/.pi/wpi-package/<wpi-version>/` copy (`src/runtime/package-wiring.ts`), idempotent `settings.json` wiring, user packages untouched, collision reporting.
+* [x] Extensions needing native binaries: manifest-declared (`package/package.json` → `wpi.nativeBinaries`, currently `git`), doctor checks host in a new **Package** section; `docker.extension` in host mode already warns (Phase 3).
 
-* [ ] Default package source stays in the `wpi` npm package.
-* [ ] Host mode: versioned `~/.pi/wpi-package/<wpi-version>/`, idempotent `settings.json` wiring, user packages untouched, collision reporting.
-* [ ] Extensions needing native binaries: manifest-declared, doctor checks host, `docker.extension` in host mode → clear warning.
+**What runs on first host build/run/shell (`ensurePackageWiringOrWarn`):**
+* Copy `package/` → `~/.pi/wpi-package/<wpi-version>/` (versioned: an upgrade lands in a NEW directory). Idempotent — an identical on-disk copy is `in-sync` and skipped; a differing copy is a **collision**: wpi keeps the on-disk copy, warns loudly, never overwrites (delete to regenerate — same contract as nono profiles).
+* Wire the copy's absolute path into `~/.pi/agent/settings.json` `packages` (pi resolves local paths without copying; identity = resolved absolute path). The merge is surgical: other settings keys, object-form package filters, and user packages are preserved verbatim. wpi only replaces entries it owns: a different wpi-package version (upgrade path) and the stale docker-mode default (`/opt/pi-package`) **when that path doesn't exist on the host** (it resolves only inside the container image — keeps the settings file from accumulating a dead entry when switching modes). A settings file that exists but is malformed is left untouched (`skipped-malformed` + warning).
+* `dry-run` and `doctor` never write: dry-run prints the target path; doctor inspects copy state / wiring state / native binaries read-only.
+* Doctor section order: `Runtime, Sandbox, [Profile], Pi, Platform, Package, Configuration`.
+
+**Live-verified:** `wpi build --mode host` in an isolated HOME → copy + settings entry + `✓ wired bundled package`; second build silent (no re-wire); editing a file in the copy → `⚠ package copy collision … 1 file(s) differ … Using the on-disk copy as-is`; doctor reports `in sync`, `(package wired)`, `binary git: found on PATH`.
+
+**Deviations / decisions noted:**
+* Host mode does NOT copy `settings/default-settings.json` (the docker entrypoint's theme/thinking defaults). Host settings wiring is surgical — only the `packages` entry — so user settings are never touched; pi has its own defaults when no settings file exists.
+* `wpi.nativeBinaries` is a wpi-owned manifest key on the bundled package (the union of binaries its extensions shell out to); docker mode bakes those into the image instead, host mode verifies them on PATH.
+* Collision/never-overwrite applies to wpi's own copy: since the path is versioned, collisions only occur on same-version source changes or user edits.
 
 ## Phase 6 — Setup command (both modes, both sandbox states)
 
@@ -254,7 +265,7 @@ Unchanged from the original Phase 4.
 | 2     | `wpi doctor` (Docker)                                    | 1                            | Low — **done**                                |
 | 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium — **done (live-verified)**                               |
 | 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — **done (live-verified with nono 0.73.0)**                 |
-| 5     | Native package wiring                                    | 3                            | Medium (idempotency critical)                                        |
+| 5     | Native package wiring                                    | 3                            | Medium — **done (live-verified)**                                       |
 | 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium (installers, sudo UX)                                         |
 | 7     | Shell, docs, migration                                   | 3–6                          | Low                                                                  |
 
