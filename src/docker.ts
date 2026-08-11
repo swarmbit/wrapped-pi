@@ -25,11 +25,30 @@ import { generateDockerfile, generateEntrypoint } from "./templates";
 // Module root (sibling to dist/)
 const MODULE_ROOT = path.join(__dirname, "..");
 
+// ── Docker sandbox wrapping (Phase 4) ─────────────────────────
+// When sandbox.backend == "nono" in docker mode, every `docker` CLI call in
+// this module runs under `nono run --profile wpi-docker ... -- docker ...`.
+// DockerBackend sets the prefix via setDockerSandboxPrefix() before dispatching
+// build/run/shell; doctor and `wpi shell <id>` leave it empty ([] = direct).
+let _dockerSandboxPrefix: string[] = [];
+
+/** Set the nono prefix prepended to every docker invocation in this module. */
+export function setDockerSandboxPrefix(prefix: string[]): void {
+  _dockerSandboxPrefix = prefix;
+}
+
+/** Wrap a docker arg array with the active sandbox prefix, if any. */
+function dockerSpawnArgs(args: string[]): { bin: string; args: string[] } {
+  if (_dockerSandboxPrefix.length === 0) return { bin: "docker", args };
+  return { bin: "nono", args: [..._dockerSandboxPrefix, "--", "docker", ...args] };
+}
+
 // ── Image management ────────────────────────────────────────
 
 export function imageExists(tag: string): boolean {
   debugLog(`Checking if image exists: ${tag}`);
-  const result = spawnSync("docker", ["image", "inspect", tag], { stdio: "pipe" });
+  const inspect = dockerSpawnArgs(["image", "inspect", tag]);
+  const result = spawnSync(inspect.bin, inspect.args, { stdio: "pipe" });
   const exists = result.status === 0;
   debugLog(`Image ${tag} exists: ${exists}${exists ? "" : " (stderr: " + result.stderr.toString().trim() + ")"}`);
   return exists;
@@ -53,8 +72,9 @@ export function buildImage(config: { piVersion: string; piImage: string; dockerf
       ".",
     ];
 
-    debugLog(`Running: docker ${args.join(" ")} (cwd: ${buildCtx})`);
-    const result = spawnSync("docker", args, {
+    const { bin: buildBin, args: buildArgs } = dockerSpawnArgs(args);
+    debugLog(`Running: ${buildBin} ${buildArgs.join(" ")} (cwd: ${buildCtx})`);
+    const result = spawnSync(buildBin, buildArgs, {
       cwd: buildCtx,
       stdio: isDebug() ? "pipe" : "inherit",
     });
@@ -100,13 +120,15 @@ export function buildIfNeeded(config: { piVersion: string; piImage: string; dock
 function spawnDocker(args: string[], debug: boolean): Promise<SpawnSyncReturns<Buffer>> {
   if (!debug) {
     // Fast path: inherit all stdio, synchronous
-    const result = spawnSync("docker", args, { stdio: "inherit" });
+    const { bin, args: wrappedArgs } = dockerSpawnArgs(args);
+    const result = spawnSync(bin, wrappedArgs, { stdio: "inherit" });
     return Promise.resolve(result);
   }
 
   // Debug path: inherit stdin (keep TTY working), pipe stdout/stderr for capture
   return new Promise((resolve) => {
-    const child = spawn("docker", args, {
+    const { bin, args: wrappedArgs } = dockerSpawnArgs(args);
+    const child = spawn(bin, wrappedArgs, {
       stdio: ["inherit", "pipe", "pipe"],
     });
 
@@ -163,7 +185,8 @@ export async function runContainer(config: PiContainerConfig & RuntimeContext, p
       debugLog(`Ensuring docker volume exists: ${v.name}`);
       try {
         // `docker volume create` is idempotent — it will succeed if the volume exists
-        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
+        const volCreate = dockerSpawnArgs(["volume", "create", v.name]);
+        const res = spawnSync(volCreate.bin, volCreate.args, { stdio: isDebug() ? "pipe" : "ignore" });
         if (isDebug() && res.stdout) {
           debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
         }
@@ -198,7 +221,8 @@ export async function shellInContainer(config: PiContainerConfig & RuntimeContex
     for (const v of config.volumes) {
       debugLog(`Ensuring docker volume exists: ${v.name}`);
       try {
-        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
+        const volCreate = dockerSpawnArgs(["volume", "create", v.name]);
+        const res = spawnSync(volCreate.bin, volCreate.args, { stdio: isDebug() ? "pipe" : "ignore" });
         if (isDebug() && res.stdout) {
           debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
         }
@@ -230,7 +254,8 @@ export async function execInContainer(containerId: string): Promise<void> {
   debugLog(`execInContainer called for: ${containerId}`);
 
   // Verify the container exists and is running
-  const inspect = spawnSync("docker", ["container", "inspect", containerId], { stdio: "pipe" });
+  const inspectArgs = dockerSpawnArgs(["container", "inspect", containerId]);
+  const inspect = spawnSync(inspectArgs.bin, inspectArgs.args, { stdio: "pipe" });
   if (inspect.status !== 0) {
     console.error(`Error: Container "${containerId}" not found.`);
     console.error(inspect.stderr.toString().trim());

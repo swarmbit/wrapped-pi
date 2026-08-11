@@ -77,6 +77,7 @@ network:
     - github
 
 docker:
+  socket: /var/run/docker.sock   # daemon socket (docker+nono grants this in the sandbox profile)
   ports: [3000]
   mounts: []
   volumes: []
@@ -204,17 +205,22 @@ The original Phase 3, reframed: `HostBackend` whose supported sandbox is nono.
 * `wpi build --mode host` is a no-op that ensures pi present + the wpi profile (if nono), prints "no image build needed" — `build` stays shared and mode-aware.
 
 
-## Phase 4 — Docker mode with nono *(new)*
+## Phase 4 — Docker mode with nono ✅ done (live-verified with nono 0.73.0)
 
 **Goal:** `nono run --profile wpi-docker -- docker run ...` — sandbox the container's host-side footprint.
 
-* [ ] A second derived profile (`nono.dockerProfile`, default `wpi-docker`) scoped to what the Docker client needs: Docker socket, build context dir, declared mounts/volumes (read per declared mode), `~/.pi` state.
-* [ ] `DockerBackend` gains sandbox wrapping: when `sandbox.backend: nono`, the `docker run`/`docker build`/`docker exec` invocations execute as nono children.
-* [ ] Mounts declared in `docker.mounts` must map to nono path grants — a mount the profile doesn't grant is a setup/doctor error with a clear message, not a runtime failure.
-* [ ] Network: container networking stays Docker's; nono's supervisor filters the client's host-side traffic (registry pulls, credential proxy). Document the boundary honestly — nono does not filter in-container traffic.
-* [ ] Tests: profile derivation from declared mounts, docker-command wrapping, mount-without-grant error, dry-run rendering of the wrapped command.
+* [x] A second derived profile (`nono.dockerProfile`, default `wpi-docker`) scoped to what the Docker client needs: Docker socket (`docker.socket`, honours `$DOCKER_HOST` unix:// form), build context dir (`$TMPDIR` + `/tmp`), declared mounts (ro → `filesystem.read`, rw → `filesystem.allow`), `~/.pi` state. Named docker **volumes** need no host grant — they live in the daemon, reached via the socket.
+* [x] `DockerBackend` sandbox wrapping: when `sandbox.backend: nono`, `build`/`run`/`shell` arm a nono prefix (`nono run --profile <dockerProfile> --allow-cwd --rollback -- docker ...`) on every `docker` call in `docker.ts` (image inspect/build/run/shell/volume-create/exec) via `setDockerSandboxPrefix`. `wpi shell <id>` (exec into an existing container) stays direct — the container is the boundary.
+* [x] Mount-grant enforcement: `checkProfileGrants` verifies socket + every declared mount against the profile. `doctor` reports grant gaps as **errors** with a fix hint; a drifted on-disk profile that misses a declared grant fails fast at run/build with a clear message (never a silent runtime denial). First run writes the profile with full grants, so only drift can produce gaps.
+* [x] Network: container networking stays Docker's; nono does **not** filter in-container traffic. The docker client's host-side network is left open in Slice 1 (profile extends `default`, no network block) so registry pulls work — L7 filtering of client pulls is a documented later refinement (honest boundary note in `src/runtime/docker-profile.ts`).
+* [x] Tests: `src/runtime/docker-profile.test.ts` (profile derivation, socket normalization, mount mode mapping, dedupe, drift/never-overwrite, grant checks), `src/runtime/docker-backend.test.ts` (prefix wrapping via real `docker.ts`, `nono.dockerProfile` name, dry-run rendering wrapped vs plain, mount-grant fail-fast — which caught a real swallowed-`process.exit` bug), doctor sandbox section tests, sandbox-config tests for `nono.dockerProfile` + `docker.socket` resolution.
+* [x] **Live-verified** with nono 0.73.0: `nono profile validate` accepts the generated `wpi-docker.json`; `nono run --profile wpi-docker --allow-cwd --rollback -- docker --version` supervises the docker client under Landlock with `~/.pi`, `$TMPDIR`/`/tmp` granted and outbound net allowed; docker prints and exits 0. (Full `docker run` exercise needs a running daemon.)
 
-**This phase is the main new work introduced by the revision.** It directly mitigates the architecture note's top Docker risk (daemon/socket + broad mounts) without giving up image reproducibility.
+**Deviations / decisions noted:**
+* `docker.socket` config key added (default `/var/run/docker.sock`; `$DOCKER_HOST` honoured when `unix://…`; explicit config wins) — the profile's socket grant must match the daemon the client actually talks to.
+* Profile lives in its **own file** (`~/.config/nono/profiles/wpi-docker.json`), not merged into the host `wpi` profile — different lifecycle, cleaner diff (open question resolved).
+* `--sandbox` CLI flag exists (from Phase 3) and now applies to docker mode; `wpi shell <id>` and `doctor` never arm the sandbox prefix (module state stays `[]`).
+* `nono run` (supervised), not `nono wrap` — same convention as host mode.
 
 ## Phase 5 — Native package wiring for host mode
 
@@ -247,7 +253,7 @@ Unchanged from the original Phase 4.
 | 1     | `RuntimeBackend` + `DockerBackend` extraction            | 0                            | **High** (regression) — **done (cd7f816)**                |
 | 2     | `wpi doctor` (Docker)                                    | 1                            | Low — **done**                                |
 | 3     | `HostBackend` + nono (original "nono mode")              | 1                            | Medium — **done (live-verified)**                               |
-| 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — profile must cover socket/mounts without over-granting |
+| 4     | Docker + nono sandboxing (**new**)                       | 3 (shares profile machinery) | Medium-high — **done (live-verified with nono 0.73.0)**                 |
 | 5     | Native package wiring                                    | 3                            | Medium (idempotency critical)                                        |
 | 6     | `wpi setup` all combinations                             | 3, 4, 5                      | Medium (installers, sudo UX)                                         |
 | 7     | Shell, docs, migration                                   | 3–6                          | Low                                                                  |
@@ -266,7 +272,7 @@ Unchanged from the original Phase 4.
 ## Open questions
 
 * [x] ~~Default sandbox per mode~~ → **resolved:&#x20;**`nono`**&#x20;on both, breaking change accepted** (§0.1).
-* [ ] Does the `wpi-docker` profile belong in the same profile file as `wpi`, or separate files? Separate is cleaner (different lifecycles), one file is easier to diff. Leaning separate.
-* [ ] Docker+nono on macOS: the Docker Desktop VM already isolates the container from the host fs — is nono's added value there mostly credential proxying + audit? Validate the honest benefit before marketing Phase 4 for macOS; the clearest win is Linux where the daemon is local.
+* [x] ~~Does the `wpi-docker` profile belong in the same profile file as `wpi`, or separate files?~~ → **resolved: separate file** (`~/.config/nono/profiles/wpi-docker.json`) — different lifecycles, cleaner diff.
+* [x] ~~Docker+nono on macOS~~ → **resolved in practice**: on macOS the Docker Desktop VM isolates the container fs, so nono's added value is socket/mount scoping of the *client* + credential proxying + audit + drift-safe grants; the clearest win is Linux (local daemon). Slice 1 implements the scoping; L7 client-network filtering is a documented later refinement.
 * [ ] `wpi update` semantics per combination (pack vs. derived profiles vs. wired package) — define before Phase 7.
 * [ ] Should `--sandbox` get a CLI flag too, or config-only? Leaning config-only to keep the CLI surface small.

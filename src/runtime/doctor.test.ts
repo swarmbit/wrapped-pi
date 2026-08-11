@@ -14,7 +14,10 @@
 // child_process so the report shape is deterministic.
 // ============================================================
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 import {
   looksLikeSecretKey,
@@ -22,13 +25,12 @@ import {
   computeExitCode,
   buildReport,
   buildRuntimeSection,
-  buildDockerSandboxSection,
   buildConfigurationSection,
   renderDoctorReport,
 } from "./doctor";
 import { DockerBackend } from "./docker-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO, DEFAULT_DOCKER_SOCKET } from "../config";
 
 function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
@@ -37,6 +39,7 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     network: EMPTY_NETWORK,
     workspace: EMPTY_NONO,
     nono: EMPTY_NONO,
+    dockerSocket: DEFAULT_DOCKER_SOCKET,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -143,7 +146,7 @@ describe("computeExitCode", () => {
 // ── Shared sections ──────────────────────────────────────────
 
 describe("buildRuntimeSection", () => {
-  it("reports mode ok (sandbox is its own section in Phase 3)", () => {
+  it("reports mode ok (sandbox is its own section)", () => {
     const section = buildRuntimeSection("docker");
     expect(section.name).toBe("Runtime");
     expect(section.checks).toEqual([{ status: "ok", label: "mode", detail: "docker" }]);
@@ -152,20 +155,6 @@ describe("buildRuntimeSection", () => {
   it("works for host mode", () => {
     const section = buildRuntimeSection("host");
     expect(section.checks[0]).toEqual({ status: "ok", label: "mode", detail: "host" });
-  });
-});
-
-describe("buildDockerSandboxSection", () => {
-  it("reports none (docker default) with Phase 4 note for docker+none", () => {
-    const section = buildDockerSandboxSection("none");
-    expect(section.name).toBe("Sandbox");
-    expect(section.checks.find((c) => c.label === "backend")?.status).toBe("ok");
-    expect(section.checks.find((c) => c.label === "docker+nono")?.detail).toMatch(/Phase 4/);
-  });
-
-  it("reports nono as info (not dispatched) for docker+nono", () => {
-    const section = buildDockerSandboxSection("nono");
-    expect(section.checks.find((c) => c.label === "backend")?.status).toBe("info");
   });
 });
 
@@ -218,7 +207,13 @@ describe("renderDoctorReport", () => {
   it("renders section headers, status icons, and summary", () => {
     const report = buildReport("docker", [
       buildRuntimeSection("docker"),
-      buildDockerSandboxSection("none"),
+      {
+        name: "Sandbox",
+        checks: [
+          { status: "ok", label: "backend", detail: "none (opt-out)" },
+          { status: "warn", label: "unsandboxed", detail: "docker runs without nono" },
+        ],
+      },
       {
         name: "Docker",
         checks: [
@@ -234,7 +229,7 @@ describe("renderDoctorReport", () => {
     expect(out).toContain("Sandbox");
     expect(out).toContain("Docker");
     expect(out).toContain("✗ docker daemon: not running");
-    expect(out).toContain("Summary: 1 error(s), 0 warning(s) (exit 2)");
+    expect(out).toContain("Summary: 1 error(s), 1 warning(s) (exit 2)");
   });
 
   it("summary reports healthy when exit 0", () => {
@@ -266,25 +261,42 @@ function spawnResult(status: number, stdout = "", stderr = ""): SpawnSyncReturns
 
 describe("DockerBackend.doctor", () => {
   let backend: DockerBackend;
+  let tmpHome: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
     backend = new DockerBackend();
+    // Isolate the wpi-docker profile path so doctor never touches the real
+    // ~/.config/nono/profiles dir. os.homedir() honours $HOME on POSIX.
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-doctor-home-"));
+    vi.stubEnv("HOME", tmpHome);
   });
 
-  it("reports healthy (exit 0) when docker cli + daemon are up and image is built", async () => {
-    // checkPrerequisites isn't called here; doctor shells out itself.
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  /** Mock: docker cli + daemon up, image built, nono installed (nono default). */
+  function mockHealthyDocker(): void {
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "docker --version") return "Docker version 29.7.2, build abc";
+      if (cmd === "nono --version") return "nono 0.73.0";
       throw new Error("unexpected execSync call: " + cmd);
     });
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
+  }
 
-    const report = await backend.doctor(makeConfig());
+  it("reports healthy (exit 0) when docker cli + daemon are up, image built, nono sandbox ready", async () => {
+    mockHealthyDocker();
+
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
     expect(report.exitCode).toBe(0);
     const dockerSection = report.sections.find((s) => s.name === "Docker")!;
     expect(dockerSection.checks.find((c) => c.label === "docker cli")?.status).toBe("ok");
     expect(dockerSection.checks.find((c) => c.label === "docker daemon")?.status).toBe("ok");
+    const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.status).toBe("ok");
     const piSection = report.sections.find((s) => s.name === "Pi")!;
     // imageExists is mocked via spawnSync returning status 0 => treated as built.
     expect(piSection.checks.find((c) => c.label === "image")?.detail).toContain("built");
@@ -296,7 +308,7 @@ describe("DockerBackend.doctor", () => {
     });
     mockedSpawnSync.mockReturnValue(spawnResult(1, "", "not found"));
 
-    const report = await backend.doctor(makeConfig());
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "none" }));
     expect(report.exitCode).toBe(2);
     const dockerSection = report.sections.find((s) => s.name === "Docker")!;
     expect(dockerSection.checks.find((c) => c.label === "docker cli")?.status).toBe("error");
@@ -307,7 +319,7 @@ describe("DockerBackend.doctor", () => {
     mockedExecSync.mockReturnValue("Docker version 29.7.2");
     mockedSpawnSync.mockReturnValue(spawnResult(1, "", "Cannot connect to the Docker daemon"));
 
-    const report = await backend.doctor(makeConfig());
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "none" }));
     expect(report.exitCode).toBe(2);
     const dockerSection = report.sections.find((s) => s.name === "Docker")!;
     expect(dockerSection.checks.find((c) => c.label === "docker daemon")?.status).toBe("error");
@@ -318,7 +330,7 @@ describe("DockerBackend.doctor", () => {
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
 
     const report = await backend.doctor(
-      makeConfig({ env: { ANTHROPIC_API_KEY: "sk-test", FIRECRAWL_BASE_URL: "http://x" } })
+      makeConfig({ sandboxBackend: "none", env: { ANTHROPIC_API_KEY: "sk-test", FIRECRAWL_BASE_URL: "http://x" } })
     );
     const cfgSection = report.sections.find((s) => s.name === "Configuration")!;
     const warns = cfgSection.checks.filter((c) => c.status === "warn");
@@ -338,17 +350,74 @@ describe("DockerBackend.doctor", () => {
       return spawnResult(1);
     });
 
-    const report = await backend.doctor(makeConfig());
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "none" }));
     expect(report.exitCode).toBe(1);
     const piSection = report.sections.find((s) => s.name === "Pi")!;
     expect(piSection.checks.find((c) => c.label === "image")?.status).toBe("warn");
   });
 
-  it("section order is Runtime, Sandbox, Pi, Docker, Configuration", async () => {
-    mockedExecSync.mockReturnValue("Docker version 29.7.2");
+  it("sandbox: none is an explicit opt-out that warns", async () => {
+    mockHealthyDocker();
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "none" }));
+    const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
+    const backendCheck = sandboxSection.checks.find((c) => c.label === "backend")!;
+    expect(backendCheck.detail).toMatch(/opt-out/);
+    expect(sandboxSection.checks.find((c) => c.label === "unsandboxed")?.status).toBe("warn");
+    expect(report.exitCode).toBe(1);
+  });
+
+  it("sandbox: nono binary missing is an error (exit 2)", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "docker --version") return "Docker version 29.7.2";
+      throw new Error("not installed"); // nono --version throws
+    });
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
 
-    const report = await backend.doctor(makeConfig());
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
+    const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.status).toBe("error");
+    expect(report.exitCode).toBe(2);
+  });
+
+  it("sandbox: mount/socket grants missing from on-disk profile are errors", async () => {
+    mockHealthyDocker();
+    // A drifted on-disk profile that grants the socket but NOT a declared mount.
+    const profileDir = path.join(tmpHome, ".config", "nono", "profiles");
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(profileDir, "wpi-docker.json"),
+      JSON.stringify({ meta: { name: "wpi-docker", version: "1.0.0" }, extends: "default", filesystem: { unix_socket: [DEFAULT_DOCKER_SOCKET] } })
+    );
+
+    const report = await backend.doctor(
+      makeConfig({
+        sandboxBackend: "nono",
+        mounts: [{ host: "/host/data", container: "/container/data", mode: "rw" }],
+      })
+    );
+    const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
+    const mountGrant = sandboxSection.checks.find((c) => c.label === "grant mount")!;
+    expect(mountGrant.status).toBe("error");
+    expect(mountGrant.detail).toContain("/host/data");
+    const socketGrant = sandboxSection.checks.find((c) => c.label === "grant socket")!;
+    expect(socketGrant.status).toBe("ok");
+    expect(report.exitCode).toBe(2);
+  });
+
+  it("sandbox: profile not yet written reports info, not error", async () => {
+    mockHealthyDocker();
+    const report = await backend.doctor(
+      makeConfig({ sandboxBackend: "nono", mounts: [{ host: "/host/data", container: "/c/data", mode: "ro" }] })
+    );
+    const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandboxSection.checks.find((c) => c.label === "profile grants")?.status).toBe("info");
+    expect(report.exitCode).toBe(0);
+  });
+
+  it("section order is Runtime, Sandbox, Pi, Docker, Configuration", async () => {
+    mockHealthyDocker();
+
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
     expect(report.sections.map((s) => s.name)).toEqual([
       "Runtime",
       "Sandbox",

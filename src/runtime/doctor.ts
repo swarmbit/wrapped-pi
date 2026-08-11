@@ -18,7 +18,7 @@
 //   - Secret-looking YAML env values warn.
 // ============================================================
 
-import type { RuntimeMode, SandboxBackend } from "../config";
+import type { RuntimeMode } from "../config";
 import type { ResolvedConfig } from "./backend";
 
 export type DoctorStatus = "ok" | "warn" | "error" | "info";
@@ -100,30 +100,9 @@ export function buildRuntimeSection(mode: RuntimeMode): DoctorSection {
 }
 
 /**
- * Build the Sandbox section for docker mode. In Phase 3 docker defaults to
- * `none`; docker+nono lands in Phase 4, so an explicit nono is reported as
- * info "not yet dispatched" rather than erroring in the report (the config
- * loader already rejects docker+nono). host mode builds its own richer
- * Sandbox section with a nono-binary check.
+ * Build the Configuration section (mode-agnostic). Docker-specific sections
+ * (Sandbox, Pi, Docker) are built by DockerBackend; host sections by HostBackend.
  */
-export function buildDockerSandboxSection(sandbox: SandboxBackend): DoctorSection {
-  if (sandbox === "none") {
-    return {
-      name: "Sandbox",
-      checks: [
-        { status: "ok", label: "backend", detail: "none (docker default in Phase 3)" },
-        { status: "info", label: "docker+nono", detail: "lands in Phase 4" },
-      ],
-    };
-  }
-  return {
-    name: "Sandbox",
-    checks: [
-      { status: "info", label: "backend", detail: "nono (docker+nono dispatch lands in Phase 4)" },
-    ],
-  };
-}
-
 export function buildConfigurationSection(config: ResolvedConfig): DoctorSection {
   const checks: DoctorCheck[] = [];
 

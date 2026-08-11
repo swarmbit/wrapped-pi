@@ -40,7 +40,8 @@ Options:
   --mode MODE       Runtime backend: docker (default) or host
                     Overrides runtime.mode in config for this run only
   --sandbox BACKEND Sandbox backend: nono or none
-                    host mode defaults to nono; docker mode defaults to none (Phase 3)
+                    Defaults to nono on BOTH modes (docker + host);
+                    none is the explicit opt-out (doctor warns)
                     Overrides sandbox.backend in config for this run only
   -p, --port PORT   Publish container port to localhost (repeatable)
                     PORT can be a simple port (3000) or host:container (8080:3000)
@@ -69,10 +70,11 @@ Config file schema:
   runtime:
     mode: docker        # docker | host (default: docker)
   sandbox:
-    backend: none       # nono | none (host default: nono, docker default: none in Phase 3)
+    backend: nono       # nono | none (default: nono on both modes; none = opt-out)
   pi:
     version: 0.76.0     # override the pi version used (default: baked-in)
   docker:
+    socket: /var/run/docker.sock  # daemon socket (docker+nono grants this in the sandbox profile)
     ports:
       - 3000        # dev server
       - 6006        # storybook
@@ -105,9 +107,10 @@ Config file schema:
   workspace:          # extra fs grants beyond read-write workdir (host+nono)
     allowPaths: [~/src]
     readPaths: [/etc]
-  nono:               # profile tuning (host+nono)
+  nono:               # profile tuning
     allowPaths: [/tmp/build]
     readPaths: [~/.config]
+    dockerProfile: wpi-docker  # nono profile used when sandboxing docker mode
 
 Path placeholders (usable in docker.mounts and docker.volumes):
   ~ or \${home}          host home directory  (e.g. /Users/alice)

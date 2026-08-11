@@ -8,7 +8,7 @@ import * as fs from "fs";
 import * as os from "os";
 import { buildDockerRunArgs } from "./docker";
 import { generateDockerfile, generateEntrypoint } from "./templates";
-import { PiContainerConfig, PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "./config";
+import { PiContainerConfig, PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO, DEFAULT_DOCKER_SOCKET } from "./config";
 
 function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConfig {
   return {
@@ -17,6 +17,7 @@ function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConf
     network: EMPTY_NETWORK,
     workspace: EMPTY_NONO,
     nono: EMPTY_NONO,
+    dockerSocket: DEFAULT_DOCKER_SOCKET,
     piVersion: PI_VERSION,
     ports: [],
     env: {},
@@ -42,6 +43,7 @@ function makeFullConfig(overrides: Partial<FullConfig> = {}): FullConfig {
     network: EMPTY_NETWORK,
     workspace: EMPTY_NONO,
     nono: EMPTY_NONO,
+    dockerSocket: DEFAULT_DOCKER_SOCKET,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],

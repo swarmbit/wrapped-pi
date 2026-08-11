@@ -86,14 +86,13 @@ export function parseRuntimeMode(value: string, source: string): RuntimeMode {
   );
 }
 
-// ── Sandbox axis (Phase 3) ────────────────────────────────────
+// ── Sandbox axis (Phase 3/4) ────────────────────────────────
 //
 // Per the dual-mode plan §0.1, sandbox.backend defaults to "nono" on BOTH
-// modes — but only *from the phase where each combination lands*:
-//   - host + nono  lands in Phase 3 → host defaults to "nono" now.
-//   - docker + nono lands in Phase 4 → docker still defaults to "none" until Phase 4.
-// Requesting docker+nono in Phase 3 is an explicit error ("lands in Phase 4"),
-// never a silent unsandboxed run.
+// modes once each combination lands:
+//   - host + nono  landed in Phase 3 → host defaults to "nono".
+//   - docker + nono landed in Phase 4 → docker flips to "nono" now (breaking).
+// `sandbox: none` is the explicit opt-out; doctor warns when unsandboxed.
 
 /** Sandbox backends supported by wpi. */
 export const SANDBOX_BACKENDS = ["nono", "none"] as const;
@@ -174,21 +173,26 @@ export interface NonoConfig {
   allowPaths: string[];
   /** Read-only fs grants. Merged with workspace.readPaths. */
   readPaths: string[];
+  /**
+   * nono profile name used when sandboxing docker mode (nono.dockerProfile).
+   * Defaults to the wpi-authored `wpi-docker` profile (plan §Phase 4).
+   */
+  dockerProfile: string;
 }
 
 /**
- * Default sandbox backend per runtime mode for the current phase.
- * Phase 4 will flip docker → "nono" once docker+nono dispatch is implemented.
+ * Default sandbox backend per runtime mode. Phase 4 flips docker → "nono"
+ * (breaking change, plan §0.1); `sandbox: none` is the explicit opt-out.
  */
 export const DEFAULT_SANDBOX_FOR: Record<RuntimeMode, SandboxBackend> = {
-  docker: "none",
+  docker: "nono",
   host: "nono",
 };
 
-/** Whether a (mode, sandbox) combination is implemented in the current phase. */
+/** Whether a (mode, sandbox) combination is implemented. */
 export function isSandboxImplemented(mode: RuntimeMode, sandbox: SandboxBackend): boolean {
   if (mode === "host") return true;
-  if (mode === "docker") return sandbox === "none"; // docker+nono lands in Phase 4
+  if (mode === "docker") return true; // docker+none and docker+nono both land in Phase 4
   return false;
 }
 
@@ -252,6 +256,8 @@ export interface PiContainerConfig {
   memorySwap?: string;
   /** Extra Dockerfile instructions appended during image build (docker.extension). */
   dockerfileExtension?: string;
+  /** Docker daemon socket path (docker.socket). Defaults to /var/run/docker.sock. */
+  dockerSocket: string;
   /** Git user name for commits inside the container (git.user.name). */
   gitUserName?: string;
   /** Git user email for commits inside the container (git.user.email). */
@@ -307,6 +313,8 @@ interface ConfigFile {
     memorySwap?: string;
     /** Extra Dockerfile instructions appended at the end of the image build. */
     extension?: string;
+    /** Docker daemon socket path (docker+nono grants this in the sandbox profile). */
+    socket?: string;
   };
   git?: {
     user?: {
@@ -335,6 +343,8 @@ interface ConfigFile {
     allowPaths?: string[];
     /** Read-only fs grants (merged with workspace.readPaths). */
     readPaths?: string[];
+    /** Profile name used when sandboxing docker mode (default: wpi-docker). */
+    dockerProfile?: string;
   };
 }
 
@@ -396,6 +406,11 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
   const memory = projectConfig.docker?.memory ?? userConfig.docker?.memory;
   const memorySwap = projectConfig.docker?.memorySwap ?? userConfig.docker?.memorySwap;
 
+  // Docker socket path (docker.socket). Used by docker+nono to grant the daemon
+  // socket in the sandbox profile. Default is the conventional /var/run/docker.sock;
+  // $DOCKER_HOST is honoured if it points at a unix socket (unix:///path).
+  const dockerSocket = resolveDockerSocket(projectConfig.docker?.socket, userConfig.docker?.socket);
+
   // Pi version: project config > user config > baked-in constant
   const piVersion: string =
     projectConfig.pi?.version ??
@@ -428,12 +443,11 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
             path.join(containerDir, "wpi.yml")
           )
         : DEFAULT_SANDBOX_FOR[runtimeMode];
+  // All four combinations are implemented as of Phase 4; this guard is defensive.
   if (!isSandboxImplemented(runtimeMode, sandboxBackend)) {
     throw new Error(
       `Sandbox backend "${sandboxBackend}" is not implemented for runtime mode "${runtimeMode}" in this version of wpi. ` +
-        (runtimeMode === "docker" && sandboxBackend === "nono"
-          ? "docker + nono lands in Phase 4. For now use sandbox: none (the docker default) or runtime.mode: host."
-          : "Use a supported combination: docker+none, host+nono, or host+none.")
+        "Use a supported combination: docker+none, docker+nono, host+nono, or host+none."
     );
   }
 
@@ -458,7 +472,10 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
 
   // Workspace + nono fs grants (arrays merged project ++ user, deduped, order preserved).
   const workspace = resolveFsGrants(projectConfig.workspace, userConfig.workspace);
-  const nono = resolveFsGrants(projectConfig.nono, userConfig.nono);
+  // nono section: fs grants + the docker-mode profile name (project > user > default).
+  const nono = resolveFsGrants(projectConfig.nono, userConfig.nono, {
+    dockerProfile: projectConfig.nono?.dockerProfile ?? userConfig.nono?.dockerProfile ?? DEFAULT_NONO_DOCKER_PROFILE,
+  });
 
   return {
     runtimeMode,
@@ -473,6 +490,7 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     volumes,
     memory,
     memorySwap,
+    dockerSocket,
     dockerfileExtension,
     gitUserName,
     gitUserEmail,
@@ -823,15 +841,41 @@ function resolveNetwork(
 function resolveFsGrants(
   project: RawFsSection | undefined,
   user: RawFsSection | undefined,
+  extra?: Partial<NonoConfig>,
 ): NonoConfig {
   const allowPaths = dedupeStrings([...(project?.allowPaths ?? []), ...(user?.allowPaths ?? [])]);
   const readPaths = dedupeStrings([...(project?.readPaths ?? []), ...(user?.readPaths ?? [])]);
-  return { allowPaths, readPaths };
+  return {
+    allowPaths,
+    readPaths,
+    dockerProfile: extra?.dockerProfile ?? DEFAULT_NONO_DOCKER_PROFILE,
+  };
 }
 
 /** Empty/resolved defaults for network, workspace, nono (handy for tests). */
 export const EMPTY_NETWORK: NetworkConfig = { mode: "filtered", allowDomains: [], credentials: [], customCredentials: {} };
-export const EMPTY_NONO: NonoConfig = { allowPaths: [], readPaths: [] };
+
+/** Default nono profile name used when sandboxing docker mode (plan §Phase 4). */
+export const DEFAULT_NONO_DOCKER_PROFILE = "wpi-docker";
+
+export const EMPTY_NONO: NonoConfig = { allowPaths: [], readPaths: [], dockerProfile: DEFAULT_NONO_DOCKER_PROFILE };
+
+/** Default docker daemon socket path. */
+export const DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
+
+/**
+ * Resolve the docker daemon socket path: explicit config (project > user) >
+ * $DOCKER_HOST (unix:///path form) > conventional /var/run/docker.sock.
+ */
+function resolveDockerSocket(project?: string, user?: string): string {
+  const explicit = project ?? user;
+  if (explicit) return explicit;
+  const dockerHost = process.env.DOCKER_HOST;
+  if (dockerHost && dockerHost.startsWith("unix://")) {
+    return dockerHost.slice("unix://".length);
+  }
+  return DEFAULT_DOCKER_SOCKET;
+}
 
 function dedupeStrings(xs: string[]): string[] {
   const seen = new Set<string>();

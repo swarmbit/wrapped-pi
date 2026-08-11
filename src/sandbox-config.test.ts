@@ -1,14 +1,15 @@
 // ============================================================
-// Tests for sandbox.backend parsing & precedence (Phase 3)
+// Tests for sandbox.backend parsing & precedence (Phase 3/4)
 // ============================================================
 // Covers:
 //   - parseSandboxBackend accepts declared backends; rejects unknown/empty
-//   - DEFAULT_SANDBOX_FOR: docker→none (Phase 3), host→nono
-//   - isSandboxImplemented: docker+none yes, docker+nono no (Phase 4),
-//     host+nono yes, host+none yes
+//   - DEFAULT_SANDBOX_FOR: docker→nono (Phase 4), host→nono
+//   - isSandboxImplemented: all four combinations implemented as of Phase 4
 //   - loadConfig resolves sandboxBackend with precedence CLI > user > project
 //     > mode-default
-//   - docker+nono rejected in Phase 3 with an actionable error
+//   - docker+nono accepted (Phase 4)
+//   - nono.dockerProfile resolution (project > user > default wpi-docker)
+//   - docker.socket resolution (config > $DOCKER_HOST unix:// > default)
 //   - invalid values rejected from each source with source-labeled errors
 //   - CLI override never writes back
 // ============================================================
@@ -71,30 +72,27 @@ describe("parseSandboxBackend", () => {
   });
 });
 
-describe("DEFAULT_SANDBOX_FOR & isSandboxImplemented (Phase 3)", () => {
-  it("docker defaults to none in Phase 3 (docker+nono lands in Phase 4)", () => {
-    expect(DEFAULT_SANDBOX_FOR.docker).toBe("none");
+describe("DEFAULT_SANDBOX_FOR & isSandboxImplemented (Phase 4)", () => {
+  it("docker defaults to nono in Phase 4 (breaking, plan §0.1)", () => {
+    expect(DEFAULT_SANDBOX_FOR.docker).toBe("nono");
   });
 
-  it("host defaults to nono in Phase 3", () => {
+  it("host defaults to nono", () => {
     expect(DEFAULT_SANDBOX_FOR.host).toBe("nono");
   });
 
-  it("docker+none is implemented; docker+nono is NOT (Phase 4)", () => {
+  it("all four combinations are implemented as of Phase 4", () => {
     expect(isSandboxImplemented("docker", "none")).toBe(true);
-    expect(isSandboxImplemented("docker", "nono")).toBe(false);
-  });
-
-  it("host+nono and host+none are both implemented", () => {
+    expect(isSandboxImplemented("docker", "nono")).toBe(true);
     expect(isSandboxImplemented("host", "nono")).toBe(true);
     expect(isSandboxImplemented("host", "none")).toBe(true);
   });
 });
 
 describe("sandboxBackend resolution", () => {
-  it("defaults to none for docker with no config", () => {
+  it("defaults to nono for docker with no config (Phase 4)", () => {
     process.chdir(tmpDir);
-    expect(loadConfig({ homeDir }).sandboxBackend).toBe("none");
+    expect(loadConfig({ homeDir }).sandboxBackend).toBe("nono");
   });
 
   it("defaults to nono for host mode (via cliMode)", () => {
@@ -168,18 +166,26 @@ describe("invalid sandbox rejection", () => {
   });
 });
 
-describe("docker+nono Phase 3 guard", () => {
-  it("rejects docker+nono from config with an actionable Phase 4 message", () => {
+describe("docker+nono accepted (Phase 4)", () => {
+  it("accepts docker+nono from config", () => {
     writeProjectConfig("sandbox:\n  backend: nono\nruntime:\n  mode: docker");
     process.chdir(tmpDir);
-    expect(() => loadConfig({ homeDir })).toThrow(/docker \+ nono lands in Phase 4/);
+    const cfg = loadConfig({ homeDir });
+    expect(cfg.runtimeMode).toBe("docker");
+    expect(cfg.sandboxBackend).toBe("nono");
   });
 
-  it("rejects docker+nono from CLI --sandbox", () => {
+  it("accepts docker+nono from CLI --sandbox", () => {
     process.chdir(tmpDir);
-    expect(() => loadConfig({ homeDir, cliSandbox: "nono", cliMode: "docker" })).toThrow(
-      /not implemented for runtime mode "docker"/
-    );
+    const cfg = loadConfig({ homeDir, cliSandbox: "nono", cliMode: "docker" });
+    expect(cfg.sandboxBackend).toBe("nono");
+  });
+
+  it("allows docker+none (opt-out, no error)", () => {
+    process.chdir(tmpDir);
+    const cfg = loadConfig({ homeDir, cliSandbox: "none", cliMode: "docker" });
+    expect(cfg.runtimeMode).toBe("docker");
+    expect(cfg.sandboxBackend).toBe("none");
   });
 
   it("allows host+none (opt-out) without error", () => {
@@ -187,5 +193,69 @@ describe("docker+nono Phase 3 guard", () => {
     const cfg = loadConfig({ homeDir, cliSandbox: "none", cliMode: "host" });
     expect(cfg.runtimeMode).toBe("host");
     expect(cfg.sandboxBackend).toBe("none");
+  });
+});
+
+describe("nono.dockerProfile resolution (Phase 4)", () => {
+  it("defaults to wpi-docker", () => {
+    process.chdir(tmpDir);
+    expect(loadConfig({ homeDir }).nono.dockerProfile).toBe("wpi-docker");
+  });
+
+  it("reads nono.dockerProfile from project config", () => {
+    writeProjectConfig("nono:\n  dockerProfile: team-docker");
+    process.chdir(tmpDir);
+    expect(loadConfig({ homeDir }).nono.dockerProfile).toBe("team-docker");
+  });
+
+  it("project config wins over user config (docker.* convention)", () => {
+    writeProjectConfig("nono:\n  dockerProfile: project-docker");
+    writeUserConfig("nono:\n  dockerProfile: user-docker");
+    process.chdir(tmpDir);
+    expect(loadConfig({ homeDir }).nono.dockerProfile).toBe("project-docker");
+  });
+});
+
+describe("docker.socket resolution (Phase 4)", () => {
+  it("defaults to /var/run/docker.sock", () => {
+    process.chdir(tmpDir);
+    expect(loadConfig({ homeDir }).dockerSocket).toBe("/var/run/docker.sock");
+  });
+
+  it("reads docker.socket from project config", () => {
+    writeProjectConfig("docker:\n  socket: /tmp/colima.sock");
+    process.chdir(tmpDir);
+    expect(loadConfig({ homeDir }).dockerSocket).toBe("/tmp/colima.sock");
+  });
+
+  it("honours $DOCKER_HOST when it is a unix socket", () => {
+    process.chdir(tmpDir);
+    process.env.DOCKER_HOST = "unix:///var/run/other.sock";
+    try {
+      expect(loadConfig({ homeDir }).dockerSocket).toBe("/var/run/other.sock");
+    } finally {
+      delete process.env.DOCKER_HOST;
+    }
+  });
+
+  it("explicit config wins over $DOCKER_HOST", () => {
+    writeProjectConfig("docker:\n  socket: /custom.sock");
+    process.chdir(tmpDir);
+    process.env.DOCKER_HOST = "unix:///var/run/other.sock";
+    try {
+      expect(loadConfig({ homeDir }).dockerSocket).toBe("/custom.sock");
+    } finally {
+      delete process.env.DOCKER_HOST;
+    }
+  });
+
+  it("ignores non-unix $DOCKER_HOST (falls back to default)", () => {
+    process.chdir(tmpDir);
+    process.env.DOCKER_HOST = "tcp://127.0.0.1:2375";
+    try {
+      expect(loadConfig({ homeDir }).dockerSocket).toBe("/var/run/docker.sock");
+    } finally {
+      delete process.env.DOCKER_HOST;
+    }
   });
 });
