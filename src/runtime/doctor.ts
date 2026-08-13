@@ -155,23 +155,10 @@ export function buildConfigurationSection(config: ResolvedConfig): DoctorSection
     });
   }
 
-  // Host-only config sanity: network.* (nono credential routes / proxy) has no
-  // effect in docker mode — the container's networking is Docker's, and the
-  // wpi-docker profile leaves the client's network open (Phase 4 slice 1).
-  const hasNetwork = [
-    ...config.network.credentials,
-    ...Object.keys(config.network.customCredentials),
-    ...config.network.allowDomains,
-  ];
-  if (config.runtimeMode === "docker" && hasNetwork.length > 0) {
-    checks.push({
-      status: "warn",
-      label: "network.*",
-      detail:
-        "host+nono only (nono credential routes / proxy) — no effect in docker mode; " +
-        "use docker.env or in-container config for the container's own networking",
-    });
-  }
+  // network.* (nono credential routes / proxy) feeds the wpi nono profile,
+  // which now applies in BOTH modes: host+nono natively, and docker+nono
+  // inside the container (entrypoint wraps pi). No mode warning needed.
+  void config;
 
   return { name: "Configuration", checks };
 }

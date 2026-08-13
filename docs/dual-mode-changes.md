@@ -337,9 +337,14 @@ The write-triggered counterpart of doctor, per combination:
 | Combination | Steps |
 |---|---|
 | docker+none | docker cli → daemon → unsandboxed warn |
-| docker+nono | + nono binary → wpi-docker profile → grant validation → smoke (`nono run … -- docker --version`) |
-| host+none | platform → pi binary → unsandboxed warn |
-| host+nono | + nono binary → `nono pull nolabs-ai/pi` → wpi profile → package wiring → network surface → smoke (`nono run … -- pi --version`) |
+| docker+nono | + nono in container (info) → shared wpi profile |
+| host+none | platform → pi binary (prompts to install when interactive) → unsandboxed warn |
+| host+nono | + nono binary (prompts to install) → `nono pull nolabs-ai/pi` → wpi profile → package wiring → network surface → smoke (`nono run … -- pi --version`) |
+
+Missing host binaries are installed only on explicit confirmation: setup asks
+`[y/N]` on a TTY (pi pinned to the resolved `pi.version`; nono via its install
+script) and declines silently in non-interactive runs — the report then carries
+the exact command to run. Install failures become error steps.
 
 Smoke tests use `spawnSync` with a timeout; `firstLine()` strips nono's WARN/
 timestamp/ANSI noise to surface the real version string. Early-return on blocking

@@ -32,23 +32,21 @@
 //     memorySwap: 4g
 //     extension: |
 //       RUN apt-get install -y python3
-//     socket: /var/run/docker.sock
 //   git:
 //     user:
 //       name: John Doe
 //       email: john@example.com
-//   network:               # host+nono only
+//   network:               # feeds the wpi nono profile (host + in-container)
 //     mode: filtered       # filtered | open | blocked
 //     allowDomains: [api.anthropic.com]
 //     credentials: [anthropic]
 //     customCredentials: {}
-//   workspace:             # host+nono fs grants beyond the read-write workdir
+//   workspace:             # nono fs grants beyond the read-write workdir
 //     allowPaths: [~/src]
 //     readPaths: [/etc]
 //   nono:
 //     allowPaths: []
 //     readPaths: []
-//     dockerProfile: wpi-docker   # profile name when sandboxing docker mode
 // ============================================================
 
 import * as path from "path";
@@ -117,9 +115,9 @@ export type SandboxBackend = (typeof SANDBOX_BACKENDS)[number];
 //
 // Network maps to nono's `network` profile section (allow_domain, network_profile,
 // credentials, custom_credentials). Workspace maps to nono `filesystem` grants on
-// top of the read-write workdir. These only take effect in host+nono mode (Phase 3);
-// in docker mode they are parsed, validated, and ignored (Phase 4 plumbing will use
-// them for docker+nono).
+// top of the read-write workdir. Both feed the wpi nono profile — used in host
+// mode and, since Phase 4, inside the container (docker+nono wraps pi at the
+// entrypoint with the same profile).
 
 /** Preset credential services nono knows about (built-in credential routes). */
 export const PRESET_CREDENTIAL_SERVICES = [
@@ -188,11 +186,6 @@ export interface NonoConfig {
   allowPaths: string[];
   /** Read-only fs grants. Merged with workspace.readPaths. */
   readPaths: string[];
-  /**
-   * nono profile name used when sandboxing docker mode (nono.dockerProfile).
-   * Defaults to the wpi-authored `wpi-docker` profile (plan §Phase 4).
-   */
-  dockerProfile: string;
 }
 
 /**
@@ -252,7 +245,7 @@ export interface PiContainerConfig {
   runtimeMode: RuntimeMode;
   /** Sandbox backend (sandbox.backend). Defaults to nono on BOTH modes (none = opt-out). */
   sandboxBackend: SandboxBackend;
-  /** Resolved `network:` section (Phase 3 commit 2); host+nono only takes effect there. */
+  /** Resolved `network:` section (Phase 3 commit 2); feeds the wpi nono profile. */
   network: NetworkConfig;
   /** Resolved `workspace:` section — extra fs grants beyond read-write workdir. */
   workspace: WorkspaceConfig;
@@ -271,8 +264,6 @@ export interface PiContainerConfig {
   memorySwap?: string;
   /** Extra Dockerfile instructions appended during image build (docker.extension). */
   dockerfileExtension?: string;
-  /** Docker daemon socket path (docker.socket). Defaults to /var/run/docker.sock. */
-  dockerSocket: string;
   /** Git user name for commits inside the container (git.user.name). */
   gitUserName?: string;
   /** Git user email for commits inside the container (git.user.email). */
@@ -328,8 +319,6 @@ interface ConfigFile {
     memorySwap?: string;
     /** Extra Dockerfile instructions appended at the end of the image build. */
     extension?: string;
-    /** Docker daemon socket path (docker+nono grants this in the sandbox profile). */
-    socket?: string;
   };
   git?: {
     user?: {
@@ -358,8 +347,6 @@ interface ConfigFile {
     allowPaths?: string[];
     /** Read-only fs grants (merged with workspace.readPaths). */
     readPaths?: string[];
-    /** Profile name used when sandboxing docker mode (default: wpi-docker). */
-    dockerProfile?: string;
   };
 }
 
@@ -420,11 +407,6 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
   // Memory settings: project config overrides user config
   const memory = projectConfig.docker?.memory ?? userConfig.docker?.memory;
   const memorySwap = projectConfig.docker?.memorySwap ?? userConfig.docker?.memorySwap;
-
-  // Docker socket path (docker.socket). Used by docker+nono to grant the daemon
-  // socket in the sandbox profile. Default is the conventional /var/run/docker.sock;
-  // $DOCKER_HOST is honoured if it points at a unix socket (unix:///path).
-  const dockerSocket = resolveDockerSocket(projectConfig.docker?.socket, userConfig.docker?.socket);
 
   // Pi version: project config > user config > baked-in constant
   const piVersion: string =
@@ -487,10 +469,7 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
 
   // Workspace + nono fs grants (arrays merged project ++ user, deduped, order preserved).
   const workspace = resolveFsGrants(projectConfig.workspace, userConfig.workspace);
-  // nono section: fs grants + the docker-mode profile name (project > user > default).
-  const nono = resolveFsGrants(projectConfig.nono, userConfig.nono, {
-    dockerProfile: projectConfig.nono?.dockerProfile ?? userConfig.nono?.dockerProfile ?? DEFAULT_NONO_DOCKER_PROFILE,
-  });
+  const nono = resolveFsGrants(projectConfig.nono, userConfig.nono);
 
   return {
     runtimeMode,
@@ -505,7 +484,6 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     volumes,
     memory,
     memorySwap,
-    dockerSocket,
     dockerfileExtension,
     gitUserName,
     gitUserEmail,
@@ -854,41 +832,19 @@ function resolveNetwork(
 function resolveFsGrants(
   project: RawFsSection | undefined,
   user: RawFsSection | undefined,
-  extra?: Partial<NonoConfig>,
 ): NonoConfig {
   const allowPaths = dedupeStrings([...(project?.allowPaths ?? []), ...(user?.allowPaths ?? [])]);
   const readPaths = dedupeStrings([...(project?.readPaths ?? []), ...(user?.readPaths ?? [])]);
   return {
     allowPaths,
     readPaths,
-    dockerProfile: extra?.dockerProfile ?? DEFAULT_NONO_DOCKER_PROFILE,
   };
 }
 
 /** Empty/resolved defaults for network, workspace, nono (handy for tests). */
 export const EMPTY_NETWORK: NetworkConfig = { mode: "filtered", allowDomains: [], credentials: [], customCredentials: {} };
 
-/** Default nono profile name used when sandboxing docker mode (plan §Phase 4). */
-export const DEFAULT_NONO_DOCKER_PROFILE = "wpi-docker";
-
-export const EMPTY_NONO: NonoConfig = { allowPaths: [], readPaths: [], dockerProfile: DEFAULT_NONO_DOCKER_PROFILE };
-
-/** Default docker daemon socket path. */
-export const DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
-
-/**
- * Resolve the docker daemon socket path: explicit config (project > user) >
- * $DOCKER_HOST (unix:///path form) > conventional /var/run/docker.sock.
- */
-function resolveDockerSocket(project?: string, user?: string): string {
-  const explicit = project ?? user;
-  if (explicit) return explicit;
-  const dockerHost = process.env.DOCKER_HOST;
-  if (dockerHost && dockerHost.startsWith("unix://")) {
-    return dockerHost.slice("unix://".length);
-  }
-  return DEFAULT_DOCKER_SOCKET;
-}
+export const EMPTY_NONO: NonoConfig = { allowPaths: [], readPaths: [] };
 
 function dedupeStrings(xs: string[]): string[] {
   const seen = new Set<string>();

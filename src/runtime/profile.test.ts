@@ -77,7 +77,7 @@ describe("buildWpiProfile — filesystem grants", () => {
     const p = buildWpiProfile(
       input({
         workspace: { allowPaths: ["~/src", "~/.config"], readPaths: [] },
-        nono: { allowPaths: ["~/.config", "/tmp/x"], readPaths: [], dockerProfile: "wpi-docker" },
+        nono: { allowPaths: ["~/.config", "/tmp/x"], readPaths: [] },
       })
     );
     expect(p.filesystem.allow).toContain("/tmp/x");
@@ -92,7 +92,7 @@ describe("buildWpiProfile — filesystem grants", () => {
     const p = buildWpiProfile(
       input({
         workspace: { allowPaths: ["${WORKDIR}/sub", "~/.ssh"], readPaths: ["$HOME/secrets"] },
-        nono: { allowPaths: [], readPaths: [], dockerProfile: "wpi-docker" },
+        nono: { allowPaths: [], readPaths: [] },
       })
     );
     const all = [...(p.filesystem.allow ?? []), ...(p.filesystem.read ?? [])] as string[];

@@ -51,6 +51,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Install nono (in-container sandbox): the entrypoint wraps pi with
+# `nono run --profile wpi` when PI_SANDBOX=nono. The profile and packs
+# come from the mounted host ~/.config/nono (shared with host mode).
+RUN curl -fsSL https://nono.sh/install.sh | sh
+
 # Create non-root user
 RUN useradd -m -s /bin/bash pi-user
 

@@ -88,5 +88,15 @@ if [ -n "${GIT_USER_EMAIL}" ]; then
   gosu "${USERNAME}" git config --global user.email "${GIT_USER_EMAIL}"
 fi
 
-# ── Drop privileges and run command as host user ────────
+# ── Launch ──────────────────────────────────────────────────
+# docker+nono: wrap pi in nono INSIDE the container (the docker client on the
+# host is never sandboxed). The wpi profile and packs live in the mounted host
+# ~/.config/nono (shared with host mode); `nono pull` is idempotent and a no-op
+# once the pack is cached there. Only pi runs are wrapped — interactive shells
+# keep the container boundary as their sandbox.
+if [ "${PI_SANDBOX:-none}" = "nono" ] && [ "${1:-}" = "pi" ]; then
+  gosu "${USERNAME}" nono pull nolabs-ai/pi
+  exec gosu "${USERNAME}" nono run --profile wpi --allow-cwd -- "$@"
+fi
+
 exec gosu "${USERNAME}" "$@"

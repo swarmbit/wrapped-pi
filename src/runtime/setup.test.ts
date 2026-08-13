@@ -3,8 +3,8 @@
 // ============================================================
 // Covers:
 //   - report types, exit codes, rendering
-//   - DockerBackend.setup: docker+none, docker+nono (profile provision,
-//     grant validation, smoke test), missing docker/nono
+//   - DockerBackend.setup: docker+none, docker+nono (shared wpi profile;
+//     nono is in-container — no host binary/pack/grants)
 //   - HostBackend.setup: host+none, host+nono (platform, pi, nono, pack,
 //     profile, package wiring, network, smoke test), missing pi,
 //     network-blocked warning, pack pull when missing
@@ -17,7 +17,7 @@ import * as os from "os";
 import { DockerBackend } from "./docker-backend";
 import { HostBackend } from "./host-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, DEFAULT_DOCKER_SOCKET, DEFAULT_NONO_DOCKER_PROFILE } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK } from "../config";
 import {
   computeSetupExitCode,
   buildSetupReport,
@@ -48,8 +48,7 @@ function baseConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     sandboxBackend: "nono",
     network: EMPTY_NETWORK,
     workspace: { allowPaths: [], readPaths: [] },
-    nono: { allowPaths: [], readPaths: [], dockerProfile: DEFAULT_NONO_DOCKER_PROFILE },
-    dockerSocket: DEFAULT_DOCKER_SOCKET,
+    nono: { allowPaths: [], readPaths: [] },
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -139,39 +138,35 @@ describe("DockerBackend.setup", () => {
     expect(report.steps.find((s) => s.label === "docker daemon")?.detail).toMatch(/docker cli missing/);
   });
 
-  it("docker+nono: provisions profile, validates grants, smoke test passes (exit 0)", async () => {
+  it("docker+nono: notes in-container nono, ensures shared wpi profile (exit 0)", async () => {
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "docker --version") return "Docker version 29.7.2, build abc";
-      if (cmd === "nono --version") return "nono 0.73.0";
       throw new Error("unexpected execSync: " + cmd);
     });
     mockedSpawnSync.mockImplementation((bin, args) => {
       if (bin === "docker" && args?.[0] === "info") return spawnResult(0, "29.7.2");
-      if (bin === "nono") return spawnResult(0, "Docker version 29.7.2"); // smoke test
       return spawnResult(1);
     });
 
     const report = await backend.setup(baseConfig());
     expect(report.exitCode).toBe(0);
     const labels = report.steps.map((s) => s.label);
-    expect(labels).toEqual(["docker cli", "docker daemon", "nono binary", "wpi-docker profile", "profile grants", "smoke test"]);
-    // The profile was actually written (setup is not read-only).
-    expect(fs.existsSync(path.join(tmpHome, ".config", "nono", "profiles", "wpi-docker.json"))).toBe(true);
-    expect(report.steps.find((s) => s.label === "profile grants")?.detail).toContain("all granted");
-    expect(report.steps.find((s) => s.label === "smoke test")?.detail).toContain("Docker version");
+    expect(labels).toEqual(["docker cli", "docker daemon", "nono in container", "wpi profile"]);
+    // The shared wpi profile was actually written (setup is not read-only).
+    expect(fs.existsSync(path.join(tmpHome, ".config", "nono", "profiles", "wpi.json"))).toBe(true);
+    expect(report.steps.find((s) => s.label === "nono in container")?.detail).toContain("pack pulled on first run");
   });
 
-  it("docker+nono: missing nono is an error with install hint (exit 2)", async () => {
+  it("docker+nono: no host nono requirement — setup never probes a nono binary", async () => {
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "docker --version") return "Docker version 29.7.2";
-      throw new Error("not installed"); // nono --version throws
+      throw new Error("unexpected execSync: " + cmd);
     });
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2") as never);
 
     const report = await backend.setup(baseConfig());
-    expect(report.exitCode).toBe(2);
-    expect(report.steps.find((s) => s.label === "nono binary")?.detail).toMatch(/nono\.sh\/install\.sh/);
-    expect(report.steps.find((s) => s.label === "smoke test")).toBeUndefined();
+    expect(report.exitCode).toBe(0);
+    expect(report.steps.some((s) => s.label === "nono binary")).toBe(false);
   });
 });
 
@@ -292,5 +287,78 @@ describe("HostBackend.setup", () => {
     const report = await backend.setup(hostConfig());
     expect(report.exitCode).toBe(2);
     expect(report.steps.find((s) => s.label === "nono pack")?.status).toBe("error");
+  });
+
+  it("host+nono: installs pi and nono on confirmation (prompt injected)", async () => {
+    const installed = new Set<string>();
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.startsWith("npm install -g @earendil-works/pi-coding-agent@")) {
+        installed.add("pi");
+        return "added 1 package";
+      }
+      if (cmd === "curl -fsSL https://nono.sh/install.sh | sh") {
+        installed.add("nono");
+        return "nono installed";
+      }
+      if (cmd === "pi --version") {
+        if (!installed.has("pi")) throw new Error("not found");
+        return "pi 0.83.0";
+      }
+      if (cmd === "nono --version") {
+        if (!installed.has("nono")) throw new Error("not found");
+        return "nono 0.73.0";
+      }
+      if (cmd === "nono list --installed") return "nolabs-ai/pi\t0.2.0\n";
+      throw new Error("unexpected execSync: " + cmd);
+    });
+    mockedSpawnSync.mockImplementation((bin, args) => {
+      if (bin === "nono" && args?.[0] === "run") return spawnResult(0, "pi 0.83.0"); // smoke test
+      return spawnResult(1);
+    });
+
+    const prompts: string[] = [];
+    const report = await backend.setup(
+      hostConfig({ network: { ...EMPTY_NETWORK, allowDomains: ["api.anthropic.com"] } }),
+      {
+        prompt: (q) => {
+          prompts.push(q);
+          return true;
+        },
+      }
+    );
+
+    expect(report.exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("pi is not installed");
+    expect(prompts[1]).toContain("nono is not installed");
+    expect(report.steps.find((s) => s.label === "pi binary")?.detail).toContain("installed via npm");
+    expect(report.steps.find((s) => s.label === "nono binary")?.detail).toContain("installed via nono.sh");
+    // pi is pinned to the resolved pi version.
+    const npmCall = mockedExecSync.mock.calls.find((c) => String(c[0]).startsWith("npm install"));
+    expect(String(npmCall?.[0])).toContain("@earendil-works/pi-coding-agent@" + PI_VERSION);
+  });
+
+  it("host+none: declines to install pi when the prompt answers no (exit 2)", async () => {
+    mockedExecSync.mockImplementation(() => {
+      throw new Error("not found");
+    });
+    const report = await backend.setup(hostConfig({ sandboxBackend: "none" }), { prompt: () => false });
+    expect(report.exitCode).toBe(2);
+    expect(mockedExecSync).not.toHaveBeenCalledWith(
+      expect.stringContaining("npm install"),
+      expect.anything()
+    );
+    expect(report.steps.find((s) => s.label === "pi binary")?.status).toBe("error");
+  });
+
+  it("host+nono: install failure is reported as an error step (exit 2)", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd.startsWith("npm install")) throw new Error("EACCES");
+      if (cmd === "pi --version") throw new Error("not found");
+      throw new Error("unexpected: " + cmd);
+    });
+    const report = await backend.setup(hostConfig(), { prompt: () => true });
+    expect(report.exitCode).toBe(2);
+    expect(report.steps.find((s) => s.label === "pi binary")?.detail).toMatch(/install failed/);
   });
 });

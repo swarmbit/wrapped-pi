@@ -36,6 +36,11 @@ describe("generateDockerfile", () => {
     expect(df).toContain("docker-ce-cli");
   });
 
+  it("installs nono in the image (in-container sandbox)", () => {
+    const df = generateDockerfile();
+    expect(df).toContain("RUN curl -fsSL https://nono.sh/install.sh | sh");
+  });
+
   it("creates pi-user", () => {
     const df = generateDockerfile();
     expect(df).toContain("useradd -m -s /bin/bash pi-user");
@@ -157,6 +162,14 @@ describe("generateEntrypoint", () => {
   it("drops privileges with gosu", () => {
     const sh = generateEntrypoint();
     expect(sh).toContain('exec gosu "${USERNAME}" "$@"');
+  });
+
+  it("wraps pi in nono inside the container when PI_SANDBOX=nono", () => {
+    const sh = generateEntrypoint();
+    expect(sh).toContain('gosu "${USERNAME}" nono pull nolabs-ai/pi');
+    expect(sh).toContain('exec gosu "${USERNAME}" nono run --profile wpi --allow-cwd -- "$@"');
+    // Only pi runs are wrapped; other commands fall through to the bare exec.
+    expect(sh).toContain('if [ "${PI_SANDBOX:-none}" = "nono" ] && [ "${1:-}" = "pi" ]; then');
   });
 
   it("does not contain TEAM_PACKAGES (removed)", () => {

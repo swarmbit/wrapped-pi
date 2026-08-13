@@ -37,6 +37,7 @@ Commands:
   dry-run       Print resolved config and commands without executing
   doctor        Check runtime/sandbox/docker/config health (exit 0 healthy, 1 warn, 2 error)
   setup         Provision and verify the current runtime/sandbox combination
+                (interactive: prompts to install missing pi/nono on host mode)
                 (exit 0 ready, 1 warn, 2 error)
 
 Options:
@@ -67,7 +68,7 @@ Examples:
   wpi shell my-container           # exec into an existing container
   wpi doctor                       # health check (runtime/docker/config)
   wpi setup                        # provision + verify (docker+nono default)
-  wpi setup --mode host            # host+nono: profile, pack, package, smoke test
+  wpi setup --mode host            # host+nono: installs pi/nono on prompt, profile, pack, package, smoke test
 
 Port config precedence (highest wins):
   1. CLI flags (-p, --port)
@@ -82,7 +83,6 @@ Config file schema:
   pi:
     version: 0.76.0     # override the pi version used (default: baked-in)
   docker:
-    socket: /var/run/docker.sock  # daemon socket (docker+nono grants this in the sandbox profile)
     ports:
       - 3000        # dev server
       - 6006        # storybook

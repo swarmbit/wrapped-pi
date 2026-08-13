@@ -1,8 +1,8 @@
 // ============================================================
 // wpi — canonical JSON serialisation for nono profiles
 // ============================================================
-// Both authored profiles (wpi host profile, wpi-docker docker profile) are
-// serialised deterministically — sorted keys, 2-space indent, trailing
+// The wpi profile (shared by host mode and docker mode's in-container nono)
+// is serialised deterministically — sorted keys, 2-space indent, trailing
 // newline — so byte-for-byte comparison works for drift detection.
 // ============================================================
 

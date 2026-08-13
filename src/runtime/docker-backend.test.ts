@@ -1,14 +1,14 @@
 // ============================================================
-// Tests for DockerBackend sandbox wrapping — Phase 4
+// Tests for DockerBackend — in-container nono (Phase 4 v2)
 // ============================================================
 // Covers:
-//   - docker+nono: every docker invocation goes through nono
-//     (`nono run --profile wpi-docker --allow-cwd --rollback -- docker ...`)
-//   - nonoPrefix honours nono.dockerProfile
-//   - dry-run renders the wrapped command for nono, plain for none
-//   - enableSandboxOrWarn fails fast when a drifted on-disk profile
-//     misses a declared mount/socket grant (plan: "mount the profile
-//     doesn't grant is a setup/doctor error, not a runtime failure")
+//   - docker+nono: the docker client is NEVER wrapped; wpi ensures the
+//     shared wpi nono profile on the host (mounted into the container)
+//     and the entrypoint wraps pi inside the container.
+//   - sandbox: none prints the unsandboxed opt-out notice, no profile.
+//   - profile drift is warned (never overwritten).
+//   - dry-run renders plain docker commands with a sandbox note.
+//   - setup/doctor report the in-container sandbox state.
 // ============================================================
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -17,7 +17,7 @@ import * as path from "path";
 import * as os from "os";
 import { DockerBackend } from "./docker-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, DEFAULT_DOCKER_SOCKET } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK } from "../config";
 
 // Keep the real docker.ts (imageExists/spawn wiring) but stub the heavy
 // dispatch entry points so build/run never touch a real docker daemon.
@@ -38,19 +38,12 @@ vi.mock("child_process", () => ({
 }));
 
 import { execSync, spawnSync } from "child_process";
-import {
-  buildImage,
-  imageExists,
-  setDockerSandboxPrefix,
-  shellInContainer,
-} from "../docker";
-import { wpiDockerProfilePath, WPI_DOCKER_PROFILE_NAME } from "./docker-profile";
+import { buildImage, imageExists } from "../docker";
+import { wpiProfilePath } from "./profile";
 
 const mockedExecSync = vi.mocked(execSync);
 const mockedSpawnSync = vi.mocked(spawnSync);
 const mockedBuildImage = vi.mocked(buildImage);
-
-const NONO_PREFIX = ["run", "--profile", WPI_DOCKER_PROFILE_NAME, "--allow-cwd", "--rollback"];
 
 function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
@@ -58,8 +51,7 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     sandboxBackend: "nono",
     network: EMPTY_NETWORK,
     workspace: { allowPaths: [], readPaths: [] },
-    nono: { allowPaths: [], readPaths: [], dockerProfile: WPI_DOCKER_PROFILE_NAME },
-    dockerSocket: DEFAULT_DOCKER_SOCKET,
+    nono: { allowPaths: [], readPaths: [] },
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -79,12 +71,11 @@ let backend: DockerBackend;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  setDockerSandboxPrefix([]); // module state must not leak between tests
   backend = new DockerBackend();
   tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-docker-backend-")));
   vi.stubEnv("HOME", tmpHome);
-  // docker + nono --version probes succeed by default; spawnSync returns a
-  // successful (status 0) result so imageExists treats images as present.
+  // docker probes succeed by default; spawnSync returns a successful (status 0)
+  // result so imageExists treats images as present.
   mockedExecSync.mockReturnValue("ok" as never);
   mockedSpawnSync.mockReturnValue({
     status: 0,
@@ -98,166 +89,150 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setDockerSandboxPrefix([]);
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.unstubAllEnvs();
 });
 
-describe("DockerBackend sandbox wrapping", () => {
-  it("build() arms the nono prefix so docker calls run under nono", () => {
+describe("DockerBackend — in-container nono", () => {
+  it("build() ensures the shared wpi profile and never wraps the docker client", () => {
     backend.build(makeConfig());
     expect(mockedBuildImage).toHaveBeenCalledTimes(1);
-    // The real imageExists path in docker.ts must now spawn via nono.
+    // The wpi profile was written for the mounted ~/.config/nono.
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(true);
+    // docker calls in docker.ts run plain (no nono prefix).
     imageExists("pi-agent:test");
     expect(mockedSpawnSync).toHaveBeenCalledWith(
-      "nono",
-      [...NONO_PREFIX, "--", "docker", "image", "inspect", "pi-agent:test"],
+      "docker",
+      ["image", "inspect", "pi-agent:test"],
       expect.anything()
     );
   });
 
-  it("uses nono.dockerProfile for the sandbox profile name", () => {
-    backend.build(makeConfig({ nono: { allowPaths: [], readPaths: [], dockerProfile: "team-docker" } }));
-    imageExists("pi-agent:test");
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
-      "nono",
-      ["run", "--profile", "team-docker", "--allow-cwd", "--rollback", "--", "docker", "image", "inspect", "pi-agent:test"],
-      expect.anything()
-    );
-    // The authored profile lives at team-docker.json.
-    expect(fs.existsSync(wpiDockerProfilePath(tmpHome, "team-docker"))).toBe(true);
+  it("is idempotent: an in-sync profile is kept as-is", () => {
+    backend.build(makeConfig());
+    const p = wpiProfilePath(tmpHome);
+    const before = fs.readFileSync(p, "utf-8");
+    backend.build(makeConfig());
+    expect(fs.readFileSync(p, "utf-8")).toBe(before);
   });
 
-  it("does NOT arm the prefix for sandbox: none (bare docker)", () => {
-    backend.build(makeConfig({ sandboxBackend: "none" }));
-    expect(mockedBuildImage).toHaveBeenCalledTimes(1);
-    imageExists("pi-agent:test");
-    expect(mockedSpawnSync).toHaveBeenCalledWith("docker", ["image", "inspect", "pi-agent:test"], expect.anything());
+  it("warns on profile drift without overwriting (shared with host mode)", () => {
+    backend.build(makeConfig());
+    const p = wpiProfilePath(tmpHome);
+    const onDisk = JSON.parse(fs.readFileSync(p, "utf-8"));
+    onDisk.meta.version = "0.0.0";
+    fs.writeFileSync(p, JSON.stringify(onDisk));
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    backend.build(makeConfig());
+    const errOutput = errSpy.mock.calls.flat().join(" ");
+    errSpy.mockRestore();
+
+    expect(errOutput).toContain("profile drift");
+    expect(JSON.parse(fs.readFileSync(p, "utf-8")).meta.version).toBe("0.0.0"); // never overwritten
+    expect(mockedBuildImage).toHaveBeenCalledTimes(2); // still builds
   });
 
-  it("prints the UNSANDBOXED opt-out notice for sandbox: none (parity with host mode)", () => {
+  it("sandbox: none prints the UNSANDBOXED opt-out notice and writes no profile", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     backend.build(makeConfig({ sandboxBackend: "none" }));
     const errOutput = errSpy.mock.calls.flat().join(" ");
     errSpy.mockRestore();
+
     expect(errOutput).toContain("UNSANDBOXED");
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(false);
   });
 
-  it("shell() arms the nono prefix (wrapped docker run for a new shell)", async () => {
-    const shellSpy = vi.mocked(shellInContainer);
+  it("run() and shell() also ensure the profile", async () => {
+    await backend.run(makeConfig(), []);
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(true);
+    fs.rmSync(wpiProfilePath(tmpHome));
     await backend.shell(makeConfig());
-    expect(shellSpy).toHaveBeenCalledTimes(1);
-    // The real shellInContainer path spawns via nono when the prefix is armed.
-    shellSpy.mockClear();
-    imageExists("pi-agent:test");
-    expect(mockedSpawnSync).toHaveBeenCalledWith(
-      "nono",
-      [...NONO_PREFIX, "--", "docker", "image", "inspect", "pi-agent:test"],
-      expect.anything()
-    );
-  });
-
-  it("shell() stays direct (bare docker) for sandbox: none", async () => {
-    await backend.shell(makeConfig({ sandboxBackend: "none" }));
-    imageExists("pi-agent:test");
-    expect(mockedSpawnSync).toHaveBeenCalledWith("docker", ["image", "inspect", "pi-agent:test"], expect.anything());
-  });
-
-  it("writes the wpi-docker profile on first sandboxed dispatch", () => {
-    backend.build(makeConfig());
-    const p = wpiDockerProfilePath(tmpHome);
-    expect(fs.existsSync(p)).toBe(true);
-    const onDisk = JSON.parse(fs.readFileSync(p, "utf-8"));
-    expect(onDisk.meta.name).toBe(WPI_DOCKER_PROFILE_NAME);
-    expect(onDisk.filesystem.unix_socket).toContain(DEFAULT_DOCKER_SOCKET);
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(true);
   });
 });
 
-describe("DockerBackend dry-run rendering (Phase 4)", () => {
-  it("renders the nono-wrapped docker run + build commands", () => {
+describe("DockerBackend dry-run rendering", () => {
+  it("renders plain docker commands with the in-container nono note", () => {
     const out: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => out.push(args.join(" ")));
     backend.dryRun(makeConfig(), []);
     spy.mockRestore();
 
     const text = out.join("\n");
-    expect(text).toContain(`nono ${NONO_PREFIX.join(" ")} -- docker run`);
-    expect(text).toContain("profile: wpi-docker (extends default; scopes docker client)");
-    expect(text).toContain(`socket:  ${DEFAULT_DOCKER_SOCKET}`);
-    expect(text).toContain(`nono ${NONO_PREFIX.join(" ")} -- docker build`);
+    expect(text).toContain("docker run");
+    expect(text).toContain("docker build");
+    expect(text).not.toContain("nono run --profile wpi-docker");
+    expect(text).toContain("nono wraps pi inside the container");
+    expect(text).toContain("PI_SANDBOX=nono");
   });
 
-  it("renders bare docker commands for sandbox: none", () => {
+  it("renders the unsandboxed note for sandbox: none", () => {
     const out: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => out.push(args.join(" ")));
     backend.dryRun(makeConfig({ sandboxBackend: "none" }), []);
     spy.mockRestore();
 
     const text = out.join("\n");
-    expect(text).toContain("Docker run command:");
     expect(text).toContain("docker run");
-    expect(text).not.toContain("nono");
+    expect(text).toContain("sandbox: none (unsandboxed)");
+    expect(text).toContain("PI_SANDBOX=none");
   });
 });
 
-describe("DockerBackend mount-grant fail-fast", () => {
-  it("exits 1 when a drifted on-disk profile misses a declared mount grant", () => {
-    // A stale on-disk profile that grants the socket but no mounts.
-    const profilePath = wpiDockerProfilePath(tmpHome);
-    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
-    fs.writeFileSync(
-      profilePath,
-      JSON.stringify({
-        meta: { name: WPI_DOCKER_PROFILE_NAME, version: "0.0.0" },
-        extends: "default",
-        filesystem: { unix_socket: [DEFAULT_DOCKER_SOCKET] },
-      })
-    );
+describe("DockerBackend.setup (in-container nono)", () => {
+  it("docker+nono: verifies cli+daemon, notes in-container nono, ensures profile (exit 0)", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "docker --version") return "Docker version 29.7.2";
+      throw new Error("unexpected: " + cmd);
+    });
+    mockedSpawnSync.mockReturnValue({ status: 0, stdout: "29.7.2", stderr: "", pid: 0, output: [], signal: null } as never);
 
-    const config = makeConfig({ mounts: [{ host: "/host/data", container: "/container/data", mode: "rw" }] });
-
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code: number) => {
-      throw new Error(`process.exit(${code})`);
-    }) as never);
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let threw = "";
-    let errOutput = "";
-    try {
-      backend.build(config);
-    } catch (e) {
-      threw = (e as Error).message;
-    }
-    errOutput = errSpy.mock.calls.flat().join(" ");
-    exitSpy.mockRestore();
-    errSpy.mockRestore();
-
-    expect(threw).toBe("process.exit(1)");
-    expect(mockedBuildImage).not.toHaveBeenCalled();
-    expect(errOutput).toContain("/host/data");
-    expect(errOutput.toLowerCase()).toContain("delete the profile to regenerate");
+    const report = await backend.setup(makeConfig());
+    expect(report.exitCode).toBe(0);
+    expect(report.steps.map((s) => s.label)).toEqual(["docker cli", "docker daemon", "nono in container", "wpi profile"]);
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(true);
   });
 
-  it("does NOT fail when a drifted profile still grants everything declared", () => {
-    const profilePath = wpiDockerProfilePath(tmpHome);
-    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
-    // Drifted content (different meta) but the mount grant is present.
-    fs.writeFileSync(
-      profilePath,
-      JSON.stringify({
-        meta: { name: WPI_DOCKER_PROFILE_NAME, version: "0.0.0" },
-        extends: "default",
-        filesystem: { unix_socket: [DEFAULT_DOCKER_SOCKET], allow: ["/host/data"] },
-      })
-    );
+  it("docker+none: warns unsandboxed, no profile (exit 1)", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (cmd === "docker --version") return "Docker version 29.7.2";
+      throw new Error("unexpected: " + cmd);
+    });
+    mockedSpawnSync.mockReturnValue({ status: 0, stdout: "29.7.2", stderr: "", pid: 0, output: [], signal: null } as never);
 
-    const config = makeConfig({ mounts: [{ host: "/host/data", container: "/container/data", mode: "rw" }] });
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    backend.build(config);
-    exitSpy.mockRestore();
-    errSpy.mockRestore();
+    const report = await backend.setup(makeConfig({ sandboxBackend: "none" }));
+    expect(report.exitCode).toBe(1);
+    expect(report.steps.map((s) => s.label)).toEqual(["docker cli", "docker daemon", "unsandboxed"]);
+    expect(fs.existsSync(wpiProfilePath(tmpHome))).toBe(false);
+  });
+});
 
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(mockedBuildImage).toHaveBeenCalledTimes(1);
+describe("DockerBackend.doctor sandbox section", () => {
+  it("docker+nono: reports in-container nono + profile drift state (exit 0 when in sync)", async () => {
+    backend.build(makeConfig()); // write the canonical profile
+    const report = await backend.doctor(makeConfig());
+    const sandbox = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandbox.checks.find((c) => c.label === "backend")?.detail).toBe("nono (in-container)");
+    expect(sandbox.checks.find((c) => c.label === "profile drift")?.status).toBe("ok");
+    expect(report.exitCode).toBe(0);
+  });
+
+  it("warns on drifted profile", async () => {
+    backend.build(makeConfig());
+    const p = wpiProfilePath(tmpHome);
+    const onDisk = JSON.parse(fs.readFileSync(p, "utf-8"));
+    onDisk.meta.version = "0.0.0";
+    fs.writeFileSync(p, JSON.stringify(onDisk));
+
+    const report = await backend.doctor(makeConfig());
+    const sandbox = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandbox.checks.find((c) => c.label === "profile drift")?.status).toBe("warn");
+  });
+
+  it("reports info when the profile is not yet written", async () => {
+    const report = await backend.doctor(makeConfig());
+    const sandbox = report.sections.find((s) => s.name === "Sandbox")!;
+    expect(sandbox.checks.find((c) => c.label === "profile drift")?.status).toBe("info");
   });
 });

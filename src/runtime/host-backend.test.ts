@@ -19,7 +19,7 @@ import * as path from "path";
 import * as os from "os";
 import { HostBackend } from "./host-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO, DEFAULT_DOCKER_SOCKET } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "../config";
 
 // Mock child_process so commandAvailable / version probes are deterministic and
 // never hang on a real pi/nono binary in the test environment.
@@ -38,7 +38,6 @@ function makeHostConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig
     network: EMPTY_NETWORK,
     workspace: EMPTY_NONO,
     nono: EMPTY_NONO,
-    dockerSocket: DEFAULT_DOCKER_SOCKET,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],

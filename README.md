@@ -12,7 +12,7 @@ Run [Pi Coding Agent](https://pi.dev/) with team-standard extensions and setting
 
 | Mode | Sandbox | What runs | When to use |
 |---|---|---|---|
-| `docker` | `nono` | `nono run --profile wpi-docker -- docker run pi` | **Default** — Docker reproducibility **plus** kernel-enforced fs/socket limits on the container's host-side access |
+| `docker` | `nono` | `docker run` → entrypoint runs `nono run --profile wpi -- pi` inside the container | **Default** — Docker reproducibility **plus** kernel sandbox around pi in-container |
 | `docker` | `none` | `docker run pi` (classic wpi) | Explicit opt-out — `doctor` warns |
 | `host` | `nono` | `nono run --profile wpi -- pi` | The lightweight native path: no image, Landlock/Seatbelt isolation, credential injection, audit, rollback |
 | `host` | `none` | `pi` directly | Debugging / environments where nono can't run — `doctor` warns loudly |
@@ -51,6 +51,10 @@ Run [Pi Coding Agent](https://pi.dev/) with team-standard extensions and setting
 npm install -g wpi
 wpi setup          # verify + provision the default (docker+nono) combination
 ```
+
+In host mode, `wpi setup` asks to install missing dependencies (pi pinned to
+wpi's baked version, nono) when run in a terminal; non-interactive runs report
+the exact commands instead.
 
 ### From source
 
@@ -95,6 +99,7 @@ wpi -p 8080:3000        # host 8080 → container 3000
 # Management:
 wpi build              # docker: build/rebuild the image · host: no-op, provisions profile + package
 wpi setup              # verify + provision the current mode/sandbox combination (exit 0/1/2)
+                       #   host mode prompts to install missing pi/nono when interactive
 wpi doctor             # health check (runtime/sandbox/docker/pi/config) (exit 0/1/2)
 wpi shell              # docker: shell in a new container · host: sandboxed native shell
 wpi shell <id>         # docker only: exec into an existing container
@@ -106,7 +111,7 @@ wpi dry-run            # print resolved config and the exact commands (debugging
 | Combination | Command |
 |---|---|
 | docker + none | `docker run … /bin/bash` (classic) |
-| docker + nono | `nono run --profile wpi-docker … -- docker run … /bin/bash` |
+| docker + nono | `docker run … /bin/bash` — the container is the boundary; only `pi` runs are wrapped in nono in-container |
 | host + nono | `nono shell --profile wpi --allow-cwd --rollback` |
 | host + none | `$SHELL` natively + `⚠ UNSANDBOXED` notice |
 
@@ -194,9 +199,6 @@ pi:
   version: 0.79.1     # docker mode: pin the image's pi (default: baked-in)
 
 # ── Docker settings (docker mode) ──────────────────────────
-docker:
-  socket: /var/run/docker.sock  # daemon socket — granted in the wpi-docker profile
-                                # ($DOCKER_HOST unix:// form is honoured)
 
   # Expose container ports on localhost (simple, host:container, or range).
   ports:
@@ -256,7 +258,6 @@ workspace:
 nono:
   allowPaths: [/tmp/build]
   readPaths: [~/.config]
-  dockerProfile: wpi-docker  # profile name used when sandboxing docker mode
 ```
 
 > **Important (docker mode):** after changing `docker.extension` or updating
@@ -269,21 +270,19 @@ nono:
 | `runtime.mode` | `docker` | both | `docker` (container) or `host` (native process) |
 | `sandbox.backend` | `nono` | both | `nono` (default) or `none` (explicit opt-out; doctor warns) |
 | `pi.version` | *(baked-in)* | docker | Pin the image's pi version (host mode uses the installed `pi`) |
-| `docker.socket` | `/var/run/docker.sock` | docker+nono | Daemon socket granted in the wpi-docker profile |
 | `docker.ports` | `[]` | docker | Container ports exposed on `127.0.0.1` (host mode: simple ports → `--listen-port` grants) |
-| `docker.mounts` | `[]` | docker | Host→container mounts; host side also granted in the wpi-docker profile |
+| `docker.mounts` | `[]` | docker | Host→container mounts |
 | `docker.volumes` | `[]` | docker | Named volumes (daemon-side; no host grant needed) |
 | `docker.memory` / `memorySwap` | — | docker | `docker run --memory / --memory-swap` |
 | `docker.env` | `{}` | docker | Container env vars (host mode: not injected — see matrix) |
 | `docker.extension` | — | docker | Extra Dockerfile instructions (host mode: warned + ignored) |
 | `git.user.name` / `email` | *(host git config)* | docker | Git identity inside the container |
-| `network.mode` | `filtered` | host+nono | Proxy mode: filtered / open / blocked |
-| `network.allowDomains` | `[]` | host+nono | Domains allowed through the proxy |
-| `network.credentials` | `[]` | host+nono | Preset services (openai, anthropic, gemini, google-ai, github, gitlab) |
-| `network.customCredentials` | `{}` | host+nono | Custom credential routes (any API) |
-| `workspace.allowPaths` / `readPaths` | `[]` | host+nono | Extra fs grants beyond the read-write workdir |
-| `nono.allowPaths` / `readPaths` | `[]` | host+nono | Merged with `workspace.*` into the wpi profile |
-| `nono.dockerProfile` | `wpi-docker` | docker+nono | Profile name used when sandboxing docker mode |
+| `network.mode` | `filtered` | nono (both modes) | Proxy mode: filtered / open / blocked |
+| `network.allowDomains` | `[]` | nono (both modes) | Domains allowed through the proxy |
+| `network.credentials` | `[]` | nono (both modes) | Preset services (openai, anthropic, gemini, google-ai, github, gitlab) |
+| `network.customCredentials` | `{}` | nono (both modes) | Custom credential routes (any API) |
+| `workspace.allowPaths` / `readPaths` | `[]` | nono (both modes) | Extra fs grants beyond the read-write workdir |
+| `nono.allowPaths` / `readPaths` | `[]` | nono (both modes) | Merged with `workspace.*` into the wpi profile |
 
 For the complete behavior of every setting in every combination
 (apply / warn / error), see **[docs/behavior-matrix.md](docs/behavior-matrix.md)**.

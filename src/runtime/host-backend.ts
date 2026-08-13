@@ -21,7 +21,7 @@
 // src/runtime/package-wiring.ts.
 // ============================================================
 
-import type { ResolvedConfig, RuntimeBackend } from "./backend";
+import type { ResolvedConfig, RuntimeBackend, SetupOptions } from "./backend";
 import { RuntimeMode, SandboxBackend, debugLog } from "../config";
 import { execSync, spawn } from "child_process";
 import * as fs from "fs";
@@ -235,10 +235,12 @@ export class HostBackend implements RuntimeBackend {
    * `wpi setup` for host mode: platform → pi binary → (nono binary, pack,
    * wpi profile, package wiring, network, smoke test) or unsandboxed warning.
    * Writes the profile + package wiring (write-if-absent) — unlike doctor,
-   * setup is not read-only. No silent sudo: missing installs are reported with
-   * their exact command, never auto-run.
+   * setup is not read-only. Missing binaries (pi, nono) can be installed
+   * INTERACTIVELY: on a TTY (or with an injected prompt) setup asks [y/N]
+   * and runs the exact install command; non-interactive runs only report
+   * the command, never install silently.
    */
-  async setup(config: ResolvedConfig): Promise<SetupReport> {
+  async setup(config: ResolvedConfig, options?: SetupOptions): Promise<SetupReport> {
     const steps: SetupStep[] = [];
 
     // Platform support (Seatbelt / Landlock).
@@ -254,14 +256,23 @@ export class HostBackend implements RuntimeBackend {
       return buildSetupReport(config.runtimeMode, steps);
     }
 
-    // pi binary (mandatory in host mode).
+    // pi binary (mandatory in host mode). Install pinned to the resolved
+    // pi version — matches the docker image.
+    const piNpmInstall = `npm install -g @earendil-works/pi-coding-agent@${config.piVersion}`;
     if (this.commandAvailable(PI_BINARY)) {
       steps.push({ status: "ok", label: "pi binary", detail: this.binVersion(PI_BINARY) });
+    } else if (this.confirmInstall(`pi is not installed. Install @earendil-works/pi-coding-agent@${config.piVersion} via npm?`, options?.prompt)) {
+      if (this.runInstall(piNpmInstall)) {
+        steps.push({ status: "ok", label: "pi binary", detail: `installed via npm (v${config.piVersion})` });
+      } else {
+        steps.push({ status: "error", label: "pi binary", detail: `install failed — run \`${piNpmInstall}\` manually` });
+        return buildSetupReport(config.runtimeMode, steps);
+      }
     } else {
       steps.push({
         status: "error",
         label: "pi binary",
-        detail: `not installed or not on PATH — npm install -g @earendil-works/pi-coding-agent`,
+        detail: `not installed or not on PATH — ${piNpmInstall} (re-run setup in a terminal to install interactively)`,
       });
       return buildSetupReport(config.runtimeMode, steps);
     }
@@ -276,15 +287,24 @@ export class HostBackend implements RuntimeBackend {
     }
 
     // host+nono
-    if (!this.commandAvailable(NONO_BINARY)) {
+    const nonoInstall = "curl -fsSL https://nono.sh/install.sh | sh";
+    if (this.commandAvailable(NONO_BINARY)) {
+      steps.push({ status: "ok", label: "nono binary", detail: this.binVersion(NONO_BINARY) });
+    } else if (this.confirmInstall("nono is not installed. Install it via https://nono.sh/install.sh?", options?.prompt)) {
+      if (this.runInstall(nonoInstall)) {
+        steps.push({ status: "ok", label: "nono binary", detail: "installed via nono.sh/install.sh" });
+      } else {
+        steps.push({ status: "error", label: "nono binary", detail: `install failed — run \`${nonoInstall}\` manually` });
+        return buildSetupReport(config.runtimeMode, steps);
+      }
+    } else {
       steps.push({
         status: "error",
         label: "nono binary",
-        detail: "not installed — `curl -fsSL https://nono.sh/install.sh | sh` (or add `sandbox: { backend: none }` to opt out)",
+        detail: `not installed — \`${nonoInstall}\` (or add \`sandbox: { backend: none }\` to opt out)`,
       });
       return buildSetupReport(config.runtimeMode, steps);
     }
-    steps.push({ status: "ok", label: "nono binary", detail: this.binVersion(NONO_BINARY) });
 
     // nono pack the wpi profile extends (nolabs-ai/pi). Pulls when missing.
     steps.push(this.ensureNonoPack());
@@ -522,6 +542,36 @@ export class HostBackend implements RuntimeBackend {
       execSync(`${bin} --version`, { stdio: "pipe" });
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ask whether to install a missing dependency. Uses the injected prompt in
+   * tests; otherwise prompts on a TTY ([y/N]) and declines silently in
+   * non-interactive runs — installs never happen without confirmation.
+   */
+  private confirmInstall(question: string, prompt?: (q: string) => boolean): boolean {
+    if (prompt) return prompt(question);
+    if (!process.stdin.isTTY) return false;
+    try {
+      const buf = Buffer.alloc(1);
+      process.stderr.write(question + " [y/N] ");
+      const n = fs.readSync(0, buf, 0, 1, null);
+      process.stderr.write("\n");
+      return n > 0 && ["y", "yes"].includes(buf.toString("utf-8").trim().toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+
+  /** Run an install command interactively (progress visible). True on success. */
+  private runInstall(cmd: string): boolean {
+    try {
+      execSync(cmd, { stdio: "inherit" });
+      return true;
+    } catch (e) {
+      debugLog("install command failed:", e);
       return false;
     }
   }

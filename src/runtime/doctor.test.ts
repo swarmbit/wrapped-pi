@@ -30,7 +30,7 @@ import {
 } from "./doctor";
 import { DockerBackend } from "./docker-backend";
 import type { ResolvedConfig } from "./backend";
-import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO, DEFAULT_DOCKER_SOCKET } from "../config";
+import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK, EMPTY_NONO } from "../config";
 
 function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
@@ -39,7 +39,6 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     network: EMPTY_NETWORK,
     workspace: EMPTY_NONO,
     nono: EMPTY_NONO,
-    dockerSocket: DEFAULT_DOCKER_SOCKET,
     piVersion: PI_VERSION,
     piImage: PI_IMAGE,
     ports: [],
@@ -277,17 +276,16 @@ describe("DockerBackend.doctor", () => {
     vi.unstubAllEnvs();
   });
 
-  /** Mock: docker cli + daemon up, image built, nono installed (nono default). */
+  /** Mock: docker cli + daemon up, image built (nono is in-container — no host binary). */
   function mockHealthyDocker(): void {
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "docker --version") return "Docker version 29.7.2, build abc";
-      if (cmd === "nono --version") return "nono 0.73.0";
       throw new Error("unexpected execSync call: " + cmd);
     });
     mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
   }
 
-  it("reports healthy (exit 0) when docker cli + daemon are up, image built, nono sandbox ready", async () => {
+  it("reports healthy (exit 0) when docker cli + daemon are up, image built, sandbox ready", async () => {
     mockHealthyDocker();
 
     const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
@@ -296,7 +294,8 @@ describe("DockerBackend.doctor", () => {
     expect(dockerSection.checks.find((c) => c.label === "docker cli")?.status).toBe("ok");
     expect(dockerSection.checks.find((c) => c.label === "docker daemon")?.status).toBe("ok");
     const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
-    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.status).toBe("ok");
+    expect(sandboxSection.checks.find((c) => c.label === "backend")?.detail).toBe("nono (in-container)");
+    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.status).toBe("info");
     const piSection = report.sections.find((s) => s.name === "Pi")!;
     // imageExists is mocked via spawnSync returning status 0 => treated as built.
     expect(piSection.checks.find((c) => c.label === "image")?.detail).toContain("built");
@@ -366,51 +365,36 @@ describe("DockerBackend.doctor", () => {
     expect(report.exitCode).toBe(1);
   });
 
-  it("sandbox: nono binary missing is an error (exit 2)", async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd === "docker --version") return "Docker version 29.7.2";
-      throw new Error("not installed"); // nono --version throws
-    });
-    mockedSpawnSync.mockReturnValue(spawnResult(0, "29.7.2"));
-
+  it("sandbox: nono is in-container — host binary state is informational", async () => {
+    mockHealthyDocker();
     const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
     const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
-    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.status).toBe("error");
-    expect(report.exitCode).toBe(2);
+    expect(sandboxSection.checks.find((c) => c.label === "nono binary")?.detail).toMatch(/baked into the image/);
+    expect(sandboxSection.checks.find((c) => c.label === "pack")?.status).toBe("info");
+    expect(report.exitCode).toBe(0);
   });
 
-  it("sandbox: mount/socket grants missing from on-disk profile are errors", async () => {
+  it("sandbox: drifted wpi profile warns (exit 1)", async () => {
     mockHealthyDocker();
-    // A drifted on-disk profile that grants the socket but NOT a declared mount.
+    // Write a drifted wpi profile (wrong meta.version).
     const profileDir = path.join(tmpHome, ".config", "nono", "profiles");
     fs.mkdirSync(profileDir, { recursive: true });
     fs.writeFileSync(
-      path.join(profileDir, "wpi-docker.json"),
-      JSON.stringify({ meta: { name: "wpi-docker", version: "1.0.0" }, extends: "default", filesystem: { unix_socket: [DEFAULT_DOCKER_SOCKET] } })
+      path.join(profileDir, "wpi.json"),
+      JSON.stringify({ meta: { name: "wpi", version: "0.0.0", author: "wpi" }, extends: "nolabs-ai/pi" })
     );
 
-    const report = await backend.doctor(
-      makeConfig({
-        sandboxBackend: "nono",
-        mounts: [{ host: "/host/data", container: "/container/data", mode: "rw" }],
-      })
-    );
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
     const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
-    const mountGrant = sandboxSection.checks.find((c) => c.label === "grant mount")!;
-    expect(mountGrant.status).toBe("error");
-    expect(mountGrant.detail).toContain("/host/data");
-    const socketGrant = sandboxSection.checks.find((c) => c.label === "grant socket")!;
-    expect(socketGrant.status).toBe("ok");
-    expect(report.exitCode).toBe(2);
+    expect(sandboxSection.checks.find((c) => c.label === "profile drift")?.status).toBe("warn");
+    expect(report.exitCode).toBe(1);
   });
 
   it("sandbox: profile not yet written reports info, not error", async () => {
     mockHealthyDocker();
-    const report = await backend.doctor(
-      makeConfig({ sandboxBackend: "nono", mounts: [{ host: "/host/data", container: "/c/data", mode: "ro" }] })
-    );
+    const report = await backend.doctor(makeConfig({ sandboxBackend: "nono" }));
     const sandboxSection = report.sections.find((s) => s.name === "Sandbox")!;
-    expect(sandboxSection.checks.find((c) => c.label === "profile grants")?.status).toBe("info");
+    expect(sandboxSection.checks.find((c) => c.label === "profile drift")?.status).toBe("info");
     expect(report.exitCode).toBe(0);
   });
 
@@ -428,15 +412,13 @@ describe("DockerBackend.doctor", () => {
   });
 });
 describe("buildConfigurationSection — cross-mode warnings (Phase 7)", () => {
-  it("warns when network.* is configured but mode is docker (host+nono only)", () => {
+  it("does not warn about network.* in docker mode (applies in-container now)", () => {
     const config = makeConfig({
       runtimeMode: "docker",
       network: { ...EMPTY_NETWORK, credentials: ["anthropic"], allowDomains: ["api.anthropic.com"] },
     });
     const section = buildConfigurationSection(config);
-    const net = section.checks.find((c) => c.label === "network.*");
-    expect(net?.status).toBe("warn");
-    expect(net?.detail).toMatch(/host\+nono only/);
+    expect(section.checks.some((c) => c.label === "network.*")).toBe(false);
   });
 
   it("does not warn about network.* in host mode", () => {

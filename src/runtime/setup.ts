@@ -5,8 +5,8 @@
 // verifies a (mode, sandbox) combination is ready to run, step by step:
 //
 //   docker+none  docker cli + daemon
-//   docker+nono  + nono binary, wpi-docker profile, mount/socket grants,
-//                 smoke test (nono run --profile wpi-docker -- docker --version)
+//   docker+nono  + shared wpi profile (used by nono inside the container;
+//                 the pack is pulled by the entrypoint on first run)
 //   host+none    platform, pi binary, unsandboxed warning
 //   host+nono    + nono binary, nono pack (nolabs-ai/pi), wpi profile,
 //                 package wiring, network config, smoke test

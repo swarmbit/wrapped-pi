@@ -4,8 +4,9 @@
 // RuntimeBackend abstracts how pi is launched. cli.ts delegates all
 // execution to a backend resolved from config.runtimeMode via
 // resolveBackend():
-//   - DockerBackend (runtime.mode: docker) — image build + container run,
-//     optionally wrapped in nono (Phase 4).
+//   - DockerBackend (runtime.mode: docker) — image build + container run.
+//     When sandboxed, nono wraps pi INSIDE the container (Phase 4); the
+//     docker client itself always runs unsandboxed.
 //   - HostBackend   (runtime.mode: host)   — native pi, optionally wrapped
 //     in nono (Phase 3).
 // Both backends also implement doctor (Phase 2) and setup (Phase 6).
@@ -17,6 +18,16 @@ import { DockerBackend } from "./docker-backend";
 import { HostBackend } from "./host-backend";
 import type { DoctorReport } from "./doctor";
 import type { SetupReport } from "./setup";
+
+/** Options for backend.setup (Phase 6+). */
+export interface SetupOptions {
+  /**
+   * Interactive confirmation for installing missing dependencies (pi, nono).
+   * When absent, the backend prompts on a TTY ([y/N]) and declines silently
+   * in non-interactive runs. Injectable for tests.
+   */
+  prompt?: (question: string) => boolean;
+}
 
 /** The fully-resolved config shape passed to backends (= loadConfig's return type). */
 export type ResolvedConfig = PiContainerConfig & RuntimeContext;
@@ -50,10 +61,12 @@ export interface RuntimeBackend {
    * Phase 6: provision artifacts (profiles, package wiring) and verify the
    * (mode, sandbox) combination is ready to run, step by step. WRITES the
    * artifacts a first build/run would write (doctor is read-only; setup is not).
+   * With `options.prompt` (or a TTY), missing host binaries (pi, nono) can be
+   * installed interactively — never silently in non-interactive runs.
    * Never exits on its own — cli.ts renders the report and exits with
    * report.exitCode (0 ready, 1 warn, 2 error).
    */
-  setup(config: ResolvedConfig): Promise<SetupReport>;
+  setup(config: ResolvedConfig, options?: SetupOptions): Promise<SetupReport>;
 }
 
 /**
