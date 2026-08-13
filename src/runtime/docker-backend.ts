@@ -42,6 +42,8 @@ import {
   type ProfileInput,
   type EnsureProfileResult,
 } from "./profile";
+import { isNonoPackWired } from "./nono-pack";
+import { agentSettingsPath } from "./package-wiring";
 import * as os from "os";
 import * as fs from "fs";
 
@@ -258,6 +260,19 @@ export class DockerBackend implements RuntimeBackend {
     const input = this.buildProfileInput(config);
     const profilePath = wpiProfilePath(input.homeDir);
     checks.push({ status: "info", label: "profile", detail: `${profilePath} (shared with host mode)` });
+
+    // The nolabs-ai/pi pack self-wires its pi extensions on pull (entrypoint);
+    // surface when pi would miss /nono-status in the container.
+    const wired = isNonoPackWired(agentSettingsPath(config.configDir), os.homedir());
+    checks.push(
+      wired
+        ? { status: "ok", label: "nono pack wiring", detail: "pi wired to nolabs-ai/pi (/nono-status extension)" }
+        : {
+            status: "info",
+            label: "nono pack wiring",
+            detail: "not wired yet — the entrypoint wires it on first run (`nono pull`)",
+          }
+    );
 
     try {
       const canonical = serializeWpiProfile(buildWpiProfile(input));

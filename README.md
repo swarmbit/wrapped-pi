@@ -27,8 +27,9 @@ Run [Pi Coding Agent](https://pi.dev/) with team-standard extensions and setting
   gates, extensions, and settings into every container.
 - **Host mode when you want native speed**: run pi directly on macOS/Linux with
   kernel sandboxing instead of a container.
-- **Sandboxed by default**: nono constrains what the launched process tree can
-  touch — on the host (pi) *and* around the docker client (socket + mounts).
+- **Sandboxed by default**: nono constrains pi's process tree — on the host
+  (host mode) and inside the container (docker mode); the docker client itself
+  is never sandboxed.
 - **Secrets via credential routes**: nono holds the real keys; pi gets phantoms.
 - **CWD-respect mounts** (docker): `$(pwd)/` is always mounted as `/<dirname>`,
   and the container user/home mirror the host — identical paths inside and out.
@@ -41,9 +42,13 @@ Run [Pi Coding Agent](https://pi.dev/) with team-standard extensions and setting
 
 - Node.js ≥ 22 (runtime + build)
 - **Docker** — required for `docker` mode (build and run containers)
-- **nono** — required for `sandbox: nono` (the default):
+- **nono** — required for host mode's `sandbox: nono` (the default):
   `curl -fsSL https://nono.sh/install.sh | sh`
+  (docker mode bakes nono into the image — nothing host-side)
 - **pi** — required for `host` mode: `npm install -g @earendil-works/pi-coding-agent`
+
+Missing host binaries can be installed interactively by `wpi setup` (it asks
+`[y/N]` and runs the exact command; non-interactive runs print the hint).
 
 ### From npm (recommended)
 
@@ -139,13 +144,14 @@ wpi dry-run            # print resolved config and the exact commands (debugging
 └──────────────────────────────────────────────────────────┘
 ```
 
-When `sandbox: nono`, the whole `docker …` invocation runs under
-`nono run --profile wpi-docker --allow-cwd --rollback -- docker …`. The
-`wpi-docker` profile (authored by wpi at `~/.config/nono/profiles/wpi-docker.json`,
-extends nono's `default`) scopes the **client's host-side footprint**: the daemon
-socket (`docker.socket`), build-context temp dirs, declared `docker.mounts`
-(ro → read, rw → read-write), and `~/.pi`. Everything else is denied. nono does
-**not** filter in-container traffic — that boundary is Docker's.
+When `sandbox: nono`, the image ships nono and the entrypoint wraps pi with
+`nono run --profile wpi --allow-cwd` **inside the container** (only `pi` runs
+are wrapped — interactive shells keep the container boundary). The `wpi`
+profile is the same one host mode authors at
+`~/.config/nono/profiles/wpi.json`; `~/.config/nono` is mounted into the
+container so profiles and packs are shared between modes (the entrypoint runs
+`nono pull nolabs-ai/pi` on first run). The docker client runs unsandboxed on
+the host; in-container traffic is scoped by nono's profile.
 
 ### Host mode
 
@@ -160,6 +166,11 @@ you declared, and maps `network.*` to nono's proxy + credential routes. The
 bundled package is wired natively to `~/.pi/.wpi/package/` (hidden
 wpi-owned state) and registered in `~/.pi/agent/settings.json` — the same
 location docker mode uses, so both modes share one package copy.
+
+The `nolabs-ai/pi` pack also self-wires its own pi extensions into settings on
+pull: the `/nono-status` command, `nono_status` tool, and the `nono-sandbox`
+skill (sandbox-aware diagnostics when nono denies something). `wpi setup` and
+`wpi doctor` verify this wiring ("nono pack wiring").
 
 ### Both modes
 
@@ -196,7 +207,7 @@ sandbox:
 
 # ── Pi settings ────────────────────────────────────────────
 pi:
-  version: 0.79.1     # docker mode: pin the image's pi (default: baked-in)
+  version: 0.79.1     # pin pi: docker image build + host setup install (default: baked-in)
 
 # ── Docker settings (docker mode) ──────────────────────────
 
@@ -234,7 +245,7 @@ git:
     name: John Doe
     email: john@example.com
 
-# ── Network / credential routes (host + nono) ──────────────
+# ── Network / credential routes (wpi nono profile, both modes) ──
 network:
   mode: filtered      # filtered (default) | open | blocked
   allowDomains:
@@ -249,7 +260,7 @@ network:
       injectHeader: Authorization
       credentialFormat: "Bearer {}"
 
-# ── Extra fs grants beyond the read-write workdir (host + nono) ──
+# ── Extra fs grants beyond the read-write workdir (wpi nono profile) ──
 workspace:
   allowPaths: [~/src]
   readPaths: [/etc]
@@ -269,7 +280,7 @@ nono:
 |---|---|---|---|
 | `runtime.mode` | `docker` | both | `docker` (container) or `host` (native process) |
 | `sandbox.backend` | `nono` | both | `nono` (default) or `none` (explicit opt-out; doctor warns) |
-| `pi.version` | *(baked-in)* | docker | Pin the image's pi version (host mode uses the installed `pi`) |
+| `pi.version` | *(baked-in)* | both | Pin pi: docker image build + the version host `setup` installs on prompt |
 | `docker.ports` | `[]` | docker | Container ports exposed on `127.0.0.1` (host mode: simple ports → `--listen-port` grants) |
 | `docker.mounts` | `[]` | docker | Host→container mounts |
 | `docker.volumes` | `[]` | docker | Named volumes (daemon-side; no host grant needed) |
@@ -285,7 +296,8 @@ nono:
 | `nono.allowPaths` / `readPaths` | `[]` | nono (both modes) | Merged with `workspace.*` into the wpi profile |
 
 For the complete behavior of every setting in every combination
-(apply / warn / error), see **[docs/behavior-matrix.md](docs/behavior-matrix.md)**.
+(apply / warn / error), see **[docs/dual-mode-changes.md](docs/dual-mode-changes.md)**
+(design history of the dual-mode branch).
 
 ### CLI flags
 
@@ -301,7 +313,7 @@ For the complete behavior of every setting in every combination
 | Command | Description |
 |---|---|
 | *(default)* | Run pi in the configured mode/sandbox |
-| `setup` | Provision + verify the combination (profiles, pack, package wiring, smoke test). Exit 0 ready / 1 warn / 2 error |
+| `setup` | Provision + verify the combination (profiles, pack, package wiring, smoke test); prompts to install missing pi/nono when interactive. Exit 0 ready / 1 warn / 2 error |
 | `doctor` | Read-only health check (runtime, sandbox, profile, pi, docker, package, config). Exit 0 healthy / 1 warn / 2 error |
 | `build` | docker: build/rebuild the image · host: no-op (provisions profile + package) |
 | `shell` | docker: bash in a new container · host: sandboxed native shell |
@@ -353,12 +365,14 @@ network:
 
 - `docker.env` values that look like secrets are flagged by `doctor` — prefer
   nono credential routes.
-- **host+nono**: `network.credentials` / `customCredentials` hold the real keys
-  in nono's keystore; the covered `env` var is denied in the child and a phantom
-  is injected (route wins).
-- **host+none**: `docker.env` is not injected at all — a covered key in env
-  would leak nothing (it's ignored) but `doctor` still warns you to move it to a
-  route.
+- **nono (both modes)**: `network.credentials` / `customCredentials` hold the
+  real keys in nono's keystore; the covered `env` var is denied in the child
+  and a phantom is injected (route wins) — on the host and inside the
+  container alike.
+- **sandbox none**: `docker.env` is not injected at all in host mode — a
+  covered key in env would leak nothing (it's ignored) but `doctor` still
+  warns you to move it to a route. In docker mode the env passes into the
+  container unsandboxed.
 
 ## Bundled Extensions
 
@@ -434,8 +448,10 @@ docker:
   you were running plain docker, add `sandbox: { backend: none }` to
   `~/.pi/wpi.yml` to keep the old behavior — `doctor` will warn until you
   sandbox.
-- Missing nono with the default config is an **error** (with the install
-  command), never a silent downgrade to unsandboxed.
+- Missing nono in **host mode** is an error with the install command (or run
+  `wpi setup` in a terminal — it prompts to install). Docker mode needs no
+  host-side nono: it's baked into the image. Never a silent downgrade to
+  unsandboxed.
 - Host mode and docker mode share one package copy at the fixed hidden
   path `~/.pi/.wpi/package/` — upgrading wpi replaces it in place
   (disposable state).

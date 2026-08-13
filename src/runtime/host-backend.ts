@@ -54,6 +54,7 @@ import {
   readSettingsForDoctor,
   type WiringResult,
 } from "./package-wiring";
+import { isNonoPackWired } from "./nono-pack";
 import * as path from "path";
 
 const PI_BINARY = "pi";
@@ -215,7 +216,7 @@ export class HostBackend implements RuntimeBackend {
   async doctor(config: ResolvedConfig): Promise<DoctorReport> {
     const sections: DoctorSection[] = [
       this.buildRuntimeSection(config.runtimeMode),
-      this.buildSandboxSection(config.sandboxBackend),
+      this.buildSandboxSection(config),
       this.buildPiSection(),
       this.buildPlatformSection(),
       this.buildPackageSection(config),
@@ -309,6 +310,10 @@ export class HostBackend implements RuntimeBackend {
     // nono pack the wpi profile extends (nolabs-ai/pi). Pulls when missing.
     steps.push(this.ensureNonoPack());
 
+    // The pack self-wires its pi extensions into settings on pull; verify so
+    // /nono-status and the nono-sandbox skill are actually reachable from pi.
+    steps.push(this.nonoPackWiringStep(config));
+
     // Derive the wpi profile (write-if-absent; drift is reported).
     const profileRes = ensureWpiProfile(this.buildProfileInput(config));
     steps.push(this.hostProfileStep(profileRes));
@@ -347,6 +352,7 @@ export class HostBackend implements RuntimeBackend {
   }
 
   /** Step for the wpi profile provisioning result. */
+  /** Step for the wpi profile provisioning result. */
   private hostProfileStep(res: EnsureProfileResult): SetupStep {
     if (res.written) return { status: "ok", label: "wpi profile", detail: `written to ${res.path}` };
     if (res.inSync) return { status: "ok", label: "wpi profile", detail: `in sync (${res.path})` };
@@ -354,6 +360,19 @@ export class HostBackend implements RuntimeBackend {
       status: "warn",
       label: "wpi profile",
       detail: `drifted (${res.path}) — wpi won't overwrite; delete to regenerate`,
+    };
+  }
+
+  /** Step for the nolabs-ai/pi pack's self-wiring into pi settings. */
+  private nonoPackWiringStep(config: ResolvedConfig): SetupStep {
+    const wired = isNonoPackWired(agentSettingsPath(config.configDir), os.homedir());
+    if (wired) {
+      return { status: "ok", label: "nono pack wiring", detail: "pi wired to nolabs-ai/pi (/nono-status extension)" };
+    }
+    return {
+      status: "warn",
+      label: "nono pack wiring",
+      detail: "pack installed but not wired into pi settings — run `nono pull nolabs-ai/pi`",
     };
   }
 
@@ -655,7 +674,8 @@ export class HostBackend implements RuntimeBackend {
     };
   }
 
-  private buildSandboxSection(sandbox: SandboxBackend): DoctorSection {
+  private buildSandboxSection(config: ResolvedConfig): DoctorSection {
+    const sandbox = config.sandboxBackend;
     if (sandbox === "nono") {
       const checks: DoctorCheck[] = [
         { status: "ok", label: "backend", detail: "nono" },
@@ -675,6 +695,18 @@ export class HostBackend implements RuntimeBackend {
           detail: "not installed — `curl -fsSL https://nono.sh/install.sh | sh`",
         });
       }
+      // The nolabs-ai/pi pack self-wires its pi extensions on pull; surface when
+      // pi would miss /nono-status even with the pack installed.
+      const wired = isNonoPackWired(agentSettingsPath(config.configDir), os.homedir());
+      checks.push(
+        wired
+          ? { status: "ok", label: "nono pack wiring", detail: "pi wired to nolabs-ai/pi (/nono-status extension)" }
+          : {
+              status: "info",
+              label: "nono pack wiring",
+              detail: "not wired — run `nono pull nolabs-ai/pi`",
+            }
+      );
       return { name: "Sandbox", checks };
     }
     // sandbox=none

@@ -18,6 +18,7 @@ import { DockerBackend } from "./docker-backend";
 import { HostBackend } from "./host-backend";
 import type { ResolvedConfig } from "./backend";
 import { PI_VERSION, PI_IMAGE, EMPTY_NETWORK } from "../config";
+import { nonoPackDir } from "./nono-pack";
 import {
   computeSetupExitCode,
   buildSetupReport,
@@ -40,6 +41,22 @@ const mockedSpawnSync = vi.mocked(spawnSync);
 
 function spawnResult(status: number, stdout = "", stderr = ""): SpawnSyncReturns<string> {
   return { status, stdout, stderr, pid: 0, output: [stdout, stderr], signal: null };
+}
+
+/** Simulate the nolabs-ai/pi pack's self-wiring: append its settings entry. */
+function wireNonoPack(home = tmpHome): void {
+  const settingsPath = path.join(home, ".pi", "agent", "settings.json");
+  const existing = fs.existsSync(settingsPath)
+    ? JSON.parse(fs.readFileSync(settingsPath, "utf-8"))
+    : {};
+  const packages: unknown[] = Array.isArray(existing.packages) ? existing.packages : [];
+  const packDir = nonoPackDir(home);
+  const wired = packages.some(
+    (p) => typeof p === "string" ? p === packDir : !!(p && typeof p === "object" && (p as Record<string, unknown>).source === packDir)
+  );
+  if (!wired) packages.push({ source: packDir });
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify({ ...existing, packages }, null, 2) + "\n");
 }
 
 function baseConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
@@ -226,6 +243,8 @@ describe("HostBackend.setup", () => {
 
   it("host+nono: full stack verified end-to-end (exit 0)", async () => {
     mockHealthyHost();
+    // Simulate a previous `nono pull` having wired the pack into pi settings.
+    wireNonoPack();
     const report = await backend.setup(
       hostConfig({ network: { ...EMPTY_NETWORK, allowDomains: ["api.anthropic.com"] } })
     );
@@ -235,6 +254,7 @@ describe("HostBackend.setup", () => {
       "pi binary",
       "nono binary",
       "nono pack",
+      "nono pack wiring",
       "wpi profile",
       "package wiring",
       "network",
@@ -255,7 +275,10 @@ describe("HostBackend.setup", () => {
       throw new Error("not installed"); // nono list --installed fails
     });
     mockedSpawnSync.mockImplementation((bin, args) => {
-      if (bin === "nono" && args?.[0] === "pull") return spawnResult(0, "pulled nolabs-ai/pi");
+      if (bin === "nono" && args?.[0] === "pull") {
+        wireNonoPack(); // nono's wiring: append the pack entry to pi settings
+        return spawnResult(0, "pulled nolabs-ai/pi");
+      }
       if (bin === "nono" && args?.[0] === "run") return spawnResult(0, "pi 0.84.1");
       return spawnResult(1);
     });
@@ -311,6 +334,8 @@ describe("HostBackend.setup", () => {
       if (cmd === "nono list --installed") return "nolabs-ai/pi\t0.2.0\n";
       throw new Error("unexpected execSync: " + cmd);
     });
+    // A previous pull already wired the pack into pi settings.
+    wireNonoPack();
     mockedSpawnSync.mockImplementation((bin, args) => {
       if (bin === "nono" && args?.[0] === "run") return spawnResult(0, "pi 0.83.0"); // smoke test
       return spawnResult(1);
