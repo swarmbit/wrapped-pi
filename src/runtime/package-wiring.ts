@@ -1,25 +1,23 @@
 // ============================================================
 // wpi — host-mode package wiring (Phase 5)
 // ============================================================
-// In docker mode the bundled pi package (package/ in the wpi npm
-// package) is baked into the image and installed by the entrypoint.
-// Host mode runs pi natively, so wpi wires the same package locally:
+// The bundled pi package (package/ in the wpi npm package) lives at
+// ~/.pi/.wpi/package in BOTH modes:
+//   - docker mode: the image bakes a bootstrap source; the entrypoint
+//     syncs it into ${USER_HOME}/.pi/.wpi/package (the mounted host
+//     ~/.pi) and runs `pi install` on that path.
+//   - host mode: wpi copies package/ → ~/.pi/.wpi/package and wires
+//     the same absolute path into ~/.pi/agent/settings.json (pi
+//     resolves local paths from settings without copying).
 //
-//   1. Copy package/ → ~/.pi/wpi-package/<wpi-version>/  (versioned:
-//      an upgrade lands in a NEW directory, never clobbering).
-//   2. Add that absolute path to the `packages` array in
-//      ~/.pi/agent/settings.json (pi resolves local paths from
-//      settings without copying; identity = resolved absolute path).
-//
-// Contracts (mirror the nono-profile philosophy):
-//   - write-if-absent, never silently overwrite. A versioned copy that
-//     already exists and differs from source is a COLLISION: wpi keeps
-//     the on-disk copy and reports it (delete to regenerate).
-//   - settings merge is surgical: user packages (string or object
-//     entries) and every other settings key are left untouched. wpi
-//     only replaces entries it owns: a different wpi-package version,
-//     or the stale docker-mode default (/opt/pi-package) when that path
-//     does not exist on the host.
+// A2 model (fixed path, overwrite on upgrade):
+//   - The copy is disposable, wpi-owned state — like node_modules.
+//     When the bundled source changes, wpi replaces the copy wholesale
+//     so upgrades actually land. Customizations belong in the user's
+//     own packages, not in this copy.
+//   - Settings merge is surgical: user packages (string or object
+//     entries) and every other settings key are left untouched; wpi
+//     only appends its own path (or no-ops when already wired).
 //   - dry-run and doctor never write (doctor inspects only).
 // ============================================================
 
@@ -27,9 +25,14 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 
-/** Versioned host dir where the bundled package is copied: ~/.pi/wpi-package/<version>. */
-export function wpiPackageDir(homeDir: string, wpiVersion: string): string {
-  return path.join(homeDir, ".pi", "wpi-package", wpiVersion);
+/** Hidden wpi state dir under ~/.pi. */
+export function wpiStateDir(homeDir: string): string {
+  return path.join(homeDir, ".pi", ".wpi");
+}
+
+/** Fixed host dir where the bundled package is copied: ~/.pi/.wpi/package. */
+export function wpiPackageDir(homeDir: string): string {
+  return path.join(wpiStateDir(homeDir), "package");
 }
 
 /**
@@ -49,14 +52,14 @@ export function wpiPackageSourceDir(moduleDir: string = __dirname): string {
   return path.join(moduleDir, "..", "..", "package");
 }
 
-// ── Copy (versioned, idempotent, collision-safe) ─────────────
+// ── Copy (fixed path, replace on change) ─────────────────────
 
 export interface CopyResult {
-  /** The versioned destination dir. */
+  /** The fixed destination dir. */
   path: string;
-  /** copied = freshly written; in-sync = identical to source; collision = differs (kept on-disk). */
-  action: "copied" | "in-sync" | "collision";
-  /** Paths (relative) that differ between source and on-disk copy (collision only). */
+  /** copied = freshly written; upgraded = replaced with the bundled source; in-sync = identical. */
+  action: "copied" | "upgraded" | "in-sync";
+  /** Paths (relative) that differed from the bundled source (upgraded only). */
   differing: string[];
 }
 
@@ -79,33 +82,44 @@ function treeHash(dir: string): Map<string, string> {
   return out;
 }
 
-/**
- * Ensure the versioned copy exists. Idempotent: identical on-disk copy → in-sync;
- * differing on-disk copy → collision (wpi never overwrites user state, even its own
- * copy — delete to regenerate). Upgrades get a new <version> dir, so this only
- * collides when the SAME wpi version's source changed or the user edited the copy.
- */
-export function ensureWpiPackageCopy(sourceDir: string, homeDir: string, wpiVersion: string): CopyResult {
-  const dest = wpiPackageDir(homeDir, wpiVersion);
-  if (!fs.existsSync(dest)) {
-    fs.mkdirSync(dest, { recursive: true });
-    fs.cpSync(sourceDir, dest, { recursive: true });
-    return { path: dest, action: "copied", differing: [] };
-  }
-
+/** Relative paths that differ between source and dest (or exist on only one side). */
+function diffTrees(sourceDir: string, dest: string): string[] {
   const sourceHash = treeHash(sourceDir);
   const onDiskHash = treeHash(dest);
-  if (onDiskHash.size !== sourceHash.size) {
-    return { path: dest, action: "collision", differing: diffKeys(sourceHash, onDiskHash) };
-  }
-  const differing = [...sourceHash.keys()].filter((k) => onDiskHash.get(k) !== sourceHash.get(k));
-  if (differing.length === 0) return { path: dest, action: "in-sync", differing: [] };
-  return { path: dest, action: "collision", differing };
+  const keys = new Set([...sourceHash.keys(), ...onDiskHash.keys()]);
+  return [...keys].filter((k) => sourceHash.get(k) !== onDiskHash.get(k)).sort();
 }
 
-function diffKeys(a: Map<string, string>, b: Map<string, string>): string[] {
-  const keys = new Set([...a.keys(), ...b.keys()]);
-  return [...keys].filter((k) => a.get(k) !== b.get(k)).sort();
+/** Read-only state of the on-disk copy vs the bundled source (doctor never writes). */
+export type PackageCopyState =
+  | { state: "missing" }
+  | { state: "in-sync" }
+  | { state: "stale"; differing: string[] };
+
+export function compareWpiPackage(sourceDir: string, dest: string): PackageCopyState {
+  if (!fs.existsSync(dest)) return { state: "missing" };
+  const differing = diffTrees(sourceDir, dest);
+  return differing.length === 0 ? { state: "in-sync" } : { state: "stale", differing };
+}
+
+/**
+ * Ensure the fixed copy matches the bundled source. Idempotent: identical
+ * on-disk copy → in-sync; missing → copied; differing → replaced wholesale
+ * (the copy is disposable wpi-owned state, like node_modules).
+ */
+export function ensureWpiPackageCopy(sourceDir: string, homeDir: string): CopyResult {
+  const dest = wpiPackageDir(homeDir);
+  const compare = compareWpiPackage(sourceDir, dest);
+  if (compare.state === "in-sync") return { path: dest, action: "in-sync", differing: [] };
+
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+  fs.cpSync(sourceDir, dest, { recursive: true });
+  return {
+    path: dest,
+    action: compare.state === "missing" ? "copied" : "upgraded",
+    differing: compare.state === "stale" ? compare.differing : [],
+  };
 }
 
 // ── Settings wiring (surgical merge, user state untouched) ──
@@ -113,41 +127,19 @@ function diffKeys(a: Map<string, string>, b: Map<string, string>): string[] {
 export interface WireResult {
   /** Absolute path wired into settings (or would-be path when already). */
   packagePath: string;
-  /** added = appended; already = present (no-op); replaced = swapped an owned entry; skipped-malformed = settings unreadable, left untouched. */
-  action: "added" | "already" | "replaced" | "skipped-malformed";
-  /** The entry replaced (owned entry or stale docker-mode default), when applicable. */
-  replacedFrom?: string;
-}
-
-/** The docker-mode default package entry (image path). Wired by the container entrypoint. */
-export const DOCKER_DEFAULT_PACKAGE = "/opt/pi-package";
-
-/**
- * The docker-mode default is stale when it resolves to /opt/pi-package and that
- * path does not exist on the host (it only exists inside the container image).
- * `exists` is injectable for tests.
- */
-export function isStaleDockerDefault(resolved: string, exists: (p: string) => boolean = fs.existsSync): boolean {
-  return resolved === DOCKER_DEFAULT_PACKAGE && !exists(DOCKER_DEFAULT_PACKAGE);
-}
-
-/** True when a string entry is a wpi-owned host package entry (~/.pi/wpi-package/<version>). */
-export function isWpiPackageEntry(resolved: string, homeDir: string): boolean {
-  const ownedPrefix = path.join(homeDir, ".pi", "wpi-package") + path.sep;
-  return resolved.startsWith(ownedPrefix);
+  /** added = appended; already = present (no-op); skipped-malformed = settings unreadable, left untouched. */
+  action: "added" | "already" | "skipped-malformed";
 }
 
 /**
  * Idempotently add `packagePath` to the packages array of settings.json.
- * - Other keys, object-form entries and non-wpi strings are preserved verbatim.
- * - A wpi-owned entry of a DIFFERENT version is replaced (upgrade path).
- * - The stale docker-mode default (/opt/pi-package) is dropped only when that
- *   path does not exist on the host (it resolves inside the container image).
+ * - Other keys and every existing package entry (string or object form)
+ *   are preserved verbatim — wpi never removes entries.
  * - A settings file that exists but cannot be parsed is left UNTOUCHED
  *   (skipped-malformed) — wpi never destroys user state.
  * - Writes the file (2-space JSON) only when something changed.
  */
-export function wireSettings(settingsPath: string, packagePath: string, homeDir: string): WireResult {
+export function wireSettings(settingsPath: string, packagePath: string): WireResult {
   if (fs.existsSync(settingsPath) && !isParsableJson(settingsPath)) {
     return { packagePath: path.resolve(packagePath), action: "skipped-malformed" };
   }
@@ -156,41 +148,16 @@ export function wireSettings(settingsPath: string, packagePath: string, homeDir:
 
   const resolvedTarget = path.resolve(packagePath);
   const settingsDir = path.dirname(settingsPath);
-  let replacedFrom: string | undefined;
-  let already = false;
+  const already = packages.some(
+    (entry) => typeof entry === "string" && path.resolve(settingsDir, entry) === resolvedTarget
+  );
+  if (already) return { packagePath: resolvedTarget, action: "already" };
 
-  const kept: unknown[] = [];
-  for (const entry of packages) {
-    if (typeof entry !== "string") {
-      kept.push(entry); // object-form filter entries: user state, keep
-      continue;
-    }
-    const resolved = path.resolve(settingsDir, entry);
-    if (resolved === resolvedTarget) {
-      already = true; // our exact entry already present
-      kept.push(entry);
-      continue;
-    }
-    if (isWpiPackageEntry(resolved, homeDir) || isStaleDockerDefault(resolved)) {
-      // wpi-owned entry (another version) or the stale docker-mode default. Drop
-      // it — replaced below with the current host path. A docker-default entry
-      // whose path EXISTS on the host is kept (user relies on it).
-      replacedFrom = replacedFrom ?? resolved;
-      continue;
-    }
-    kept.push(entry); // user package
-  }
-
-  if (already && replacedFrom === undefined) {
-    return { packagePath: resolvedTarget, action: "already" };
-  }
-
-  if (!already) kept.push(resolvedTarget);
-
-  settings.packages = kept;
+  packages.push(resolvedTarget);
+  settings.packages = packages;
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-  return { packagePath: resolvedTarget, action: replacedFrom ? "replaced" : "added", replacedFrom };
+  return { packagePath: resolvedTarget, action: "added" };
 }
 
 function isParsableJson(p: string): boolean {
@@ -257,11 +224,12 @@ export interface WiringResult {
 
 /**
  * Copy (if needed) + wire (if needed) the bundled package for host mode.
- * Never overwrites: collisions are reported via the returned result; the
- * caller decides how loudly to surface them.
+ * The copy is disposable wpi-owned state: replaced wholesale when the
+ * bundled source changed. Settings wiring only ever appends (user state
+ * untouched).
  */
-export function ensurePackageWiring(sourceDir: string, homeDir: string, wpiVersion: string, settingsPath: string): WiringResult {
-  const copy = ensureWpiPackageCopy(sourceDir, homeDir, wpiVersion);
-  const wire = wireSettings(settingsPath, copy.path, homeDir);
+export function ensurePackageWiring(sourceDir: string, homeDir: string, settingsPath: string): WiringResult {
+  const copy = ensureWpiPackageCopy(sourceDir, homeDir);
+  const wire = wireSettings(settingsPath, copy.path);
   return { copy, wire, nativeBinaries: readNativeBinaries(sourceDir) };
 }

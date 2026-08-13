@@ -119,16 +119,17 @@ wpi dry-run            # print resolved config and the exact commands (debugging
 │                    Docker Container                       │
 │                                                          │
 │  ┌─────────────────────────────────────────┐             │
-│  │  /opt/pi-package/                       │  ◄── Baked  │
+│  │  /opt/.wpi/package/                      │  ◄── Baked  │
 │  │    ├── package.json                     │      into   │
 │  │    ├── extensions/                      │      image  │
-│  │    └── themes/                          │             │
-│  └─────────────────────────────────────────┘             │
+│  │    └── themes/                          │  (bootstrap │
+│  └─────────────────────────────────────────┘    source)  │
 │         │                                                  │
-│         │ pi install /opt/pi-package                      │
-│         │ (registers extensions, themes in settings)      │
+│         │ entrypoint syncs → <home>/.pi/.wpi/package/      │
+│         │ then: pi install <home>/.pi/.wpi/package         │
 │         ▼                                                  │
 │  <host-home>/.pi  ◄── Host mount (path mirrored)          │
+│    └── .wpi/package/  ◄── shared with host mode           │
 │  /<project-dir>   ◄── CWD mount                           │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -151,8 +152,9 @@ pi runs natively. The `wpi` profile (authored at
 `~/.config/nono/profiles/wpi.json`, extends the signed `nolabs-ai/pi` pack)
 grants the workspace read-write plus whatever `workspace.*` / `nono.*` fs paths
 you declared, and maps `network.*` to nono's proxy + credential routes. The
-bundled package is wired natively to `~/.pi/wpi-package/<wpi-version>/` and
-registered in `~/.pi/agent/settings.json`.
+bundled package is wired natively to `~/.pi/.wpi/package/` (hidden
+wpi-owned state) and registered in `~/.pi/agent/settings.json` — the same
+location docker mode uses, so both modes share one package copy.
 
 ### Both modes
 
@@ -371,12 +373,16 @@ The default package includes:
 - **git-files** — TUI widget of changed git files, `/git-diff` picker
 - **web** — Firecrawl-backed `web_fetch`, `web_search`, `web_screenshot`
 
-The package ships in the wpi npm package (`package/`). Docker mode bakes it into
-the image (`/opt/pi-package`); host mode copies it to
-`~/.pi/wpi-package/<wpi-version>/` and wires it into settings (idempotent,
-never overwrites — delete to regenerate). Extensions that shell out to native
-binaries declare them in `package.json` (`wpi.nativeBinaries`); `doctor` and
-`setup` verify them on the host.
+The package ships in the wpi npm package (`package/`). Both modes use the same
+live copy at `~/.pi/.wpi/package/` (hidden wpi-owned state), registered in
+settings via `pi install`: host mode copies it from the bundled `package/`;
+docker mode bakes a bootstrap source into the image (`/opt/.wpi/package`) that
+the entrypoint syncs into the shared copy when missing or stale. The copy is
+treated like `node_modules`: disposable — when the bundled source changes, it
+is replaced wholesale so upgrades actually land. Put customizations in your own
+pi packages, not in this copy. Extensions that shell out to native binaries
+declare them in `package.json` (`wpi.nativeBinaries`); `doctor` and `setup`
+verify them on the host.
 
 ### Web Extension (Firecrawl)
 
@@ -431,11 +437,9 @@ docker:
   sandbox.
 - Missing nono with the default config is an **error** (with the install
   command), never a silent downgrade to unsandboxed.
-- Docker-mode `~/.pi/agent/settings.json` may contain a stale `/opt/pi-package`
-  entry from older runs; host mode replaces it with the host package path when
-  `/opt/pi-package` does not exist on the host.
-- Host mode wires the package to `~/.pi/wpi-package/<wpi-version>/` — upgrading
-  wpi lands a new versioned copy; delete an old one when you no longer need it.
+- Host mode and docker mode share one package copy at the fixed hidden
+  path `~/.pi/.wpi/package/` — upgrading wpi replaces it in place
+  (disposable state).
 
 ## Development
 

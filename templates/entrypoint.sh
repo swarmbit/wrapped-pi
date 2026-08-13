@@ -62,7 +62,23 @@ if [ -n "${PI_MOUNT_PATHS:-}" ]; then
   done
 fi
 
-gosu "${USERNAME}" pi install /opt/pi-package
+# ── Wire the bundled team package ────────────────────────
+# The live copy lives at ${USER_HOME}/.pi/.wpi/package — the SAME path host
+# mode uses (~/.pi/.wpi/package), so both modes share one location. The image
+# carries a bootstrap source at /opt/.wpi/package; the entrypoint syncs it
+# into the shared copy when missing or stale (disposable state, replaced
+# wholesale — same A2 semantics as host mode).
+WPI_PACKAGE="${PI_HOME}/.wpi/package"
+if [ -d "${WPI_PACKAGE}" ] && ! diff -rq --exclude=node_modules /opt/.wpi/package "${WPI_PACKAGE}" >/dev/null 2>&1; then
+  rm -rf "${WPI_PACKAGE}"
+fi
+if [ ! -d "${WPI_PACKAGE}" ]; then
+  mkdir -p "$(dirname "${WPI_PACKAGE}")"
+  cp -a /opt/.wpi/package "${WPI_PACKAGE}"
+fi
+chown -R "${HOST_UID}:${HOST_GID}" "${PI_HOME}/.wpi" 2>/dev/null || true
+
+gosu "${USERNAME}" pi install "${WPI_PACKAGE}"
 
 # ── Set git user info from host ────────────────────────
 if [ -n "${GIT_USER_NAME}" ]; then

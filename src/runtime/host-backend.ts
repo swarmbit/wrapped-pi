@@ -46,7 +46,7 @@ import {
 import { buildSetupReport, runSmoke, firstLine, type SetupReport, type SetupStep } from "./setup";
 import {
   ensurePackageWiring,
-  ensureWpiPackageCopy,
+  compareWpiPackage,
   agentSettingsPath,
   wpiPackageDir,
   wpiPackageSourceDir,
@@ -207,7 +207,7 @@ export class HostBackend implements RuntimeBackend {
       console.log("Host run command (unsandboxed):");
       console.log(`  ${cmd.join(" ")}`);
     }
-    console.log(`  package: ${wpiPackageDir(os.homedir(), this.wpiVersion())} (wired on first run)`);
+    console.log(`  package: ${wpiPackageDir(os.homedir())} (wired on first run)`);
   }
 
   // ── Doctor ──────────────────────────────────────────────────
@@ -339,19 +339,7 @@ export class HostBackend implements RuntimeBackend {
 
   /** Step for the package copy + settings wiring result. */
   private packageWiringStep(config: ResolvedConfig): SetupStep {
-    const wiring = ensurePackageWiring(
-      this.packageSourceDir,
-      os.homedir(),
-      this.wpiVersion(),
-      agentSettingsPath(config.configDir)
-    );
-    if (wiring.copy.action === "collision") {
-      return {
-        status: "warn",
-        label: "package wiring",
-        detail: `copy collision at ${wiring.copy.path} (${wiring.copy.differing.length} file(s) differ) — on-disk kept; delete to regenerate`,
-      };
-    }
+    const wiring = ensurePackageWiring(this.packageSourceDir, os.homedir(), agentSettingsPath(config.configDir));
     if (wiring.wire?.action === "skipped-malformed") {
       return {
         status: "error",
@@ -359,13 +347,13 @@ export class HostBackend implements RuntimeBackend {
         detail: `${agentSettingsPath(config.configDir)} is not valid JSON — fix it and re-run setup`,
       };
     }
-    const copyDetail = wiring.copy.action === "copied" ? "copied" : "in sync";
-    const wireDetail =
-      wiring.wire?.action === "already"
-        ? "settings already wired"
-        : wiring.wire?.action === "replaced" && wiring.wire.replacedFrom
-        ? `settings wired (replaced ${wiring.wire.replacedFrom})`
-        : "settings wired";
+    const copyDetail =
+      wiring.copy.action === "copied"
+        ? "copied"
+        : wiring.copy.action === "upgraded"
+        ? `replaced (${wiring.copy.differing.length} file(s) changed)`
+        : "in sync";
+    const wireDetail = wiring.wire?.action === "already" ? "settings already wired" : "settings wired";
     return { status: "ok", label: "package wiring", detail: `${wiring.copy.path} (${copyDetail}); ${wireDetail}` };
   }
 
@@ -434,27 +422,20 @@ export class HostBackend implements RuntimeBackend {
   }
 
   /**
-   * Phase 5: wire the bundled pi package for host mode — versioned copy at
-   * ~/.pi/wpi-package/<wpi-version>/ + settings.json packages entry. Idempotent;
-   * never overwrites. Collisions and replacements are reported.
+   * Phase 5: wire the bundled pi package for host mode — fixed copy at
+   * ~/.pi/.wpi/package + settings.json packages entry. Idempotent. The copy
+   * is disposable wpi-owned state and is replaced wholesale when the bundled
+   * source changes.
    */
   private ensurePackageWiringOrWarn(config: ResolvedConfig): WiringResult {
-    const res = ensurePackageWiring(
-      this.packageSourceDir,
-      os.homedir(),
-      this.wpiVersion(),
-      agentSettingsPath(config.configDir)
-    );
-    if (res.copy.action === "collision") {
-      console.error(
-        `⚠ package copy collision at ${res.copy.path}: ${res.copy.differing.length} file(s) differ from the bundled package. ` +
-          `Using the on-disk copy as-is (wpi never overwrites it). To regenerate, delete the directory and re-run.`
+    const res = ensurePackageWiring(this.packageSourceDir, os.homedir(), agentSettingsPath(config.configDir));
+    if (res.copy.action === "upgraded") {
+      console.log(
+        `✓ replaced bundled package at ${res.copy.path} (${res.copy.differing.length} file(s) changed)`
       );
     }
     if (res.wire?.action === "added") {
       console.log(`✓ wired bundled package ${res.wire.packagePath}`);
-    } else if (res.wire?.action === "replaced" && res.wire.replacedFrom) {
-      console.log(`✓ wired bundled package ${res.wire.packagePath} (replaced ${res.wire.replacedFrom})`);
     } else if (res.wire?.action === "skipped-malformed") {
       console.error(
         `⚠ not wiring bundled package: ${agentSettingsPath(config.configDir)} exists but is not valid JSON. ` +
@@ -465,34 +446,33 @@ export class HostBackend implements RuntimeBackend {
   }
 
   /**
-   * Doctor's Package section (host mode, read-only): reports the versioned copy
+   * Doctor's Package section (host mode, read-only): reports the fixed copy
    * state, settings wiring state, and manifest-declared native binaries.
    */
   private buildPackageSection(config: ResolvedConfig): DoctorSection {
     const checks: DoctorCheck[] = [];
     const homeDir = os.homedir();
-    const version = this.wpiVersion();
-    const pkgDir = wpiPackageDir(homeDir, version);
+    const pkgDir = wpiPackageDir(homeDir);
     const settingsPath = agentSettingsPath(config.configDir);
 
     checks.push({ status: "info", label: "path", detail: pkgDir });
 
-    // Versioned copy state (read-only).
+    // Fixed copy state (read-only — compare, never write).
     if (!fs.existsSync(this.packageSourceDir)) {
       checks.push({ status: "info", label: "package copy", detail: `bundled package not found at ${this.packageSourceDir}` });
-    } else if (!fs.existsSync(pkgDir)) {
-      checks.push({ status: "info", label: "package copy", detail: "not present — will be copied on first run/build" });
     } else {
-      const copy = ensureWpiPackageCopy(this.packageSourceDir, homeDir, version);
-      checks.push(
-        copy.action === "in-sync"
-          ? { status: "ok", label: "package copy", detail: "in sync with bundled package" }
-          : {
-              status: "warn",
-              label: "package copy",
-              detail: `differs from bundled package (${copy.differing.length} file(s)) — wpi won't overwrite; delete to regenerate`,
-            }
-      );
+      const compare = compareWpiPackage(this.packageSourceDir, pkgDir);
+      if (compare.state === "missing") {
+        checks.push({ status: "info", label: "package copy", detail: "not present — will be copied on first run/build" });
+      } else if (compare.state === "in-sync") {
+        checks.push({ status: "ok", label: "package copy", detail: "in sync with bundled package" });
+      } else {
+        checks.push({
+          status: "info",
+          label: "package copy",
+          detail: `stale (${compare.differing.length} file(s) differ) — will be replaced on next run`,
+        });
+      }
     }
 
     // Settings wiring state (read-only; doctor never writes).

@@ -33,7 +33,7 @@ New user-facing surface:
 - `wpi doctor` — read-only health check (exit 0/1/2)
 - `wpi setup` — provisioning counterpart of doctor (exit 0/1/2)
 - `wpi shell` works in all four combinations
-- Host-mode package wiring (`~/.pi/wpi-package/<version>` + settings entry)
+- Host-mode package wiring (`~/.pi/.wpi/package` + settings entry, fixed path, shared with docker mode)
 - Two authored nono profiles: `wpi` (host) and `wpi-docker` (docker client)
 
 ## 2. Cross-cutting design principles
@@ -271,30 +271,35 @@ prereq error, surfaced in doctor's Platform section too.
 
 ## 7. Host package wiring (Phase 5, `src/runtime/package-wiring.ts`)
 
-Docker mode bakes `package/` into the image at `/opt/pi-package`; host mode needs
-the same extensions wired natively. Two artifacts:
+Both modes share one live copy at `~/.pi/.wpi/package/` (hidden wpi-owned
+state): docker mode bakes a bootstrap source into the image
+(`/opt/.wpi/package`) that the entrypoint syncs into the shared copy, while
+host mode maintains the copy directly. Two artifacts:
 
-**1. Versioned copy** — `~/.pi/wpi-package/<wpi-version>/`:
+**1. Fixed copy** — `~/.pi/.wpi/package/` (A2 model):
 
 ```ts
-export function ensureWpiPackageCopy(sourceDir, homeDir, wpiVersion): CopyResult {
+export function ensureWpiPackageCopy(sourceDir, homeDir): CopyResult {
   // absent → copy ("copied")
   // identical (sha256 tree compare) → "in-sync"
-  // differs → "collision": keep on-disk, report differing files
+  // differs → replace wholesale ("upgraded", with differing files reported)
 }
 ```
 
-An upgrade lands in a *new* directory, so the same version can only collide if
-the user edited the copy — exactly the case where overwriting would be hostile.
+The copy is disposable state, like `node_modules`: when the bundled source
+changes, wpi replaces it so upgrades actually land. Customizations belong in
+the user's own pi packages. Doctor never writes — it uses the read-only
+`compareWpiPackage` and reports a stale copy as "will be replaced on next run".
+The docker entrypoint mirrors this with a `diff -rq` compare against the baked
+source (excluding `node_modules`) before replacing.
 
-**2. Surgical settings merge** — adds the copy's absolute path to the `packages`
-array in `~/.pi/agent/settings.json`:
+**2. Append-only settings wiring** — adds the copy's absolute path to the
+`packages` array in `~/.pi/agent/settings.json` (pi resolves local paths from
+settings without copying):
 
-- user packages (string **or** object-form filter entries) and every other
-  settings key are preserved verbatim;
-- wpi replaces only entries it *owns*: a different `wpi-package/<version>`, or
-  the stale docker-mode default `/opt/pi-package` — and the latter only when
-  that path doesn't exist on the host (it only exists inside the image);
+- every existing entry (string **or** object-form filter entries) and every
+  other settings key are preserved verbatim — wpi never removes entries;
+- no-op when the path is already wired (no duplicate, no write);
 - a malformed settings file is left **untouched** (`skipped-malformed`).
 
 The manifest (`package/package.json`) declares what extensions need on the host:
@@ -403,10 +408,8 @@ Patterns worth knowing:
   doctor will warn until you sandbox.
 - Missing nono with the default config errors with the install command; it never
   silently runs unsandboxed.
-- Old docker-mode `settings.json` may hold `/opt/pi-package`; host mode replaces
-  it with the host path (only when `/opt/pi-package` doesn't exist on the host).
-- Upgrading wpi lands a new `~/.pi/wpi-package/<version>/`; delete old version
-  dirs when no longer needed.
+- Both modes share one package copy at `~/.pi/.wpi/package/` (the docker
+  entrypoint syncs the image's baked source into it).
 
 ## 14. Known limitations & future work
 

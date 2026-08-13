@@ -34,6 +34,7 @@ ENV VISUAL=nvim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    diffutils \
     git \
     gosu \
     gnupg \
@@ -58,9 +59,10 @@ COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN rm -f /usr/local/bin/pi \
     && ln -s ../lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi
 
-# Copy team package (source from build context, deps from builder)
-COPY package/ /opt/pi-package/
-COPY --from=builder /build/package/node_modules /opt/pi-package/node_modules
+# Copy team package (bootstrap source; the entrypoint syncs it to
+# ${USER_HOME}/.pi/.wpi/package — shared with host mode)
+COPY package/ /opt/.wpi/package/
+COPY --from=builder /build/package/node_modules /opt/.wpi/package/node_modules
 
 # Copy entrypoint
 COPY entrypoint.sh /opt/pi/entrypoint.sh

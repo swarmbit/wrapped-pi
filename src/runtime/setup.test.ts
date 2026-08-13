@@ -247,9 +247,9 @@ describe("HostBackend.setup", () => {
     ]);
     // Artifacts actually provisioned (setup is not read-only).
     expect(fs.existsSync(path.join(tmpHome, ".config", "nono", "profiles", "wpi.json"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpHome, ".pi", "wpi-package", "1.0.0", "extensions/sample.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpHome, ".pi", ".wpi", "package", "extensions/sample.ts"))).toBe(true);
     const settings = JSON.parse(fs.readFileSync(path.join(tmpHome, ".pi", "agent", "settings.json"), "utf-8"));
-    expect(settings.packages).toContain(path.join(tmpHome, ".pi", "wpi-package", "1.0.0"));
+    expect(settings.packages).toContain(path.join(tmpHome, ".pi", ".wpi", "package"));
     expect(report.steps.find((s) => s.label === "smoke test")?.detail).toContain("pi 0.84.1");
   });
 

@@ -48,8 +48,8 @@ describe("generateDockerfile", () => {
 
   it("copies team package source and deps", () => {
     const df = generateDockerfile();
-    expect(df).toContain("COPY package/ /opt/pi-package/");
-    expect(df).toContain("COPY --from=builder /build/package/node_modules /opt/pi-package/node_modules");
+    expect(df).toContain("COPY package/ /opt/.wpi/package/");
+    expect(df).toContain("COPY --from=builder /build/package/node_modules /opt/.wpi/package/node_modules");
   });
 
   it("copies settings and entrypoint", () => {
@@ -146,9 +146,12 @@ describe("generateEntrypoint", () => {
     expect(sh).toContain('if [ ! -f "${PI_SETTINGS}" ]; then');
   });
 
-  it("installs the team package via pi install", () => {
+  it("installs the team package via pi install at the shared ~/.pi/.wpi/package path", () => {
     const sh = generateEntrypoint();
-    expect(sh).toContain('gosu "${USERNAME}" pi install /opt/pi-package');
+    expect(sh).toContain('WPI_PACKAGE="${PI_HOME}/.wpi/package"');
+    expect(sh).toContain('gosu "${USERNAME}" pi install "${WPI_PACKAGE}"');
+    // Bootstrap: baked source at /opt/.wpi/package is synced into the shared copy.
+    expect(sh).toContain('cp -a /opt/.wpi/package "${WPI_PACKAGE}"');
   });
 
   it("drops privileges with gosu", () => {

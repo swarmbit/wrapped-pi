@@ -359,8 +359,8 @@ describe("HostBackend — Package section (doctor, read-only)", () => {
 
   it("reports in-sync copy, wired settings, and found native binary", async () => {
     // Pre-wire exactly what a first run would write (doctor itself never writes).
-    ensureWpiPackageCopy(tmpSource, tmpHome, "1.0.0");
-    wireSettings(agentSettingsPath(path.join(tmpHome, ".pi")), wpiPackageDir(tmpHome, "1.0.0"), tmpHome);
+    ensureWpiPackageCopy(tmpSource, tmpHome);
+    wireSettings(agentSettingsPath(path.join(tmpHome, ".pi")), wpiPackageDir(tmpHome));
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "pi --version") return "pi 0.84.1";
       if (cmd === "nono --version") return "nono 0.73.0";
@@ -375,16 +375,18 @@ describe("HostBackend — Package section (doctor, read-only)", () => {
     expect(pkg.checks.find((c) => c.label === "binary git")?.status).toBe("ok");
   });
 
-  it("warns on a collision between on-disk copy and bundled source", async () => {
-    const dest = wpiPackageDir(tmpHome, "1.0.0");
-    ensureWpiPackageCopy(tmpSource, tmpHome, "1.0.0");
+  it("reports a stale copy without writing (doctor is read-only)", async () => {
+    const dest = wpiPackageDir(tmpHome);
+    ensureWpiPackageCopy(tmpSource, tmpHome);
     fs.writeFileSync(path.join(dest, "extensions/sample.ts"), "// user edit\n");
 
     const report = await backend.doctor(hostConfig());
     const pkg = report.sections.find((s) => s.name === "Package")!;
     const copy = pkg.checks.find((c) => c.label === "package copy")!;
-    expect(copy.status).toBe("warn");
-    expect(copy.detail).toMatch(/won't overwrite/);
+    expect(copy.status).toBe("info");
+    expect(copy.detail).toMatch(/will be replaced on next run/);
+    // Doctor never writes: the on-disk edit survives inspection.
+    expect(fs.readFileSync(path.join(dest, "extensions/sample.ts"), "utf-8")).toBe("// user edit\n");
   });
 
   it("reports (none declared) when the manifest declares no native binaries", async () => {
@@ -428,7 +430,7 @@ describe("HostBackend — ensurePackageWiringOrWarn via build", () => {
     errSpy.mockRestore();
     logSpy.mockRestore();
 
-    const dest = wpiPackageDir(tmpHome, "1.0.0");
+    const dest = wpiPackageDir(tmpHome);
     expect(fs.existsSync(path.join(dest, "extensions/sample.ts"))).toBe(true);
     const settings = JSON.parse(fs.readFileSync(agentSettingsPath(path.join(tmpHome, ".pi")), "utf-8"));
     expect(settings.packages).toContain(dest);
