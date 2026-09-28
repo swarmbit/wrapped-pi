@@ -8,6 +8,8 @@
 //   web_screenshot — Capture a page screenshot
 //
 // Configuration (environment variables):
+//   WEB_SCREENSHOT_URL      — Optional Playwright screenshot service base URL.
+//   WEB_SCREENSHOT_TOKEN    — Shared token for that service. Returns inline PNGs.
 //   FIRECRAWL_API_KEY        — API key (required for cloud; may be
 //                              optional for self-hosted). If missing,
 //                              tools return a helpful error.
@@ -53,12 +55,16 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { registerBrowserTool } from "./browser";
 import { Type } from "typebox";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
 
 // ── Configuration ───────────────────────────────────────────
 
+// Optional local Playwright backend; fetch/search still use Firecrawl.
+const SCREENSHOT_URL = (process.env.WEB_SCREENSHOT_URL ?? "").replace(/\/$/, "");
+const SCREENSHOT_TOKEN = process.env.WEB_SCREENSHOT_TOKEN ?? "";
 const API_KEY = process.env.FIRECRAWL_API_KEY ?? "";
 const BASE_URL = (process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev").replace(/\/$/, "");
 const CACHE_TTL_MS = (parseInt(process.env.FIRECRAWL_CACHE_TTL ?? "300", 10) || 0) * 1000;
@@ -417,6 +423,7 @@ async function firecrawlRequest(
 // ── Extension ───────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  registerBrowserTool(pi, SCREENSHOT_URL, SCREENSHOT_TOKEN, url => isValidUrl(url) && isDomainAllowed(url));
   // ── Command: /web:status ──────────────────────────────
   pi.registerCommand("web:status", {
     description: "Show web extension configuration and cache stats",
@@ -436,6 +443,7 @@ export default function (pi: ExtensionAPI) {
         `Web extension status:\n` +
           `  API key: ${API_KEY ? "set" : "NOT SET"}\n` +
           `  Base URL: ${BASE_URL}\n` +
+          `  Screenshots: ${SCREENSHOT_URL || "Firecrawl"}\n` +
           `  Allowed domains: ${domains}\n` +
           `  Cache: ${cacheStatus}\n` +
           `  Verification: ${verifyStatus}`,
@@ -648,8 +656,8 @@ export default function (pi: ExtensionAPI) {
     name: "web_screenshot",
     label: "Web Screenshot",
     description:
-      "Capture a screenshot of a web page. Returns a URL to the " +
-      "screenshot image. Use for visual inspection of pages, UIs, " +
+      "Capture a screenshot of a web page. Returns an image (local Playwright) " +
+      "or image URL (Firecrawl). Use for visual inspection of pages, UIs, " +
       "or layouts.",
     promptSnippet: "web_screenshot(url, fullPage?) — capture a page screenshot",
     promptGuidelines: INJECTION_DEFENSE_GUIDELINES,
@@ -692,6 +700,21 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
+      if (SCREENSHOT_URL) {
+        try {
+          const image = await requestLocalScreenshot(SCREENSHOT_URL, SCREENSHOT_TOKEN, url, fullPage, signal);
+          return {
+            content: [
+              { type: "text" as const, text: `Screenshot of ${url}` },
+              { type: "image" as const, data: image, mimeType: "image/png" },
+            ],
+            details: { url, cached: false },
+          };
+        } catch (error) {
+          return errorResult(error instanceof Error ? error.message : "Screenshot failed");
+        }
+      }
+
       const cacheKey = `screenshot:${url}:${fullPage}`;
       const cached = cacheGet<string>(cacheKey);
       if (cached !== undefined) {
@@ -700,7 +723,7 @@ export default function (pi: ExtensionAPI) {
 
       const result = await firecrawlRequest(
         "/v2/scrape",
-        { url, formats: ["screenshot"] },
+        { url, formats: [{ type: "screenshot", fullPage }] },
         signal,
       );
 
@@ -720,6 +743,44 @@ export default function (pi: ExtensionAPI) {
       return textResult(`Screenshot URL: ${screenshotUrl}`, "", { url, screenshotUrl, cached: false });
     },
   });
+}
+
+export async function requestLocalScreenshot(
+  baseUrl: string, token: string, url: string, fullPage: boolean, signal?: AbortSignal,
+): Promise<string> {
+  if (!token) throw new Error("WEB_SCREENSHOT_TOKEN is required for local screenshots");
+  const timeout = AbortSignal.timeout(60_000);
+  const response = await fetch(`${baseUrl}/screenshot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ url, fullPage }),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  if (!response.ok) throw new Error(`Screenshot service returned HTTP ${response.status}`);
+  if (!response.headers.get("content-type")?.startsWith("image/png")) {
+    throw new Error("Screenshot service did not return a PNG image");
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Empty screenshot response");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 10 * 1024 * 1024) throw new Error("Screenshot exceeds 10 MB");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
+  const image = Buffer.concat(chunks);
+  if (!image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    throw new Error("Invalid PNG screenshot");
+  }
+  return image.toString("base64");
 }
 
 // ── Response helpers ────────────────────────────────────────
