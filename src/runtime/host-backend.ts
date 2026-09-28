@@ -138,7 +138,8 @@ export class HostBackend implements RuntimeBackend {
     // sandbox=none: bare pi, unsandboxed notice
     console.error("⚠ host mode is running UNSANDBOXED (sandbox.backend: none).");
     debugLog(`Running (unsandboxed): ${cmd.join(" ")}`);
-    const code = await this.spawnInherit(cmd, PI_BINARY);
+    // cmd is the full command (bin first): spawn only its args, not "pi" itself.
+    const code = await this.spawnInherit(cmd.slice(1), PI_BINARY);
     if (code !== 0 && code !== null) {
       console.error(`pi exited with status ${code}`);
       process.exit(code);
@@ -166,7 +167,7 @@ export class HostBackend implements RuntimeBackend {
 
     console.error("⚠ host shell is running UNSANDBOXED (sandbox.backend: none).");
     debugLog(`Running (unsandboxed): ${shellBin}`);
-    const code = await this.spawnInherit([shellBin], shellBin);
+    const code = await this.spawnInherit([], shellBin);
     if (code !== 0 && code !== null) {
       process.exit(code);
     }

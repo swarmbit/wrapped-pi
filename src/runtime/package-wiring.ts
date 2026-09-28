@@ -67,7 +67,9 @@ function sha256(p: string): string {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 }
 
-/** Recursively map relative path → sha256 for a directory. Skips nothing (source is wpi-owned). */
+/** Recursively map relative path → sha256 for a directory. Skips nothing
+ *  that is a regular file or dir; symlinks and special files are ignored
+ *  (dangling symlinks would make readFileSync throw). */
 function treeHash(dir: string): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (rel: string): void => {
@@ -75,7 +77,8 @@ function treeHash(dir: string): Map<string, string> {
     for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
       const entryRel = rel === "" ? entry.name : path.join(rel, entry.name);
       if (entry.isDirectory()) walk(entryRel);
-      else out.set(entryRel, sha256(path.join(dir, entryRel)));
+      else if (entry.isFile()) out.set(entryRel, sha256(path.join(dir, entryRel)));
+      // Symlinks / specials: never hashed.
     }
   };
   walk("");

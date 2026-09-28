@@ -173,11 +173,84 @@ describe("HostBackend.run port validation", () => {
   });
 });
 
+// ── HostBackend.run spawn arguments (regression: never `pi pi`) ─
+
+describe("HostBackend.run spawn arguments", () => {
+  let backend: HostBackend;
+  let tmpHome: string;
+  let tmpSource: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-run-")));
+    tmpSource = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-run-src-")));
+    vi.stubEnv("HOME", tmpHome);
+    fs.mkdirSync(path.join(tmpSource, "extensions"), { recursive: true });
+    fs.writeFileSync(path.join(tmpSource, "package.json"), JSON.stringify({ name: "wpi-defaults" }));
+    fs.writeFileSync(path.join(tmpSource, "extensions/sample.ts"), "export const x = 1;\n");
+    backend = new HostBackend({ packageSourceDir: tmpSource });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpSource, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  function spawnOk() {
+    return mockedSpawn.mockImplementation((() => ({
+      on: (event: string, cb: (code?: number) => void) => {
+        if (event === "close") cb(0);
+        return undefined;
+      },
+    })) as never);
+  }
+
+  it("host+none: spawns `pi` with only user args (never `pi pi`)", async () => {
+    const spawnSpy = spawnOk();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await backend.run(makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "none" }), ["pi"]);
+    errSpy.mockRestore();
+    expect(spawnSpy).toHaveBeenCalledWith("pi", [], { stdio: "inherit" });
+  });
+
+  it("host+none: forwards user args after pi", async () => {
+    const spawnSpy = spawnOk();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await backend.run(
+      makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "none" }),
+      ["pi", "-p", "hello"]
+    );
+    errSpy.mockRestore();
+    expect(spawnSpy).toHaveBeenCalledWith("pi", ["-p", "hello"], { stdio: "inherit" });
+  });
+
+  it("host+nono: hands the full command to nono after --", async () => {
+    const spawnSpy = spawnOk();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await backend.run(
+      makeHostConfig({ configDir: path.join(tmpHome, ".pi"), sandboxBackend: "nono" }),
+      ["pi", "-p", "hello"]
+    );
+    errSpy.mockRestore();
+    expect(spawnSpy).toHaveBeenCalledWith(
+      "nono",
+      ["run", "--profile", "wpi", "--allow-cwd", "--rollback", "--", "pi", "-p", "hello"],
+      { stdio: "inherit" }
+    );
+  });
+});
+
 describe("HostBackend.doctor", () => {
   let backend: HostBackend;
+  let tmpHome: string;
   beforeEach(() => {
     vi.clearAllMocks();
     backend = new HostBackend();
+    // Isolate doctor's package-section reads from the real ~/.pi (doctor
+    // inspects ~/.pi/.wpi/package via os.homedir()).
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-doctor-")));
+    vi.stubEnv("HOME", tmpHome);
     // commandAvailable(bin) returns true iff execSync doesn't throw. Make pi and
     // nono available so prereq/version probes succeed.
     mockedExecSync.mockImplementation((cmd: string) => {
@@ -185,6 +258,11 @@ describe("HostBackend.doctor", () => {
       if (cmd === "nono --version") return "nono 0.73.0";
       throw new Error("unexpected execSync: " + cmd);
     });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   it("produces sections Runtime, Sandbox, Profile, Pi, Platform, Package, Configuration (nono)", async () => {
@@ -238,14 +316,22 @@ describe("HostBackend.doctor", () => {
 
 describe("HostBackend.doctor — Profile section & route wins", () => {
   let backend: HostBackend;
+  let tmpHome: string;
   beforeEach(() => {
     vi.clearAllMocks();
     backend = new HostBackend();
+    tmpHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wpi-host-doctor2-")));
+    vi.stubEnv("HOME", tmpHome);
     mockedExecSync.mockImplementation((cmd: string) => {
       if (cmd === "pi --version") return "pi 0.84.1";
       if (cmd === "nono --version") return "nono 0.73.0";
       throw new Error("unexpected execSync: " + cmd);
     });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   it("includes a Profile section with a drift check (ok/info/warn are all valid; doctor is read-only)", async () => {
@@ -517,6 +603,7 @@ describe("HostBackend.shell", () => {
     logSpy.mockRestore();
     errSpy.mockRestore();
     expect(errOutput).toContain("UNSANDBOXED");
-    expect(spawnSpy).toHaveBeenCalledWith("/bin/bash", ["/bin/bash"], { stdio: "inherit" });
+    // $SHELL with NO arguments — never its own path as a script.
+    expect(spawnSpy).toHaveBeenCalledWith("/bin/bash", [], { stdio: "inherit" });
   });
 });

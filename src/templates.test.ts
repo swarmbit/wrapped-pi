@@ -155,8 +155,12 @@ describe("generateEntrypoint", () => {
     const sh = generateEntrypoint();
     expect(sh).toContain('WPI_PACKAGE="${PI_HOME}/.wpi/package"');
     expect(sh).toContain('gosu "${USERNAME}" pi install "${WPI_PACKAGE}"');
-    // Bootstrap: baked source at /opt/.wpi/package is synced into the shared copy.
-    expect(sh).toContain('cp -a /opt/.wpi/package "${WPI_PACKAGE}"');
+    // Bootstrap: baked source at /opt/.wpi/package is synced into the shared
+    // copy AS THE RUNTIME USER (cp -a chown would fail on the host-owned mount).
+    // node_modules is never copied (build artifact; pi provides peer packages).
+    expect(sh).toContain("tar -C /opt/.wpi/package --exclude=node_modules -cf - . | tar -C \"$1\" -xf -");
+    expect(sh).not.toContain("cp -a /opt/.wpi/package");
+    expect(sh).not.toContain("cp -r /opt/.wpi/package");
   });
 
   it("drops privileges with gosu", () => {

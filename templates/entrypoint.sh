@@ -73,8 +73,10 @@ if [ -d "${WPI_PACKAGE}" ] && ! diff -rq --exclude=node_modules /opt/.wpi/packag
   rm -rf "${WPI_PACKAGE}"
 fi
 if [ ! -d "${WPI_PACKAGE}" ]; then
-  mkdir -p "$(dirname "${WPI_PACKAGE}")"
-  cp -a /opt/.wpi/package "${WPI_PACKAGE}"
+  # Sync as the runtime user (the baked source is root-owned; `cp -a` chowns
+  # would fail on the host-owned mount). node_modules is excluded entirely —
+  # a build artifact; pi provides the peer packages itself.
+  gosu "${USERNAME}" sh -c 'mkdir -p "$1" && tar -C /opt/.wpi/package --exclude=node_modules -cf - . | tar -C "$1" -xf -' _ "${WPI_PACKAGE}"
 fi
 chown -R "${HOST_UID}:${HOST_GID}" "${PI_HOME}/.wpi" 2>/dev/null || true
 
