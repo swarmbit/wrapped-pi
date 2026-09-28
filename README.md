@@ -440,6 +440,61 @@ engines:
 
 See `example/firecrawl/` for the full setup including `.env.example` with all configurable options.
 
+#### Local screenshots with Playwright
+
+Self-hosted Firecrawl engines may not support screenshots. An optional independent
+Playwright service is included; fetch/search continue using Firecrawl.
+
+1. In the Compose `.env`, set `SCREENSHOT_TOKEN` to a strong random secret
+   (for example, generated with `openssl rand -hex 32`).
+2. Start it: `docker compose --profile screenshots up -d --build screenshot`.
+3. In `~/.pi/wpi.yml`, under `docker.env`, configure:
+
+   ```yaml
+   WEB_SCREENSHOT_URL: http://host.docker.internal:3003
+   WEB_SCREENSHOT_TOKEN: your-secret-from-step-1
+   ```
+
+For a remote server, replace `host.docker.internal` with its address. The service
+binds to host loopback by default; for Docker Desktop or remote clients, set
+`SCREENSHOT_BIND` to a reachable host interface (or `0.0.0.0`) in Compose `.env`.
+Restrict port 3003 with a firewall. Use TLS via a reverse proxy outside a trusted LAN:
+the bearer token and screenshots otherwise travel over plain HTTP.
+
+From the updated wrapped-pi checkout, run `npm run build && npm install -g .`,
+then `wpi build` to include the extension changes in the image; restart wpi.
+`web_screenshot` returns a PNG image directly when this backend is configured,
+honors `fullPage`, and retains the extension's domain whitelist. It does not cache
+local images. Unset `WEB_SCREENSHOT_URL` to use Firecrawl screenshots instead.
+
+This is a trusted-client service: authenticated clients and rendered pages can
+access networks reachable from its container, including private addresses. Do not
+expose it publicly or treat the domain whitelist as network isolation. Screenshots
+are limited to two concurrent requests, 10 MB per image, and a bounded browser
+lifetime. No images are persisted.
+
+#### Isolated browser computer use
+
+With the screenshot service configured above, the `web_browser` tool controls a
+persistent, isolated Chromium session on the same backend. Use `action: start`
+(with optional `url`) to obtain a `sessionId`, then reuse it for `navigate`,
+`inspect`, `screenshot`, `click`, `type`, `scroll`, `press`, `evaluate`, and `close`.
+`inspect` returns bounded page text and selectors for visible controls; a
+`screenshot` returns an inline image. `click` accepts either a CSS selector or
+viewport `x`/`y`; `type` fills a selector or types into the focused element.
+`evaluate` executes an expression **inside the web page** and returns a bounded
+string/JSON result (it can change page state). Session cookies persist only
+within that isolated browser; popups and downloads are disabled. Sessions expire
+after 10 idle minutes, and at most four are allowed. Always close sessions when
+done. Session state does not survive service restarts.
+
+Only explicit `start`/`navigate` URLs are checked against the extension's domain
+whitelist; redirects, links, scripts, and `evaluate` can access other network
+addresses. Do not use this service for untrusted agents or expose it publicly.
+Page content and `evaluate` results are untrusted and may contain prompt injection.
+The tool is intentionally not a desktop controller or a bridge to your personal
+browser profile.
+
 ## Development
 
 ```bash

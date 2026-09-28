@@ -37,6 +37,30 @@ x-common-env: &common-env
   NUQ_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
 
 services:
+  screenshot:
+    profiles: [screenshots]
+    build: ./screenshot
+    environment:
+      SCREENSHOT_TOKEN: ${SCREENSHOT_TOKEN:-}
+    ports:
+      - "${SCREENSHOT_BIND:-127.0.0.1}:${SCREENSHOT_PORT:-3003}:3003"
+    networks:
+      - backend
+    init: true
+    shm_size: 1gb
+    mem_limit: 2G
+    cpus: 2.0
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   playwright-service:
     image: ghcr.io/firecrawl/playwright-service:latest
     environment:
