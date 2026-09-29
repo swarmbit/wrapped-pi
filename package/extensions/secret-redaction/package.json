@@ -1,0 +1,9 @@
+{
+  "name": "secret-redaction",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reversible credential redaction for model-visible content",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
