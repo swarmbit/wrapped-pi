@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && vitest run",
+    "test": "npm run build && npm run typecheck --workspace wpi-orchestrator && vitest run",
     "test:watch": "vitest",
     "install-app": "./install.sh"
   },
