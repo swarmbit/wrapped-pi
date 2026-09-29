@@ -314,6 +314,7 @@ The default package includes several extensions:
 
 - **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
+- **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
 - **tps** — Displays tokens-per-second metrics after each agent run
 - **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
