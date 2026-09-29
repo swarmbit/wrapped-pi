@@ -16,8 +16,9 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Message } from "@earendil-works/pi-ai";
+import type { Message, Usage } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
@@ -29,11 +30,14 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { emptyUsage, sumUsage, UsageTracker } from "./usage.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const PREVIEW_CAP = 240;
+const UPDATE_INTERVAL_MS = 150;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -60,7 +64,9 @@ function formatUsageStats(
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
 	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+	if (usage.turns || usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost) {
+		parts.push(`$${usage.cost.toFixed(4)}`);
+	}
 	if (usage.contextTokens && usage.contextTokens > 0) {
 		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
 	}
@@ -146,7 +152,28 @@ interface UsageStats {
 	turns: number;
 }
 
+type RunStatus = "queued" | "running" | "completed" | "failed";
+
+interface ProgressNode {
+	id: string;
+	agent: string;
+	status: RunStatus;
+	startedAt?: number;
+	finishedAt?: number;
+	usage: UsageStats;
+	activity?: string;
+	children: ProgressNode[];
+}
+
 interface SingleResult {
+	id: string;
+	status: RunStatus;
+	startedAt?: number;
+	finishedAt?: number;
+	activity?: string;
+	currentTool?: { id: string; name: string; args: Record<string, unknown> };
+	children: ProgressNode[];
+	tokenUsage: Usage;
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
@@ -180,7 +207,59 @@ function getFinalOutput(messages: Message[]): string {
 }
 
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return result.status === "failed" || (result.status === "completed" && (result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted"));
+}
+
+function usageStats(usage: Usage, turns: number, contextTokens: number): UsageStats {
+	return {
+		input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+		cost: usage.cost.total, contextTokens, turns,
+	};
+}
+
+function totalUsage(results: SingleResult[]): Usage {
+	// Each root already includes the usage of its descendants. Do not sum the tree.
+	return sumUsage(...results.map((result) => result.tokenUsage));
+}
+
+function reportedToolUsage(result: any, toolName: string): Usage | undefined {
+	if (result?.usage) return result.usage;
+	// Older Pi versions or tool-result hooks may strip the optional usage field.
+	// Our details still carry one inclusive total per root lane.
+	if (toolName === "subagent" && Array.isArray(result?.details?.results)) {
+		return sumUsage(...result.details.results.map((r: SingleResult) => r.tokenUsage));
+	}
+	return undefined;
+}
+
+function summarizeNested(details: unknown, parentId: string, callId: string): ProgressNode[] {
+	if (!details || typeof details !== "object" || !Array.isArray((details as SubagentDetails).results)) return [];
+	return (details as SubagentDetails).results.map((result, index) => ({
+		id: `${parentId}/${callId}/${index + 1}`,
+		agent: result.agent,
+		status: result.status ?? (result.exitCode === -1 ? "running" : result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" ? "failed" : "completed"),
+		startedAt: result.startedAt,
+		finishedAt: result.finishedAt,
+		usage: result.usage,
+		activity: result.currentTool ? `using ${result.currentTool.name}` : result.activity,
+		children: (result.children || []).map((child) => prefixChildId(child, `${parentId}/${callId}/${index + 1}`)),
+	}));
+}
+
+function prefixChildId(child: ProgressNode, parentId: string): ProgressNode {
+	return { ...child, id: `${parentId}/${child.id}`, children: child.children.map((c) => prefixChildId(c, parentId)) };
+}
+
+function statusIcon(status: RunStatus): string {
+	return status === "running" ? "⏳" : status === "queued" ? "·" : status === "failed" ? "✗" : "✓";
+}
+
+function makeResult(id: string, agent: string, task: string, status: RunStatus, step?: number): SingleResult {
+	return {
+		id, agent, task, status, step, agentSource: "unknown", exitCode: status === "failed" ? 1 : -1,
+		messages: [], stderr: "", children: [], tokenUsage: emptyUsage(),
+		usage: usageStats(emptyUsage(), 0, 0),
+	};
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -266,6 +345,7 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 async function runSingleAgent(
 	defaultCwd: string,
+	id: string,
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
@@ -279,16 +359,9 @@ async function runSingleAgent(
 
 	if (!agent) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
-		return {
-			agent: agentName,
-			agentSource: "unknown",
-			task,
-			exitCode: 1,
-			messages: [],
-			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-			step,
-		};
+		const failed = makeResult(id, agentName, task, "failed", step);
+		failed.stderr = `Unknown agent: "${agentName}". Available agents: ${available}.`;
+		return failed;
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
@@ -298,25 +371,46 @@ async function runSingleAgent(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 
-	const currentResult: SingleResult = {
-		agent: agentName,
-		agentSource: agent.source,
-		task,
-		exitCode: 0,
-		messages: [],
-		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: agent.model,
-		step,
+	const currentResult = makeResult(id, agentName, task, "running", step);
+	currentResult.agentSource = agent.source;
+	currentResult.model = agent.model;
+	currentResult.startedAt = Date.now();
+	const tracker = new UsageTracker();
+	const activeTools = new Map<string, { id: string; name: string; args: Record<string, unknown> }>();
+	const nestedTools = new Map<string, ProgressNode[]>();
+	let turns = 0;
+	let contextTokens = 0;
+	let lastUpdate = 0;
+	let pendingUpdate: NodeJS.Timeout | undefined;
+	let heartbeat: NodeJS.Timeout | undefined;
+
+	const refresh = () => {
+		currentResult.tokenUsage = tracker.total;
+		currentResult.usage = usageStats(currentResult.tokenUsage, turns, contextTokens);
+		currentResult.currentTool = [...activeTools.values()].at(-1);
+		currentResult.children = [...nestedTools.values()].flat();
 	};
 
-	const emitUpdate = () => {
-		if (onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-				details: makeDetails([currentResult]),
-			});
+	const emitUpdate = (immediate = false) => {
+		if (!onUpdate) return;
+		const now = Date.now();
+		if (!immediate && now - lastUpdate < UPDATE_INTERVAL_MS) {
+			if (!pendingUpdate) pendingUpdate = setTimeout(() => {
+				pendingUpdate = undefined;
+				emitUpdate(true);
+			}, UPDATE_INTERVAL_MS - (now - lastUpdate));
+			return;
 		}
+		if (pendingUpdate) clearTimeout(pendingUpdate);
+		pendingUpdate = undefined;
+		refresh();
+		lastUpdate = now;
+		const snapshot = { ...currentResult, messages: currentResult.messages.slice(-20), usage: { ...currentResult.usage }, children: [...currentResult.children] };
+		onUpdate({
+			content: [{ type: "text", text: getFinalOutput(snapshot.messages) || "(running...)" }],
+			details: makeDetails([snapshot]),
+			usage: snapshot.tokenUsage,
+		});
 	};
 
 	try {
@@ -330,6 +424,8 @@ async function runSingleAgent(
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
+		emitUpdate(true);
+		heartbeat = setInterval(() => emitUpdate(true), 1000);
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
@@ -338,6 +434,9 @@ async function runSingleAgent(
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			let buffer = "";
+			const decoder = new StringDecoder("utf8");
+			let streamText = "";
+			let killTimer: NodeJS.Timeout | undefined;
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -348,36 +447,51 @@ async function runSingleAgent(
 					return;
 				}
 
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					currentResult.messages.push(msg);
-
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+				if (event.type === "message_start" && event.message?.role === "assistant") streamText = "";
+				if (event.type === "message_update") {
+					tracker.previewAssistant(event.usage);
+					if (event.assistantMessageEvent?.type === "text_delta") {
+						streamText = (streamText + event.assistantMessageEvent.delta).slice(-PREVIEW_CAP);
+						currentResult.activity = streamText.trim();
 					}
 					emitUpdate();
 				}
 
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
+				if (event.type === "message_end" && event.message) {
+					const msg = event.message as Message;
+					if (msg.role === "assistant") {
+						currentResult.messages.push(msg);
+						turns++;
+						tracker.completeAssistant(msg.usage);
+						contextTokens = msg.usage?.totalTokens || contextTokens;
+						if (!currentResult.model && msg.model) currentResult.model = msg.model;
+						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+						const text = msg.content.find((part) => part.type === "text");
+						if (text?.type === "text") currentResult.activity = text.text.slice(-PREVIEW_CAP).trim();
+					}
 					emitUpdate();
+				}
+
+				if (event.type === "tool_execution_start") {
+					activeTools.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, args: event.args || {} });
+					emitUpdate(true);
+				}
+				if (event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+					const result = event.type === "tool_execution_end" ? event.result : event.partialResult;
+					const toolUsage = reportedToolUsage(result, event.toolName);
+					if (event.type === "tool_execution_end") tracker.finishTool(event.toolCallId, toolUsage);
+					else tracker.updateTool(event.toolCallId, toolUsage);
+					if (event.toolName === "subagent" && result?.details) {
+						nestedTools.set(event.toolCallId, summarizeNested(result.details, id, event.toolCallId));
+					}
+					if (event.type === "tool_execution_end") activeTools.delete(event.toolCallId);
+					emitUpdate(event.type === "tool_execution_end");
 				}
 			};
 
 			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
+				buffer += decoder.write(data);
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
@@ -387,32 +501,43 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
+			const killProc = () => {
+				wasAborted = true;
+				proc.kill("SIGTERM");
+				killTimer = setTimeout(() => {
+					if (proc.exitCode === null) proc.kill("SIGKILL");
+				}, 5000);
+			};
 			proc.on("close", (code) => {
+				if (killTimer) clearTimeout(killTimer);
+				signal?.removeEventListener("abort", killProc);
+				buffer += decoder.end();
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				resolve(code ?? 1);
 			});
 
-			proc.on("error", () => {
+			proc.on("error", (error) => {
+				currentResult.stderr += error.message;
 				resolve(1);
 			});
 
 			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
 			}
 		});
 
 		currentResult.exitCode = exitCode;
+		currentResult.status = wasAborted || exitCode !== 0 || currentResult.stopReason === "error" || currentResult.stopReason === "aborted"
+			? "failed" : "completed";
+		currentResult.finishedAt = Date.now();
+		refresh(); // Accounting must work even when the caller does not subscribe to updates.
+		emitUpdate(true);
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		if (pendingUpdate) clearTimeout(pendingUpdate);
+		if (heartbeat) clearInterval(heartbeat);
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -545,6 +670,7 @@ export default function (pi: ExtensionAPI) {
 									onUpdate({
 										content: partial.content,
 										details: makeDetails("chain")(allResults),
+										usage: totalUsage(allResults),
 									});
 								}
 							}
@@ -552,6 +678,7 @@ export default function (pi: ExtensionAPI) {
 
 					const result = await runSingleAgent(
 						ctx.cwd,
+						`${_toolCallId}/${i + 1}`,
 						agents,
 						step.agent,
 						taskWithContext,
@@ -569,6 +696,7 @@ export default function (pi: ExtensionAPI) {
 						return {
 							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
 							details: makeDetails("chain")(results),
+							usage: totalUsage(results),
 							isError: true,
 						};
 					}
@@ -577,6 +705,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
 					details: makeDetails("chain")(results),
+					usage: totalUsage(results),
 				};
 			}
 
@@ -597,33 +726,29 @@ export default function (pi: ExtensionAPI) {
 
 				// Initialize placeholder results
 				for (let i = 0; i < params.tasks.length; i++) {
-					allResults[i] = {
-						agent: params.tasks[i].agent,
-						agentSource: "unknown",
-						task: params.tasks[i].task,
-						exitCode: -1, // -1 = still running
-						messages: [],
-						stderr: "",
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-					};
+					allResults[i] = makeResult(`${_toolCallId}/${i + 1}`, params.tasks[i].agent, params.tasks[i].task, "queued");
 				}
 
 				const emitParallelUpdate = () => {
 					if (onUpdate) {
-						const running = allResults.filter((r) => r.exitCode === -1).length;
-						const done = allResults.filter((r) => r.exitCode !== -1).length;
+						const running = allResults.filter((r) => r.status === "running").length;
+						const done = allResults.filter((r) => r.status === "completed" || r.status === "failed").length;
+						const queued = allResults.length - done - running;
 						onUpdate({
 							content: [
-								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
+								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running, ${queued} queued...` },
 							],
 							details: makeDetails("parallel")([...allResults]),
+							usage: totalUsage(allResults),
 						});
 					}
 				};
 
+				emitParallelUpdate();
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
+						`${_toolCallId}/${index + 1}`,
 						agents,
 						t.agent,
 						t.task,
@@ -660,12 +785,14 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: makeDetails("parallel")(results),
+					usage: totalUsage(results),
 				};
 			}
 
 			if (params.agent && params.task) {
 				const result = await runSingleAgent(
 					ctx.cwd,
+					`${_toolCallId}/1`,
 					agents,
 					params.agent,
 					params.task,
@@ -681,12 +808,14 @@ export default function (pi: ExtensionAPI) {
 					return {
 						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
 						details: makeDetails("single")([result]),
+						usage: result.tokenUsage,
 						isError: true,
 					};
 				}
 				return {
 					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
 					details: makeDetails("single")([result]),
+					usage: result.tokenUsage,
 				};
 			}
 
@@ -766,10 +895,27 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			const elapsed = (r: SingleResult): string => r.startedAt
+				? ` ${Math.floor(((r.finishedAt ?? Date.now()) - r.startedAt) / 1000)}s` : "";
+			const activity = (r: SingleResult): string => r.currentTool
+				? formatToolCall(r.currentTool.name, r.currentTool.args, theme.fg.bind(theme))
+				: theme.fg("muted", (r.activity || (r.status === "queued" ? "queued" : "waiting for output")).replace(/\s+/g, " ").slice(0, PREVIEW_CAP));
+			const renderChildren = (nodes: ProgressNode[], depth = 1): string => nodes.map((node) => {
+				const indent = "  ".repeat(depth);
+				const duration = node.startedAt ? ` ${Math.floor(((node.finishedAt ?? Date.now()) - node.startedAt) / 1000)}s` : "";
+				const line = `${indent}↳ ${statusIcon(node.status)} ${node.agent}${duration} ${theme.fg("dim", `↑${formatTokens(node.usage.input)} ↓${formatTokens(node.usage.output)} $${node.usage.cost.toFixed(4)}${node.children.length ? " (incl. nested)" : ""}`)}`;
+				const recent = node.activity ? `\n${indent}  ${theme.fg("muted", node.activity.replace(/\s+/g, " ").slice(0, PREVIEW_CAP))}` : "";
+				return line + recent + (node.children.length ? `\n${renderChildren(node.children, depth + 1)}` : "");
+			}).join("\n");
+			const rootSpend = (results: SingleResult[]): string => {
+				const usage = totalUsage(results);
+				return `↑${formatTokens(usage.input)} ↓${formatTokens(usage.output)} $${usage.cost.total.toFixed(4)} reported`;
+			};
+
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				const isError = isFailedResult(r);
-				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const icon = theme.fg(r.status === "failed" ? "error" : r.status === "completed" ? "success" : "warning", statusIcon(r.status));
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
@@ -783,6 +929,8 @@ export default function (pi: ExtensionAPI) {
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+					if (r.status === "running" || r.status === "queued") container.addChild(new Text(`Now: ${activity(r)}${elapsed(r)}`, 0, 0));
+					if (r.children.length) container.addChild(new Text(renderChildren(r.children), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
 					if (displayItems.length === 0 && !finalOutput) {
@@ -804,14 +952,14 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 					const usageStr = formatUsageStats(r.usage, r.model);
-					if (usageStr) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
-					}
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", usageStr ? `${usageStr} reported${r.children.length ? " (incl. nested)" : ""}` : rootSpend([r])), 0, 0));
 					return container;
 				}
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
+				if (r.status === "running" || r.status === "queued") text += `\n${activity(r)}${elapsed(r)}`;
+				if (r.children.length) text += `\n${renderChildren(r.children)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -820,26 +968,14 @@ export default function (pi: ExtensionAPI) {
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
 				const usageStr = formatUsageStats(r.usage, r.model);
-				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
+				text += `\n${theme.fg("dim", usageStr ? `${usageStr} reported${r.children.length ? " (incl. nested)" : ""}` : rootSpend([r]))}`;
 				return new Text(text, 0, 0);
 			}
 
-			const aggregateUsage = (results: SingleResult[]) => {
-				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
-				for (const r of results) {
-					total.input += r.usage.input;
-					total.output += r.usage.output;
-					total.cacheRead += r.usage.cacheRead;
-					total.cacheWrite += r.usage.cacheWrite;
-					total.cost += r.usage.cost;
-					total.turns += r.usage.turns;
-				}
-				return total;
-			};
-
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
-				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const successCount = details.results.filter((r) => r.status === "completed").length;
+				const isRunning = details.results.some((r) => r.status === "running" || r.status === "queued");
+				const icon = isRunning ? theme.fg("warning", "⏳") : successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 				if (expanded) {
 					const container = new Container();
@@ -855,7 +991,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = theme.fg(r.status === "failed" ? "error" : r.status === "completed" ? "success" : "warning", statusIcon(r.status));
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -868,6 +1004,8 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						if (r.status === "running") container.addChild(new Text(`Now: ${activity(r)}${elapsed(r)}`, 0, 0));
+						if (r.children.length) container.addChild(new Text(renderChildren(r.children), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -892,11 +1030,8 @@ export default function (pi: ExtensionAPI) {
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-					}
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", `Total: ${rootSpend(details.results)}`), 0, 0));
 					return container;
 				}
 
@@ -907,33 +1042,36 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = theme.fg(r.status === "failed" ? "error" : r.status === "completed" ? "success" : "warning", statusIcon(r.status));
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					if (r.status === "running") text += `\n${activity(r)}${elapsed(r)}`;
+					if (r.children.length) text += `\n${renderChildren(r.children)}`;
+					if (displayItems.length === 0) {
+						if (r.status !== "running") text += `\n${theme.fg("muted", "(no output)")}`;
+					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
-				const usageStr = formatUsageStats(aggregateUsage(details.results));
-				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+				text += `\n\n${theme.fg("dim", `Total: ${rootSpend(details.results)}`)}`;
 				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
 			}
 
 			if (details.mode === "parallel") {
-				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailedResult(r)).length;
-				const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r)).length;
-				const isRunning = running > 0;
+				const running = details.results.filter((r) => r.status === "running").length;
+				const queued = details.results.filter((r) => r.status === "queued").length;
+				const successCount = details.results.filter((r) => r.status === "completed").length;
+				const failCount = details.results.filter((r) => r.status === "failed").length;
+				const isRunning = running + queued > 0;
 				const icon = isRunning
 					? theme.fg("warning", "⏳")
 					: failCount > 0
 						? theme.fg("warning", "◐")
 						: theme.fg("success", "✓");
 				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
+					? `${successCount + failCount}/${details.results.length} done, ${running} running, ${queued} queued`
 					: `${successCount}/${details.results.length} tasks`;
 
-				if (expanded && !isRunning) {
+				if (expanded) {
 					const container = new Container();
 					container.addChild(
 						new Text(
@@ -944,7 +1082,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+						const rIcon = theme.fg(r.status === "failed" ? "error" : r.status === "completed" ? "success" : "warning", statusIcon(r.status));
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -953,6 +1091,8 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						if (r.status === "running" || r.status === "queued") container.addChild(new Text(`Now: ${activity(r)}${elapsed(r)}`, 0, 0));
+						if (r.children.length) container.addChild(new Text(renderChildren(r.children), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -977,33 +1117,24 @@ export default function (pi: ExtensionAPI) {
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-					}
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", `Total: ${rootSpend(details.results)}`), 0, 0));
 					return container;
 				}
 
-				// Collapsed view (or still running)
+				// Collapsed view
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
-					const rIcon =
-						r.exitCode === -1
-							? theme.fg("warning", "⏳")
-							: isFailedResult(r)
-								? theme.fg("error", "✗")
-								: theme.fg("success", "✓");
+					const rIcon = theme.fg(r.status === "failed" ? "error" : r.status === "completed" ? "success" : "warning", statusIcon(r.status));
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-					if (displayItems.length === 0)
-						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					if (r.status === "running" || r.status === "queued") text += `\n${activity(r)}${elapsed(r)}`;
+					if (r.children.length) text += `\n${renderChildren(r.children)}`;
+					if (displayItems.length === 0) {
+						if (r.status === "completed" || r.status === "failed") text += `\n${theme.fg("muted", "(no output)")}`;
+					} else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
-				if (!isRunning) {
-					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-				}
+				text += `\n\n${theme.fg("dim", `Total: ${rootSpend(details.results)}`)}`;
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
 			}

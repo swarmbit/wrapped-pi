@@ -5,10 +5,10 @@ Delegate tasks to specialized subagents with isolated context windows.
 ## Features
 
 - **Isolated context**: Each subagent runs in a separate `pi` process
-- **Streaming output**: See tool calls and progress as they happen
-- **Parallel streaming**: All parallel tasks stream updates simultaneously
+- **Streaming output**: See partial text, current tool, status, and elapsed time as they happen
+- **Parallel and nested progress**: Independent task lanes and nested subagent trees update together
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
-- **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
+- **Usage tracking**: Shows turns, tokens, reported cost, and context usage per agent; nested costs roll up once
 - **Abort support**: Ctrl+C propagates to kill subagent processes
 
 ## Structure
@@ -31,26 +31,10 @@ subagent/
 
 ## Installation
 
-From the repository root, symlink the files:
-
-```bash
-# Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.pi/agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
-
-# Symlink agents
-mkdir -p ~/.pi/agent/agents
-for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
-done
-
-# Symlink workflow prompts
-mkdir -p ~/.pi/agent/prompts
-for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/prompts/$(basename "$f")
-done
-```
+The extension is bundled with wpi. To use the sample agents and prompts, copy or
+symlink `package/extensions/subagent/agents/*.md` into `~/.pi/agent/agents/` and
+`package/extensions/subagent/prompts/*.md` into `~/.pi/agent/prompts/`.
+The extension itself loads from the bundled package; no extra symlink is needed.
 
 ## Security Model
 
@@ -101,18 +85,19 @@ Use a chain: first have scout find the read tool, then have planner suggest impr
 **Collapsed view** (default):
 - Status icon (✓/✗/⏳) and agent name
 - Last 5-10 items (tool calls and text)
-- Usage stats: `3 turns ↑input ↓output RcacheRead WcacheWrite $cost ctx:contextTokens model`
+- Usage stats: `3 turns ↑input ↓output RcacheRead WcacheWrite $cost ctx:contextTokens model` (reported so far while running)
+- Current tool, elapsed time, and nested agents with their inclusive usage
 
 **Expanded view** (Ctrl+O):
 - Full task text
 - All tool calls with formatted arguments
 - Final output rendered as Markdown
-- Per-task usage (for chain/parallel)
+- Per-task usage (for chain/parallel), including nested agents
 
 **Parallel mode streaming**:
-- Shows all tasks with live status (⏳ running, ✓ done, ✗ failed)
-- Updates as each task makes progress
-- Shows "2/3 done, 1 running" status
+- Shows all tasks with live status (· queued, ⏳ running, ✓ done, ✗ failed)
+- Updates as each task makes progress, including nested subagent tool calls
+- Shows "2/3 done, 1 running" status and aggregate reported cost
 - Returns each completed task's final output to the parent model, capped at 50 KB per task
 - Returns failure diagnostics from stderr/error messages when a child exits before producing output
 
@@ -173,3 +158,6 @@ Project agents override user agents with the same name when `agentScope: "both"`
 - Parallel model-visible output is capped at 50 KB per task; full results remain in tool details
 - Agents discovered fresh on each invocation (allows editing mid-session)
 - Parallel mode limited to 8 tasks, 4 concurrent
+- Cost during a model response can be zero until the provider reports usage; reported totals may lag actual spend
+- Nested agent cost is included in the parent row; do not sum every tree node to calculate the run total
+- Children still run in one-shot JSON mode (`--no-session`) and cannot be steered independently yet. See [PLAN.md](PLAN.md) for the RPC interaction milestone.

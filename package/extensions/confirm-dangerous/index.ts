@@ -1,9 +1,9 @@
 // ============================================================
 // confirm-dangerous — Prompt before destructive operations
 // ============================================================
-// Blocks or confirms potentially dangerous bash commands,
-// writes outside allowed paths, and modifications to the pi
-// config directory.
+// Blocks or confirms potentially dangerous bash commands and
+// writes outside allowed paths. Simple rm commands limited to the
+// workspace or /tmp do not require confirmation.
 //
 // Allowed paths outside the workspace:
 //   - /tmp            — temporary files (read, write, delete)
@@ -17,6 +17,8 @@
 // project directory name.
 // ============================================================
 
+import { lstatSync } from "node:fs";
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
@@ -30,11 +32,11 @@ const ALLOWED_OUTSIDE_PATHS = [
 ];
 
 // Patterns that indicate a dangerous bash command.
-// Commands targeting /tmp are exempt from rm patterns.
+// Simple rm commands limited to the workspace or /tmp are exempt.
 const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; description: string }> = [
-  { pattern: /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*--force\s+)/, description: "Force removal" },
-  { pattern: /\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s/, description: "Recursive removal" },
-  { pattern: /\brm\s+--no-preserve-root/, description: "Root filesystem removal" },
+  { pattern: /\brm\b[^\n;&|]*\s(?:-[a-zA-Z]*f[a-zA-Z]*|--force)(?=\s|$)/, description: "Force removal" },
+  { pattern: /\brm\b[^\n;&|]*\s(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$)/, description: "Recursive removal" },
+  { pattern: /\brm\b[^\n;&|]*\s--no-preserve-root(?=\s|$)/, description: "Root filesystem removal" },
   { pattern: /\bsudo\s+/, description: "Sudo command" },
   { pattern: /\bgit\s+push\s+.*(--force|-f)\b/, description: "Force push" },
   { pattern: /\bgit\s+push\s+.*--delete\b/, description: "Delete remote branch" },
@@ -58,13 +60,12 @@ export default function (pi: ExtensionAPI) {
     if (isToolCallEventType("bash", event)) {
       const command: string = event.input.command ?? "";
 
+      // Only exempt a standalone rm with verified targets. Other dangerous
+      // operations (including sudo and compound commands) still prompt.
+      if (isSafeRmCommand(command, WORKSPACE_DIR, ctx.cwd)) return;
+
       for (const { pattern, description } of DANGEROUS_PATTERNS) {
         if (pattern.test(command)) {
-          // Allow rm commands that only target /tmp
-          if (isTmpRmCommand(command)) {
-            return; // safe — removing files in /tmp
-          }
-
           const ok = await ctx.ui.confirm(
             "Dangerous Command",
             `${description}:\n\n${command}\n\nAllow this command?`
@@ -130,39 +131,119 @@ export function isAllowedPath(filePath: string): boolean {
   return isPiConfigDir(filePath) || isTmpPath(filePath);
 }
 
-/**
- * Check if a command is an rm-like command that only targets /tmp.
- * These are safe because /tmp is ephemeral and expected to be cleaned up.
- * Returns false for non-rm commands or rm commands that also target
- * paths outside /tmp (including sudo rm, which is always dangerous).
+/** Allow only a standalone rm whose literal targets are inside the workspace
+ * (not the workspace directory itself) or /tmp. Resolve relative paths from
+ * the bash tool's cwd; reject shell expansions/compound commands we cannot
+ * safely determine targets for.
  */
+export function isSafeRmCommand(command: string, workspaceDir: string = WORKSPACE_DIR, cwd: string = workspaceDir): boolean {
+  return isRmCommandWithin(command, workspaceDir, cwd, true);
+}
+
+// Retain the /tmp-only check for callers that need it.
 export function isTmpRmCommand(command: string): boolean {
-  // sudo rm is always dangerous regardless of target
-  if (/^\s*sudo\b/.test(command)) return false;
+  return isRmCommandWithin(command, WORKSPACE_DIR, WORKSPACE_DIR, false);
+}
 
-  // Must be an rm command (rm, rm -r, rm -rf, etc.)
-  // Check if ALL path arguments in the command are under /tmp
-  const rmMatch = command.match(/\brm\s+(-\w+\s+)*(.+)$/);
-  if (!rmMatch) return false;
+function isRmCommandWithin(command: string, workspaceDir: string, cwd: string, allowWorkspace: boolean): boolean {
+  const args = parseLiteralRmArgs(command);
+  if (!args) return false;
 
-  const pathPart = rmMatch[2];
-  // Split on common separators (spaces, &&, ||, ;, |) and check each token
-  // that looks like a path (starts with / or isn't a flag)
-  const tokens = pathPart.split(/\s+(?:&&|\|\|)?\s*|\s*;\s*|\s*\|\s*/);
-  for (const token of tokens) {
-    const trimmed = token.trim();
-    if (!trimmed) continue;
-    // Skip flags
-    if (trimmed.startsWith("-")) continue;
-    // If it's a path and it's not under /tmp, this rm is not limited to /tmp
-    if (trimmed.startsWith("/")) {
-      if (!isTmpPath(trimmed)) return false;
-    } else {
-      // Relative path — can't determine if it's /tmp, treat as unsafe
-      return false;
+  const workspace = path.resolve(workspaceDir);
+  let hasTarget = false;
+  let endOfOptions = false;
+  for (const arg of args) {
+    if (!endOfOptions && arg === "--") {
+      endOfOptions = true;
+      continue;
+    }
+    if (!endOfOptions && /^-[a-zA-Z]+$/.test(arg)) {
+      if (!/^-[rfRvdiI]+$/.test(arg)) return false;
+      continue;
+    }
+    if (!endOfOptions && arg.startsWith("--")) {
+      if (!["--force", "--recursive", "--verbose", "--dir"].includes(arg)) return false;
+      continue;
+    }
+    if (!endOfOptions && arg.startsWith("-")) return false;
+
+    // Don't infer the destination of tilde/variable/command expansions,
+    // parent traversal, or globs in directory components.
+    if (!arg || arg.startsWith("~") || arg.split("/").includes("..")) return false;
+    const parent = path.dirname(arg);
+    if (parent.includes("*") || parent.includes("?") || parent.includes("[")) return false;
+    const target = path.resolve(cwd, arg);
+    const inTmp = isTmpPath(target);
+    const inWorkspace = allowWorkspace && target !== workspace && isWithin(target, workspace);
+    if (!inTmp && !inWorkspace) return false;
+    if (target !== "/tmp" && hasSymlinkParent(target, inTmp ? "/tmp" : workspace)) return false;
+    // A trailing slash or /. can dereference a symlink used as the target.
+    if (arg.endsWith("/") || /\/\.(?:\/|$)/.test(arg)) {
+      try {
+        if (lstatSync(target).isSymbolicLink()) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      }
+    }
+    hasTarget = true;
+  }
+  return hasTarget;
+}
+
+function isWithin(target: string, directory: string): boolean {
+  const relative = path.relative(directory, target);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+// A path through a symlinked directory can remove files outside the mount,
+// even when its spelling starts with the workspace path.
+function hasSymlinkParent(target: string, boundary: string): boolean {
+  for (let parent = path.dirname(target); parent !== boundary; parent = path.dirname(parent)) {
+    if (parent === path.dirname(parent)) return true;
+    try {
+      if (lstatSync(parent).isSymbolicLink()) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
     }
   }
-  return true;
+  return false;
+}
+
+// A deliberately restricted shell-word parser: no pipelines, redirections,
+// substitutions, or additional commands. Quoting and escaped spaces are OK.
+function parseLiteralRmArgs(command: string): string[] | null {
+  const match = /^rm[ \t]+([^\r\n]+)$/.exec(command.trim());
+  if (!match) return null;
+
+  const args: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < match[1].length; i++) {
+    const char = match[1][i];
+    if (!quote && (char === " " || char === "\t")) {
+      if (started) args.push(word);
+      word = "";
+      started = false;
+    } else if (char === "\\" && quote !== "'") {
+      if (++i === match[1].length) return null;
+      word += match[1][i];
+      started = true;
+    } else if (char === quote) {
+      quote = null;
+    } else if (!quote && (char === "'" || char === '"')) {
+      quote = char;
+      started = true;
+    } else {
+      if (quote !== "'" && (char === "$" || char === "`")) return null;
+      if (!quote && (";&|<>(){}".includes(char) || (char === "#" && !started))) return null;
+      word += char;
+      started = true;
+    }
+  }
+  if (quote) return null;
+  if (started) args.push(word);
+  return args;
 }
 
 export { DANGEROUS_PATTERNS, WORKSPACE_DIR, ALLOWED_OUTSIDE_PATHS };

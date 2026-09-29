@@ -79,11 +79,9 @@ wpi dry-run            # print config and docker commands (debugging)
 │  │    ├── package.json                      │      into   │
 │  │    ├── extensions/                       │      image  │
 │  │    │   ├── confirm-dangerous/           │             │
-│  │    │   ├── tool-sanitizer/              │             │
+│  │    │   ├── secret-redaction/            │             │
 │  │    │   ├── worktree/                    │             │
-│  │    │   ├── llm-log/                     │             │
 │  │    │   ├── tps/                         │             │
-│  │    │   ├── git-files/                   │             │
 │  │    │   └── web/                         │             │
 │  │    └── themes/                          │             │
 │  │        └── github.json                  │             │
@@ -314,13 +312,54 @@ If you use pi both natively and in the container, they share the same config.
 
 The default package includes several extensions:
 
-- **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, etc.), writes to system paths, and modifications to the pi config directory
-- **tool-sanitizer** — Repairs malformed tool arguments before execution (disabled by default, toggle with `/tool-sanitizer:enable`)
+- **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
+- **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
+- **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
-- **llm-log** — Logs all LLM I/O as Markdown (`/llmlog on|off|status`)
 - **tps** — Displays tokens-per-second metrics after each agent run
-- **git-files** — TUI widget showing changed git files, with `/git-diff` picker
 - **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
+
+### Secret redaction
+
+Enabled automatically with the bundled package; no configuration or proxy is needed.
+After installing an updated wpi, run `wpi build` and start a new container.
+
+The extension learns credential values from environment variables, Pi `auth.json`
+and `models.json`, wpi configuration, and `.env`/`.env.*` and `.npmrc` files in the
+current directory. Files accessed through `read`, `edit`, or `write` are also scanned.
+Source scanning skips symlinks, non-regular files, and files larger than 1 MiB; it
+never executes credential commands or sources shell files. Request and tool-result
+text is inspected for credential field names, authorization headers, URL passwords,
+private keys, and common provider-token formats. Short/common values are masked only
+in credential contexts to avoid corrupting ordinary code.
+
+Detected values become opaque `__WPI_SECRET_...__` placeholders in user input,
+tool results, conversation context, system prompts, and provider request bodies.
+Before tool execution, placeholders in string arguments are restored. Original files,
+environment variables, and provider authentication remain unchanged. Subagent tasks
+stay masked, and child agents can resolve the same mappings. Compaction, branch
+summaries, and the web verification LLM also receive sanitized content.
+
+Mappings persist locally under `<agent-dir>/secret-redaction/` (normally
+`~/.pi/agent/secret-redaction/`) to support resume, reload, forks, and subagents.
+These files **contain plaintext credentials**, with `0600` files in `0700` directories;
+they are not included as session entries. Treat them as sensitive, including in backups.
+Removing them invalidates old placeholders; re-read the original credential source
+rather than reusing an unresolved token. Retain mappings while their sessions are useful.
+
+Unknown placeholders block tool execution. Literal shell substitutions containing
+shell metacharacters are also blocked: use a quoted environment-variable reference
+or load the credential from its local file instead. Sanitizer failures abort the
+operation and withhold content rather than returning the original request/output.
+
+**Scope:** this is best-effort LLM privacy, not credential isolation. Tools can still
+read secrets and use them in network requests. Detection can miss unknown formats,
+encoded/transformed values, partial values, and credentials in images or binary data;
+opaque provider signatures are left untouched. Local transcripts, partial tool output,
+and other extensions' logs are not guaranteed secret-free. Third-party extensions
+making direct LLM requests must explicitly use the shared
+`redactForLlm(value, ctx)` helper from `secret-redaction/state.ts`; arbitrary API calls
+and later hooks that reintroduce secrets are outside this filter's coverage.
 
 ### Web Extension (Firecrawl)
 

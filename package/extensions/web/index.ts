@@ -56,6 +56,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { registerBrowserTool } from "./browser";
+import { redactForLlm } from "../secret-redaction/state";
 import { Type } from "typebox";
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
@@ -341,8 +342,9 @@ async function verifyContent(
   }
 
   try {
-    const response = await completeSimple(model, guardContext, {
+    const response = await completeSimple(model, redactForLlm(guardContext, ctx), {
       apiKey: auth.apiKey,
+      onPayload: (payload: unknown) => redactForLlm(payload, ctx),
       signal: timeoutController.signal,
       maxTokens: 200,
       temperature: 0,

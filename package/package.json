@@ -5,7 +5,7 @@
   "description": "Default extensions and theme for wpi",
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./extensions"],
+    "extensions": ["./extensions/secret-redaction/index.ts", "./extensions"],
     "themes": ["./themes"],
     "skills": ["./skills"]
   },
