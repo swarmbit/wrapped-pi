@@ -312,7 +312,7 @@ If you use pi both natively and in the container, they share the same config.
 
 The default package includes several extensions:
 
-- **confirm-dangerous** — Prompts before destructive commands (`rm -rf`, `sudo`, force push, etc.), writes to system paths, and modifications to the pi config directory
+- **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
 - **tps** — Displays tokens-per-second metrics after each agent run

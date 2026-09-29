@@ -9,6 +9,9 @@
 // ============================================================
 
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 // Clear env var so the default /workspace is used in tests.
 // In production this is set by wpi, but tests need the default.
@@ -27,12 +30,13 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   default: {},
 }));
 
-import {
+import confirmDangerous, {
   isOutsideWorkspace,
   isPiConfigDir,
   isTmpPath,
   isAllowedPath,
   isTmpRmCommand,
+  isSafeRmCommand,
   DANGEROUS_PATTERNS,
   WORKSPACE_DIR,
 } from "./index";
@@ -187,6 +191,11 @@ describe("isTmpRmCommand", () => {
     expect(isTmpRmCommand("rm -rf /tmp/build /workspace/dist")).toBe(false);
   });
 
+  it("rejects compound commands even when rm targets /tmp", () => {
+    expect(isTmpRmCommand("rm -rf /tmp/build && sudo true")).toBe(false);
+    expect(isTmpRmCommand("rm -rf /tmp/build; rm -rf /etc")).toBe(false);
+  });
+
   it("rejects non-rm dangerous commands", () => {
     // sudo rm targets /tmp but sudo is always dangerous
     expect(isTmpRmCommand("sudo rm -rf /tmp/build")).toBe(false);
@@ -197,6 +206,73 @@ describe("isTmpRmCommand", () => {
   it("rejects rm with relative paths (can't determine if /tmp)", () => {
     expect(isTmpRmCommand("rm -rf build")).toBe(false);
     expect(isTmpRmCommand("rm -rf ./cache")).toBe(false);
+  });
+});
+
+// ── Workspace and /tmp removal exemption ────────────────────
+
+describe("isSafeRmCommand", () => {
+  it("allows standalone removal of files inside the workspace", () => {
+    for (const command of [
+      "rm -rf dist",
+      "rm -r ./build",
+      "rm -f src/index.ts",
+      "rm --force /workspace/cache",
+      "rm --recursive /workspace/output",
+      "rm -rf -- .cache",
+      "rm -rf 'build output'",
+      'rm -rf "build output"',
+      "rm -rf build\\ output",
+      "rm -rf dist/*",
+      "rm -rf /workspace/.cache /tmp/build",
+    ]) {
+      expect(isSafeRmCommand(command), command).toBe(true);
+    }
+  });
+
+  it("resolves relative paths from the actual bash cwd", () => {
+    expect(isSafeRmCommand("rm -rf output", "/workspace", "/workspace/sub")).toBe(true);
+    expect(isSafeRmCommand("rm -rf output", "/workspace", "/etc")).toBe(false);
+  });
+
+  it("requires confirmation for paths outside the workspace or its root", () => {
+    for (const command of [
+      "rm -rf /etc", "rm -rf ../other", "rm -rf /workspace/../etc",
+      "rm -rf /workspace-other/cache", "rm -rf /workspace",
+      "rm -rf .", "rm -rf /workspace/file /etc/file",
+      "rm -rf /tmp/cache ../other",
+    ]) {
+      expect(isSafeRmCommand(command), command).toBe(false);
+    }
+  });
+
+  it("rejects sudo, unsafe flags, shell expansion, and compound commands", () => {
+    for (const command of [
+      "sudo rm -rf /workspace/dist",
+      "rm -rf --no-preserve-root /workspace/dist",
+      "rm -rf /workspace/dist --no-preserve-root",
+      "rm -rf $TARGET", "rm -rf ${TARGET}", "rm -rf $(echo dist)",
+      "rm -rf ~/dist", "rm -rf /workspace/dir*/file",
+      "rm -rf dist && sudo true", "rm -rf dist; rm -rf /etc",
+      "rm -rf dist | cat", "rm -rf dist > /etc/log",
+      "rm -rf dist\nrm -rf /etc",
+      "rm -rf", "rm -rf --",
+    ]) {
+      expect(isSafeRmCommand(command), command).toBe(false);
+    }
+  });
+
+  it("rejects paths through symlinked workspace directories", () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "confirm-dangerous-"));
+    try {
+      symlinkSync("/etc", path.join(workspace, "link"));
+      expect(isSafeRmCommand(`rm -rf ${workspace}/link/file`, workspace)).toBe(false);
+      expect(isSafeRmCommand(`rm -rf ${workspace}/link/`, workspace)).toBe(false);
+      expect(isSafeRmCommand(`rm -rf ${workspace}/link/.`, workspace)).toBe(false);
+      expect(isSafeRmCommand(`rm -rf ${workspace}/link`, workspace)).toBe(true);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });
 
@@ -262,12 +338,20 @@ describe("DANGEROUS_PATTERNS", () => {
     expect(somePatternMatches("rm --force /tmp/thing")).toBe(true);
   });
 
-  it("matches rm -r", () => {
+  it("matches recursive flags even after other options", () => {
     expect(somePatternMatches("rm -r /tmp/dir")).toBe(true);
+    expect(somePatternMatches("rm -R /etc/dir")).toBe(true);
+    expect(somePatternMatches("rm -v --recursive /etc/dir")).toBe(true);
+  });
+
+  it("matches force flags even after other options", () => {
+    expect(somePatternMatches("rm -v -rf /etc/dir")).toBe(true);
+    expect(somePatternMatches("rm -v --force /etc/dir")).toBe(true);
   });
 
   it("matches rm --no-preserve-root", () => {
     expect(somePatternMatches("rm -rf --no-preserve-root /")).toBe(true);
+    expect(somePatternMatches("rm -v --no-preserve-root /")).toBe(true);
   });
 
   it("does not match plain rm", () => {
@@ -355,6 +439,38 @@ describe("DANGEROUS_PATTERNS", () => {
     ];
     for (const cmd of safe) {
       expect(somePatternMatches(cmd), `Matched safe command: ${cmd}`).toBe(false);
+    }
+  });
+});
+
+// ── Tool-call confirmation behavior ─────────────────────────
+
+describe("bash tool-call confirmations", () => {
+  async function callBash(command: string) {
+    let handler: (event: any, ctx: any) => Promise<unknown> = async () => undefined;
+    confirmDangerous({ on: (_name: string, callback: typeof handler) => { handler = callback; } } as any);
+    const confirm = vi.fn().mockResolvedValue(false);
+    const result = await handler({ toolName: "bash", input: { command } }, { cwd: "/workspace", ui: { confirm } });
+    return { confirm, result };
+  }
+
+  it("does not prompt to remove workspace files or /tmp files", async () => {
+    for (const command of ["rm -rf dist", "rm -rf /workspace/dist", "rm -rf /tmp/cache"]) {
+      const { confirm, result } = await callBash(command);
+      expect(confirm, command).not.toHaveBeenCalled();
+      expect(result, command).toBeUndefined();
+    }
+  });
+
+  it("prompts before removing files outside the workspace or using other dangerous operations", async () => {
+    for (const command of [
+      "rm -rf /etc", "rm -rf ../outside", "rm -rf dist && sudo true",
+      "sudo rm -rf dist", "rm -rf --no-preserve-root dist", "git push origin --force",
+      "rm -v -rf /etc", "rm -R /etc", "rm --recursive /etc",
+    ]) {
+      const { confirm, result } = await callBash(command);
+      expect(confirm, command).toHaveBeenCalledOnce();
+      expect(result, command).toMatchObject({ block: true });
     }
   });
 });
