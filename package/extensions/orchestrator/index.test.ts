@@ -158,6 +158,43 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
 }
 
 describe("orchestrator integration", () => {
+  it("offers help from the command and picker without enabling routing", async () => {
+    const h = harness();
+    await h.current.orchestrator.command("help", h.current.ctx);
+    const help = h.current.ctx.ui.notify.mock.calls.at(-1)[0];
+    for (const name of ["help", "new", "on", "off", "list", "status", "rename", "sessions", "attach", "compact", "drafts"]) {
+      expect(help).toContain(`/orchestrator ${name}`);
+    }
+    expect(help).not.toContain("__dispatch");
+    h.current.ctx.ui.select.mockResolvedValueOnce("Help — available commands");
+    await h.current.orchestrator.command("", h.current.ctx);
+    expect(h.current.ctx.ui.notify).toHaveBeenLastCalledWith(help, "info");
+    expect(runtimeFor(workspace).enabled).toBe(false);
+    expect(h.store().read().virtualSessions).toHaveLength(0);
+  });
+
+  it("hides inactive status while keeping explicit status available", async () => {
+    const h = harness();
+    const expectHidden = () => {
+      expect(h.current.ctx.ui.setStatus).toHaveBeenLastCalledWith("wpi-orchestrator", undefined);
+      expect(h.current.ctx.ui.setWidget).toHaveBeenLastCalledWith("wpi-orchestrator", undefined);
+    };
+    expectHidden();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    expect(h.current.ctx.ui.setWidget.mock.calls.at(-1)[1]).toBeTypeOf("function");
+    await h.current.orchestrator.command("off", h.current.ctx);
+    expectHidden();
+    h.current.orchestrator.observe(h.current.ctx);
+    expectHidden();
+    await h.current.orchestrator.command("status", h.current.ctx);
+    expect(h.current.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("Routing: paused"), "info");
+    expectHidden();
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    expect(h.current.ctx.ui.setWidget.mock.calls.at(-1)[1]).toBeTypeOf("function");
+    h.externalSwitch();
+    expectHidden();
+  });
+
   it("creates a named virtual session without adopting the entry transcript, then routes original multiline text once", async () => {
     const h = harness();
     const entryId = h.current.id;
@@ -187,11 +224,39 @@ describe("orchestrator integration", () => {
     expect(h.current.id).toBe(first);
     const data = h.store().read();
     expect(data.members).toHaveLength(1);
+    expect(data.members[0].summary).toMatch(/^Latest turn:\nuser: Now add tests for that/);
+    expect(data.members[0].summary).toContain("Implement OAuth");
+    expect(vi.mocked(backend.evaluate).mock.calls[0][1][0].summary).toContain("Implement OAuth");
     expect(data.requests).toHaveLength(2);
     expect(data.usage.filter(item => item.category === "worker")).toHaveLength(2);
     expect(data.usage.filter(item => item.category === "decision")).toHaveLength(1);
     h.current.orchestrator.observe(h.current.ctx);
     expect(h.store().read().usage).toHaveLength(3);
+  });
+
+  it("updates Current real after clarification selects a new or existing session", async () => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async () => ({
+      decision: { action: "clarify" as const, reason: "Uncertain" },
+    })) };
+    const h = harness(backend);
+    const currentRealLine = () => {
+      const factory = h.current.ctx.ui.setWidget.mock.calls.at(-1)[1];
+      return factory({}, h.current.ctx.ui.theme).render(1000)[1];
+    };
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const firstId = h.current.id;
+    expect(currentRealLine()).toContain("Atlas / Implement OAuth");
+    h.current.ctx.ui.select.mockResolvedValueOnce("Create a new focused session");
+    await h.submit("Set up Docker");
+    expect(h.current.id).not.toBe(firstId);
+    expect(currentRealLine()).toContain("Atlas / Set up Docker");
+    expect(currentRealLine()).not.toContain("Implement OAuth");
+    h.current.ctx.ui.select.mockResolvedValueOnce(`Continue: Atlas / Implement OAuth [${firstId.slice(0, 8)}]`);
+    await h.submit("Add OAuth tests");
+    expect(h.current.id).toBe(firstId);
+    expect(currentRealLine()).toContain("Atlas / Implement OAuth");
+    expect(currentRealLine()).not.toContain("Set up Docker");
   });
 
   it("clarifies when no backend is configured and restores cancelled input", async () => {
@@ -406,5 +471,12 @@ it("loads the extension without network requests or creating persistent state", 
   vi.stubEnv("WPI_ORCHESTRATOR_DECISION_URL", "file:///invalid");
   expect(() => extension(pi)).not.toThrow();
   expect(pi.registerCommand).toHaveBeenCalledWith("orchestrator", expect.any(Object));
+  const command = pi.registerCommand.mock.calls[0][1];
+  expect(command.getArgumentCompletions("").map((item: any) => item.value)).toContain("help");
+  expect(command.getArgumentCompletions("st")).toEqual([
+    { value: "status", label: "status", description: expect.any(String) },
+  ]);
+  expect(command.getArgumentCompletions("__dispatch")).toBeNull();
+  expect(command.getArgumentCompletions("new Atlas")).toBeNull();
   expect(pi.on.mock.calls.map((call: any[]) => call[0])).toContain("session_start");
 });

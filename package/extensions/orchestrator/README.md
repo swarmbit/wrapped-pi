@@ -46,12 +46,17 @@ session switches pause automatic routing; explicitly enable it again.
 
 ## Commands
 
+Type `/orchestrator ` to see subcommand autocomplete with descriptions, or run
+`/orchestrator help` for the full command reference. The `/orchestrator` picker
+also offers a help entry.
+
 | Command | Description |
 | --- | --- |
-| `/orchestrator` | Pick or create a named virtual session |
+| `/orchestrator` | Pick or create a named virtual session, or view help |
+| `/orchestrator help` | Show all available commands |
 | `/orchestrator new <name>` | Create and enable; names must be unique in the workspace |
 | `/orchestrator on <name-or-id>` | Resume and enable an existing virtual session |
-| `/orchestrator off` | Disable routing and restore the saved editor factory if still owned |
+| `/orchestrator off` | Disable routing, hide status, and restore the saved editor factory if still owned |
 | `/orchestrator list` | List virtual sessions, member counts, and aggregate usage |
 | `/orchestrator status` | Counts, detailed virtual/current-real usage, and cost categories |
 | `/orchestrator rename <name>` | Rename the selected virtual session without changing identity |
@@ -86,17 +91,26 @@ The endpoint must implement the Jev/System One `state` + typed `questions` proto
 for example a local Laya server. Authentication, if needed, uses
 `WPI_ORCHESTRATOR_DECISION_API_KEY`; never embed credentials in the URL. For Docker,
 use the appropriate reachable host/service address and pass the environment
-variables into the container.
+variables into the container. See the [Laya multilingual Docker Compose example](../../../example/laya/README.md)
+for a CPU-only Jev-compatible server, test request, and wpi configuration.
 
-Only up to three candidate cards are submitted. Direct classifier inputs are
-processed by the bundled shared secret-redaction helper before being sent.
-Endpoint configuration is an explicit authorization to send these cards and the
+Only up to three session context summaries are submitted. Each summary refreshes
+at every `turn_end`, at agent completion, and before routing. It is a bounded,
+extractive view of the active branch's latest three user/assistant turns, newest
+first; empty assistant messages and tool results are excluded. This adds no model
+calls. Routing uses this evolving context rather than the original request;
+existing registry `summary` fields remain compatible (the initial goal is only
+an empty-summary fallback).
+
+Direct classifier inputs are processed by the bundled shared secret-redaction
+helper before being sent. Endpoint configuration is an explicit authorization to
+send these session context summaries and the
 incoming request to that endpoint; review privacy and retention first.
 
-Scores above the experimental threshold/margin can choose continuation or new
-work. Ambiguous results, invalid candidates, over-budget requests, timeouts, and
-backend failures fall back to user selection. These thresholds are **not** a
-calibration guarantee. No physical-model selection or proactive economic
+The highest-scoring choice automatically selects continuation or new work when
+its score is **above 60%**, without an additional margin requirement. Scores at or
+below 60%, invalid candidates, over-budget requests, timeouts, and backend failures
+fall back to user selection. These scores are **not** calibrated certainty. No physical-model selection or proactive economic
 compaction is implemented yet.
 
 ## Editor compatibility
@@ -133,6 +147,10 @@ opt-in until `/orchestrator` enables routing.
 
 ## Usage and persistence
 
+The status widget and footer are shown only while routing is enabled; disabling
+or pausing routing hides both. `/orchestrator status` remains available while
+inactive for an explicit status report.
+
 Status shows virtual sessions created in this workspace, created/attached real
 members, the current real name/context size, and separate virtual/real token totals.
 It breaks down uncached input, cache reads, cache writes, and output. These cumulative
@@ -158,7 +176,7 @@ worker run. Contention fails closed. An abrupt process exit can leave `.lock` or
 one. Never remove a live process's lease. Arbitrary external tools or Pi instances
 without this extension are not forced to honor these locks.
 
-Registry cards contain task text and can contain sensitive local data; protect
+Registry session context summaries contain conversation text and can contain sensitive local data; protect
 backups like transcripts. Do not hand-edit membership boundaries or usage IDs.
 Interrupted requests are not replayed automatically: inspect the real transcript
 and workspace because tools may already have made changes.

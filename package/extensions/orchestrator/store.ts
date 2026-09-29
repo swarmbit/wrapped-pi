@@ -102,7 +102,7 @@ export class RegistryStore {
     });
   }
 
-  reconcile(realId: string, events: UsageEvent[], card?: { name: string; summary: string }): void {
+  reconcile(realId: string, events: UsageEvent[], context?: { name: string; summary: string }): void {
     this.update(data => {
       const member = data.members.find(item => item.id === realId);
       if (!member) return;
@@ -110,9 +110,9 @@ export class RegistryStore {
         const belongs = !member.baselineSources.includes(event.source);
         addUsage(data, { ...event, virtualId: belongs ? member.virtualId : undefined });
       }
-      if (card) {
-        member.name = card.name;
-        member.summary = card.summary;
+      if (context) {
+        member.name = context.name;
+        member.summary = context.summary;
         member.lastActivityAt = new Date().toISOString();
       }
     });

@@ -316,7 +316,7 @@ The default package includes several extensions:
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
 - **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
-- **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md))
+- **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md) and [local Laya Compose example](example/laya/README.md))
 - **tps** — Displays tokens-per-second metrics after each agent run
 - **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
 

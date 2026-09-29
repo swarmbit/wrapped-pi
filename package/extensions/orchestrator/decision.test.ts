@@ -21,8 +21,24 @@ describe("decision adapter", () => {
     expect(request.questions.route.type).toBe("choice");
     expect(request.model).toBe("multilingual");
     expect(request.state.sessions).toHaveLength(2);
+    expect(request.state.sessions[0].summary).toBe("PKCE tests");
+    expect(request.questions.route.criteria.S0).not.toContain("Implement OAuth callback");
   });
-  it("selects independent work only at a sufficient score margin", async () => {
+  it.each([0.6001, 0.61, 0.7, 0.85])("automatically continues a session above 60%% (score %s)", async score => {
+    response("S0", { NEW: 1 - score, S0: score, S1: 0 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("Follow up", members)).decision)
+      .toMatchObject({ action: "reuse", realId: "auth" });
+  });
+  it.each([0.5, 0.59, 0.6])("asks for clarification at or below 60%% (score %s)", async score => {
+    response("S0", { NEW: (1 - score) / 2, S0: score, S1: (1 - score) / 2 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("Follow up", members)).decision.action)
+      .toBe("clarify");
+  });
+  it("selects independent work above 60% without an additional margin", async () => {
+    response("NEW", { NEW: 0.61, S0: 0.39, S1: 0 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("New task", members)).decision.action).toBe("new");
+  });
+  it("selects independent work at a high score", async () => {
     response("NEW", { NEW: 0.96, S0: 0.02, S1: 0.02 });
     expect((await new SystemOneBackend("http://localhost", "m").evaluate("New task", members)).decision.action).toBe("new");
   });
@@ -48,6 +64,10 @@ describe("decision adapter", () => {
   });
   it.each(["file:///tmp/decisions", "https://user:password@example.com"])("rejects unsafe endpoint %s", url => {
     expect(() => new SystemOneBackend(url, "m")).toThrow("HTTP");
+  });
+  it("shortlists by current session context rather than the original goal", () => {
+    const evolved = members.map(member => ({ ...member, summary: member.id === "auth" ? "Laya multilingual setup" : "OAuth callback tests" }));
+    expect(shortlist("OAuth callback", evolved).map(item => item.id)).toEqual(["docker", "auth"]);
   });
   it("always includes the last visible member in the shortlist", () => {
     expect(shortlist("OAuth callback", members, "docker").map(item => item.id)).toEqual(["docker", "auth"]);

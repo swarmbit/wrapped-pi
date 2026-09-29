@@ -1,0 +1,17 @@
+{
+  "model": "multilingual",
+  "state": {
+    "request": "Fui cobrado duas vezes. Por favor, reembolse o pagamento duplicado."
+  },
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle the request?",
+      "criteria": {
+        "billing": "Payments, duplicate charges, and refunds",
+        "technical": "Software bugs and outages",
+        "other": "Other requests"
+      }
+    }
+  }
+}

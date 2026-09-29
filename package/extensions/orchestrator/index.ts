@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
-  type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+  type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { SystemOneBackend, shortlist, type DecisionBackend, type RoutingDecision } from "./decision";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
+import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
 import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
 import type { MemberSession, RuntimeState } from "./types";
@@ -17,6 +18,21 @@ type ReplacedSessionContext = Parameters<NonNullable<SwitchOptions["withSession"
 
 const UI_KEY = "wpi-orchestrator";
 const INTERNAL_PREFIX = "/orchestrator __dispatch ";
+const COMMANDS = [
+  { name: "help", usage: "help", description: "Show all orchestrator commands" },
+  { name: "new", usage: "new <name>", description: "Create and enable a named virtual session" },
+  { name: "on", usage: "on <name-or-id>", description: "Resume and enable a virtual session" },
+  { name: "off", usage: "off", description: "Disable routing and hide status" },
+  { name: "list", usage: "list", description: "List virtual sessions and usage" },
+  { name: "status", usage: "status", description: "Show detailed status and usage" },
+  { name: "rename", usage: "rename <name>", description: "Rename the selected virtual session" },
+  { name: "sessions", usage: "sessions", description: "Select a real member session" },
+  { name: "attach", usage: "attach [name-or-id]", description: "Attach the current real session after confirmation" },
+  { name: "compact", usage: "compact [instructions]", description: "Compact the current real session" },
+  { name: "drafts", usage: "drafts", description: "Restore a held unsent draft" },
+];
+const HELP = ["Orchestrator commands:", ...COMMANDS.map(command =>
+  `/orchestrator ${command.usage} — ${command.description}`)].join("\n");
 
 export function parseCommand(args: string): { action: string; argument: string } {
   const match = args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
@@ -31,12 +47,6 @@ function textOf(message: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.filter(item => item.type === "text" && typeof item.text === "string").map(item => item.text).join("\n");
-}
-
-function cardSummary(entries: SessionEntry[]): string {
-  return entries.filter(entry => entry.type === "message" && ["user", "assistant"].includes(entry.message.role))
-    .slice(-3).map(entry => entry.type === "message" ? `${entry.message.role}: ${textOf(entry.message).slice(0, 500)}` : "")
-    .join("\n").slice(0, 1500);
 }
 
 function realName(virtualName: string, text: string): string {
@@ -105,7 +115,7 @@ export class Orchestrator {
     if (store.read().members.some(member => member.id === id)) {
       store.reconcile(id, extractUsage(ctx.sessionManager.getEntries(), id), {
         name: ctx.sessionManager.getSessionName() || "Unnamed real session",
-        summary: cardSummary(ctx.sessionManager.getBranch()),
+        summary: sessionContextSummary(ctx.sessionManager.getBranch()),
       });
     }
     this.showStatus(ctx, store, state);
@@ -164,7 +174,7 @@ export class Orchestrator {
   private showStatus(ctx: ExtensionContext, store: RegistryStore, state: RuntimeState): void {
     const data = store.read();
     const virtual = data.virtualSessions.find(item => item.id === state.activeId);
-    if (!virtual) {
+    if (!state.enabled || !virtual) {
       ctx.ui.setStatus(UI_KEY, undefined);
       ctx.ui.setWidget(UI_KEY, undefined);
       return;
@@ -227,6 +237,7 @@ export class Orchestrator {
         });
         if (result.cancelled) {
           state.enabled = false;
+          this.showStatus(ctx, store, state);
           ctx.ui.notify("Session switch cancelled; routing remains paused.", "warning");
         }
       } finally { state.transition = undefined; }
@@ -242,8 +253,8 @@ export class Orchestrator {
     if (this.backend) {
       try {
         // Direct classifier calls do not pass through Pi's provider hooks.
-        const safeInput = redactForLlm({ text, cards: candidates.map(item => ({ goal: item.goal, summary: item.summary })) }, ctx);
-        const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.cards[index] }));
+        const safeInput = redactForLlm({ text, contexts: candidates.map(item => ({ summary: item.summary || item.goal })) }, ctx);
+        const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.contexts[index] }));
         const result = await this.backend.evaluate(safeInput.text, safeCandidates);
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: result.usage ?? normalizeUsage(undefined) });
         if (result.decision.action !== "clarify") return result.decision;
@@ -322,7 +333,7 @@ export class Orchestrator {
           await fresh.sendUserMessage(text);
           store.reconcile(realId, extractUsage(fresh.sessionManager.getEntries(), realId), {
             name: fresh.sessionManager.getSessionName() || "Unnamed real session",
-            summary: cardSummary(fresh.sessionManager.getBranch()),
+            summary: sessionContextSummary(fresh.sessionManager.getBranch()),
           });
           const lastAssistant = [...fresh.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
           const failed = lastAssistant?.type === "message" && lastAssistant.message.role === "assistant"
@@ -345,7 +356,7 @@ export class Orchestrator {
             if (!file) throw new Error("New Pi session is not persistent.");
             manager.appendSessionInfo(name);
             store.attach({ id: manager.getSessionId(), virtualId, file, name, goal: text.slice(0, 1000),
-              summary: "", lastActivityAt: new Date().toISOString(), origin: "created", baselineSources: [] }, []);
+              summary: `Latest turn:\nuser: ${text.slice(0, 300)}`, lastActivityAt: new Date().toISOString(), origin: "created", baselineSources: [] }, []);
           },
           withSession: deliver,
         });
@@ -387,6 +398,7 @@ export class Orchestrator {
     const { store, state } = this.initialize(ctx);
     const { action, argument } = parseCommand(args);
     if (action === "__dispatch") { await this.dispatch(argument, ctx); return; }
+    if (action === "help") { ctx.ui.notify(HELP, "info"); return; }
     if (state.busy && !["status", "list", "off"].includes(action)) {
       throw new Error("An orchestrator request is running. Wait for it to finish before changing sessions.");
     }
@@ -418,7 +430,7 @@ export class Orchestrator {
       if (!(await ctx.ui.confirm(`Attach current real session to ${virtual.name}?`, "Its context becomes a routing candidate. Earlier costs are excluded from the virtual total."))) return;
       if (!ctx.sessionManager.getSessionName()) this.pi.setSessionName(name);
       store.attach({ id, virtualId: virtual.id, file, name, goal: goal?.type === "message" ? textOf(goal.message).slice(0, 1000) : name,
-        summary: cardSummary(ctx.sessionManager.getBranch()), lastActivityAt: new Date().toISOString(), origin: "attached", baselineSources: [] }, extractUsage(ctx.sessionManager.getEntries(), id));
+        summary: sessionContextSummary(ctx.sessionManager.getBranch()), lastActivityAt: new Date().toISOString(), origin: "attached", baselineSources: [] }, extractUsage(ctx.sessionManager.getEntries(), id));
       await this.enable(virtual.id, ctx);
       return;
     }
@@ -443,6 +455,7 @@ export class Orchestrator {
       const events = data.usage.filter(item => item.virtualId === virtual?.id);
       const members = data.members.filter(item => item.virtualId === virtual?.id);
       const lines = [virtual ? `Orchestrator: ${virtual.name} [${virtual.id}]` : "No orchestrator selected.",
+        `Routing: ${state.enabled ? "on" : "paused"}`,
         `Virtual created: ${data.virtualSessions.length} | real created: ${members.filter(item => item.origin === "created").length} | attached: ${members.filter(item => item.origin === "attached").length} | members: ${members.length}`,
         `Registry: ${store.file}`, usageLine("Virtual total", sumUsage(events.map(item => item.usage)))];
       for (const category of ["worker", "tool", "decision", "summary", "warming"] as const) {
@@ -476,8 +489,10 @@ export class Orchestrator {
     if (!action) {
       const data = store.read();
       const labels = data.virtualSessions.map(item => `${item.name} [${item.id.slice(0, 8)}]`);
-      const choice = await ctx.ui.select("Orchestrator", ["Create a named virtual session", ...labels]);
-      if (choice === "Create a named virtual session") {
+      const choice = await ctx.ui.select("Orchestrator", ["Help — available commands", "Create a named virtual session", ...labels]);
+      if (choice === "Help — available commands") {
+        ctx.ui.notify(HELP, "info");
+      } else if (choice === "Create a named virtual session") {
         const name = await ctx.ui.input("Virtual session name");
         if (name !== undefined) await this.enable(store.create(name).id, ctx);
       } else if (choice) {
@@ -486,7 +501,7 @@ export class Orchestrator {
       }
       return;
     }
-    throw new Error("Usage: /orchestrator [new <name> | on <name-or-id> | off | list | status | rename <name> | sessions | attach | compact]");
+    throw new Error(`Unknown orchestrator command: ${action}. Use /orchestrator help for available commands.`);
   }
 }
 
@@ -505,7 +520,13 @@ export default function (pi: ExtensionAPI) {
     try { operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
   };
   pi.registerCommand("orchestrator", {
-    description: "Named virtual sessions, automatic editor routing, and usage totals",
+    description: "Named virtual sessions and routing; /orchestrator help lists commands",
+    getArgumentCompletions: prefix => {
+      const matches = COMMANDS.filter(command => command.name.startsWith(prefix.toLowerCase()));
+      return matches.length ? matches.map(command => ({
+        value: command.name, label: command.usage, description: command.description,
+      })) : null;
+    },
     handler: async (args, ctx) => {
       try { await orchestrator.command(args, ctx); }
       catch (error) {
@@ -521,6 +542,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", (event, ctx) => safe(ctx, () => orchestrator.shutdown(event.reason, ctx)));
   // Reconciliation, not a claim that low-level agent_end is the final settled boundary.
   // Awaited fresh-context dispatch performs the authoritative completion update.
+  pi.on("turn_end", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
   pi.on("agent_end", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
   pi.on("session_compact", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
   pi.on("session_tree", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));

@@ -30,7 +30,7 @@ export class SystemOneBackend implements DecisionBackend {
     candidates.forEach((candidate, index) => {
       const key = `S${index}`;
       ids.set(key, candidate.id);
-      options[key] = `Continue this exact task, not just a similar topic: ${candidate.goal.slice(0, 300)}`;
+      options[key] = `Continue session ${key} using its session context summary, not just similar keywords.`;
     });
     const response = await fetch(this.url, {
       method: "POST",
@@ -38,9 +38,9 @@ export class SystemOneBackend implements DecisionBackend {
       body: JSON.stringify({
         model: this.model,
         state: { request: text.slice(0, 4000), sessions: candidates.map((item, index) => ({
-          key: `S${index}`, summary: item.summary.slice(0, 500),
+          key: `S${index}`, summary: (item.summary || item.goal).slice(0, 1500),
         })) },
-        questions: { route: { type: "choice", instructions: "Which task does the request continue? Similar keywords alone do not imply continuity. Select NEW for independent work.", criteria: options } },
+        questions: { route: { type: "choice", instructions: "Which session context does the request continue? Use the session context summaries, prioritizing the latest turn. Similar keywords alone do not imply continuity. Select NEW for independent work.", criteria: options } },
       }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
     });
@@ -62,8 +62,8 @@ export class SystemOneBackend implements DecisionBackend {
     }
     ranked.sort((a, b) => b.score - a.score);
     if (ranked[0].key !== choice) throw new Error("Decision choice disagrees with probabilities.");
-    // Conservative experimental policy; these are scores, not a calibration claim.
-    const confident = ranked[0].score >= 0.85 && ranked[0].score - (ranked[1]?.score ?? 0) >= 0.2;
+    // Route automatically above 60%; these scores are not calibrated certainty.
+    const confident = ranked[0].score > 0.6;
     let usage: TokenUsage | undefined;
     if (payload.usage) {
       // System One bills input only and reports no separate prompt-cache fields.
@@ -82,7 +82,7 @@ export class SystemOneBackend implements DecisionBackend {
 export function shortlist(text: string, members: MemberSession[], lastId?: string): MemberSession[] {
   const words = new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) ?? []);
   const scored = members.map(member => ({ member, score: [...words].filter(word =>
-    `${member.goal} ${member.summary}`.toLocaleLowerCase().includes(word)).length }));
+    (member.summary || member.goal).toLocaleLowerCase().includes(word)).length }));
   scored.sort((a, b) => b.score - a.score || b.member.lastActivityAt.localeCompare(a.member.lastActivityAt));
   const recent = members.find(member => member.id === lastId);
   return [...(recent ? [recent] : []), ...scored.map(item => item.member).filter(item => item.id !== lastId)].slice(0, 3);
