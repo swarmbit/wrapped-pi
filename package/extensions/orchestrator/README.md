@@ -95,9 +95,12 @@ when the chat is rebuilt, including messages before compaction. Only each member
 active branch is displayed; abandoned branches are not merged into the conversation.
 Disabling routing restores the current real session's ordinary chat.
 
-Pi 0.79.1 has no public main-chat projection API. This feature uses a small,
-runtime-local adapter around its native chat renderer, isolated per terminal and
-removed on disable or shutdown. Unsupported renderer APIs produce a warning and
+Pi has no public main-chat projection API. This feature uses a small,
+runtime-local adapter supporting Pi 0.79.1's context renderer and Pi 0.99.1's
+entry/item renderer. It is isolated per terminal and detached on disable or
+shutdown. On Pi 0.99.1, only full-chat renders are projected; incremental entry
+slices (such as compaction updates) retain native rendering to avoid duplicate
+history. Unsupported renderer APIs produce a warning and
 fall back to real-session chat; unreadable member transcripts also fall back to
 native chat with a console diagnostic. Pi upgrades need compatibility testing.
 
@@ -195,7 +198,8 @@ factory creation. It does not globally capture Enter or replace modal editing.
   durable across process exits. A full cross-session execution queue is deferred.
 
 The checked development API version is Pi **0.79.1**; no Pi dependency upgrade was
-made. Other versions/editors need compatibility testing. The extension remains
+made. The history adapter also supports the Pi **0.99.1** renderer API.
+Other versions/editors need compatibility testing. The extension remains
 opt-in until `/orchestrator` enables routing.
 
 ## Usage and persistence
