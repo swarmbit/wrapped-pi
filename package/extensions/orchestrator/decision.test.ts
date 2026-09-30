@@ -11,6 +11,29 @@ function response(choice: string, probabilities: Record<string, number>) {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: { route: { choice, probabilities } }, usage: { input_tokens: 42, output_tokens: 0 } }))));
 }
 
+describe("handoff decision adapter", () => {
+  const input = { request: "Continue that", sourceSummary: "PKCE selected", destinationSummary: "OAuth", switchReason: "Required prior context", preservationNotes: "Keep pending tests" };
+  it.each(["NEEDED", "NOT_NEEDED"])("accepts a strong %s handoff decision", async choice => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: { handoff: { choice, probabilities: { NEEDED: choice === "NEEDED" ? 0.9 : 0.1, NOT_NEEDED: choice === "NOT_NEEDED" ? 0.9 : 0.1 } } }, usage: { input_tokens: 15, output_tokens: 0 } }))));
+    const result = await new SystemOneBackend("http://localhost", "decision-model").evaluateHandoff(input);
+    expect(result.needed).toBe(choice === "NEEDED");
+    expect(result.usage?.input).toBe(15);
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.model).toBe("decision-model");
+    expect(body.state).toEqual(input);
+    expect(body.questions.handoff.type).toBe("choice");
+  });
+  it.each([
+    { choice: "NEEDED", probabilities: { NEEDED: 0.6, NOT_NEEDED: 0.4 } },
+    { choice: "NOT_NEEDED", probabilities: { NEEDED: 0.9, NOT_NEEDED: 0.1 } },
+    { choice: "NEEDED", probabilities: { NEEDED: 0.9, NOT_NEEDED: 0.1, EXTRA: 0 } },
+    { choice: "NEEDED", probabilities: { NEEDED: 0.9 } },
+  ])("fails closed on malformed or ambiguous decisions", async answer => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: { handoff: answer } }))));
+    await expect(new SystemOneBackend("http://localhost", "m").evaluateHandoff(input)).rejects.toThrow();
+  });
+});
+
 describe("decision adapter", () => {
   it("selects an allowlisted continuation and keeps classification costs unknown", async () => {
     response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });

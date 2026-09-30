@@ -8,6 +8,8 @@ import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
 import { installCompaction } from "./compaction";
+import { prepareHandoff } from "./handoff";
+import { installSessionSwitch } from "./session-switch";
 import { historyMessages, savedBranch } from "./history";
 import { bindChatHistory } from "./history-ui";
 import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
@@ -82,6 +84,50 @@ export class Orchestrator {
     const { store, state } = this.initialize(ctx);
     return state.enabled && !!state.activeId &&
       store.read().members.some(member => member.id === ctx.sessionManager.getSessionId() && member.virtualId === state.activeId);
+  }
+
+  switchCandidates(ctx: ExtensionContext): MemberSession[] {
+    if (!this.compactionEnabled(ctx)) return [];
+    const { store, state } = this.initialize(ctx);
+    return store.read().members.filter(member => member.virtualId === state.activeId &&
+      member.id !== ctx.sessionManager.getSessionId() && existsSync(member.file));
+  }
+
+  scheduleSwitch(targetId: string, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    const { state, store } = this.initialize(ctx);
+    if (!this.switchCandidates(ctx).some(member => member.id === targetId)) throw new Error("Target is not another active virtual-session member.");
+    if (state.currentRequest?.modelSwitches) throw new Error("Only one model-requested switch is allowed per user submission.");
+    const target = store.read().members.find(member => member.id === targetId)!;
+    transcript(target, store.workspace);
+    const latest = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "user");
+    const text = state.currentRequest?.sessionId === ctx.sessionManager.getSessionId()
+      ? state.currentRequest.text : latest?.type === "message" ? textOf(latest.message) : "";
+    if (!text.trim()) throw new Error("No user request is available to transfer.");
+    const token = randomUUID();
+    state.pending.set(token, { text, virtualId: state.activeId!, modelSwitch: {
+      sourceId: ctx.sessionManager.getSessionId(), targetId, reason, preservationNotes,
+    } });
+    return token;
+  }
+
+  cancelSwitch(token: string, ctx: ExtensionContext): void {
+    this.initialize(ctx).state.pending.delete(token);
+  }
+
+  switchPending(handle: string, ctx: ExtensionContext): boolean {
+    return !!this.initialize(ctx).state.pending.get(handle)?.modelSwitch;
+  }
+
+  beforeRequest(prompt: string, ctx: ExtensionContext): void {
+    const { state } = this.initialize(ctx);
+    const current = state.currentRequest;
+    if (current?.awaitingDelivery && current.sessionId === ctx.sessionManager.getSessionId() &&
+        (prompt === current.text || prompt.startsWith(`${current.text}\n\n--- Orchestrator handoff:`))) {
+      current.awaitingDelivery = false;
+    } else {
+      // A new submission resets the switch budget even if its text is identical.
+      state.currentRequest = undefined;
+    }
   }
 
   private initialize(ctx: ExtensionContext): { store: RegistryStore; state: RuntimeState } {
@@ -166,6 +212,11 @@ export class Orchestrator {
       const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
       return decorateEditor(base, text => {
         if (!state.enabled || !isOrdinarySubmission(text)) return text;
+        // A newly submitted user draft supersedes a model's deferred switch,
+        // even when the command dispatcher is still busy finishing the old run.
+        for (const [handle, request] of state.pending) {
+          if (request.modelSwitch) state.pending.delete(handle);
+        }
         if (ctx.ui.getEditorComponent() !== this.wrapperFactory) {
           state.enabled = false;
           ctx.ui.notify("Editor ownership changed; routing paused.", "warning");
@@ -317,6 +368,11 @@ export class Orchestrator {
     const sourceId = ctx.sessionManager.getSessionId();
     const virtualId = envelope.virtualId;
     const text = envelope.text;
+    const modelSwitch = envelope.modelSwitch;
+    if (modelSwitch && (modelSwitch.sourceId !== sourceId || state.currentRequest?.modelSwitches)) {
+      state.pending.delete(token);
+      throw new Error("Model switch expired or its switch budget was exhausted.");
+    }
     let release: (() => void) | undefined;
     let replaced = false;
     let admitted = false;
@@ -344,7 +400,7 @@ export class Orchestrator {
       const currentContext = ctx.getContextUsage();
       const candidates: RoutingCandidate[] = shortlist(text,
         reconciled.members.filter(item => members.some(member => member.id === item.id)),
-        members.some(member => member.id === sourceId) ? sourceId : virtual.lastRealSessionId)
+        modelSwitch?.targetId ?? (members.some(member => member.id === sourceId) ? sourceId : virtual.lastRealSessionId))
         .map(member => ({
           ...member,
           isCurrent: member.id === sourceId,
@@ -355,7 +411,9 @@ export class Orchestrator {
               : { tokens: savedTokens.get(member.id) ?? null, contextWindow: null, estimated: true },
           },
         }));
-      const decision = await this.pickDecision(text, candidates, ctx, virtualId, token, store);
+      const decision: RoutingDecision | undefined = modelSwitch
+        ? { action: "reuse", realId: modelSwitch.targetId, reason: modelSwitch.reason }
+        : await this.pickDecision(text, candidates, ctx, virtualId, token, store);
       if (!decision) {
         store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
         ctx.ui.setEditorText(text);
@@ -363,6 +421,28 @@ export class Orchestrator {
         return;
       }
       if (!state.enabled || state.activeId !== virtualId) throw new Error("Orchestration was disabled before dispatch; no worker request was sent.");
+      const destination = decision.action === "reuse" ? candidates.find(item => item.id === decision.realId) : undefined;
+      if (decision.action === "reuse" && !destination) throw new Error("Decision selected a session outside the candidate allowlist.");
+      const handoffEpoch = state.epoch;
+      let deliveryText: string | undefined = text;
+      if ((decision.action === "new" || decision.realId !== sourceId) &&
+          ctx.sessionManager.getBranch().some(entry => entry.type === "message")) {
+        deliveryText = await prepareHandoff({
+          request: text,
+          sourceSummary: sessionContextSummary(ctx.sessionManager.getBranch()),
+          destinationSummary: destination?.summary || destination?.goal || "New session: no prior context.",
+          switchReason: decision.reason,
+          preservationNotes: modelSwitch?.preservationNotes,
+        }, ctx, this.backend, store, virtualId, token);
+      }
+      if (deliveryText === undefined) {
+        store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
+        ctx.ui.setEditorText(text);
+        ctx.ui.notify("Switch held; original request restored. No destination request was sent.", "warning");
+        return;
+      }
+      if (!state.enabled || state.activeId !== virtualId || state.epoch !== handoffEpoch ||
+          (modelSwitch && !state.pending.has(token))) throw new Error("Orchestration or user input changed during handoff preparation.");
       // Every route gets an awaited, fresh-context delivery in this first slice.
       // This also replaces the runtime on same-member reuse (documented limitation).
       const deliver = async (fresh: ReplacedSessionContext) => {
@@ -380,7 +460,8 @@ export class Orchestrator {
           if (realId !== sourceId) {
             fresh.ui.notify(`Session changed to ${fresh.sessionManager.getSessionName() || "Unnamed real session"}. ${decision.reason}`, "info");
           }
-          await fresh.sendUserMessage(text);
+          state.currentRequest = { sessionId: realId, text, modelSwitches: modelSwitch ? 1 : 0, awaitingDelivery: true };
+          await fresh.sendUserMessage(deliveryText!);
           store.reconcile(realId, extractUsage(fresh.sessionManager.getEntries(), realId), {
             name: fresh.sessionManager.getSessionName() || "Unnamed real session",
             summary: sessionContextSummary(fresh.sessionManager.getBranch()),
@@ -590,7 +671,10 @@ export default function (pi: ExtensionAPI) {
     catch { invalidBackend = true; }
   }
   const orchestrator = new Orchestrator(pi, backend);
-  installCompaction(pi, ctx => orchestrator.compactionEnabled(ctx));
+  const actionGate = {};
+  installCompaction(pi, ctx => orchestrator.compactionEnabled(ctx), undefined, actionGate);
+  const sessionSwitch = installSessionSwitch(pi, orchestrator, actionGate);
+  pi.on("before_agent_start", (event, ctx) => orchestrator.beforeRequest(event.prompt, ctx));
   const safe = (ctx: ExtensionContext, operation: () => void) => {
     try { operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
   };
@@ -607,6 +691,9 @@ export default function (pi: ExtensionAPI) {
       catch (error) {
         // Management errors occur before replacement; dispatch owns its fresh-context errors.
         try { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator command failed.", "error"); } catch { /* old runtime was invalidated */ }
+      } finally {
+        const command = parseCommand(args);
+        if (command.action === "__dispatch") sessionSwitch.finishDispatch(command.argument);
       }
     },
   });

@@ -168,6 +168,54 @@ user choices can still switch or create a session. The first request in an empty
 virtual session creates its first member without classification. These scores are
 **not** calibrated certainty or proof of necessity. No physical-model selection is implemented.
 
+## Session switches and handoffs
+
+Both classifier-selected switches and model-requested switches use the same
+handoff stage **before replacing the source runtime**. The configured System One
+decision model receives the original request, bounded source/destination context
+summaries, switch reason, and any model-supplied preservation notes. It answers a
+separate `handoff` choice question (`NEEDED` or `NOT_NEEDED`); automatic acceptance
+requires at least 80% score and a 60-percentage-point margin. The session model's
+notes never bypass this decision.
+
+When needed, the **source session's configured model** writes a bounded handoff
+through a separate tool-free registry call. Its recent transcript text and latest
+compaction summary are supplied as context; its conversation is not changed. The
+destination receives the original user request verbatim, followed by explicitly
+labelled supporting context. When no handoff is needed, the original request is
+sent unchanged. Staying in the same real session and the first request from an
+empty source skip this stage.
+
+No backend, unsupported custom backends, ambiguous/invalid responses, timeouts,
+or failed/empty/truncated handoff generation hold the switch for explicit user
+confirmation. You may cancel (restoring the original draft), provide bounded
+handoff text, or explicitly proceed without a handoff. No silent context-dropping
+fallback is used. Handoff decisions count as `decision` usage; generation counts
+as `summary` usage. Structured outbound decision inputs, source excerpts, and
+handoff text are secret-redacted. Endpoint configuration therefore also authorizes
+sending this handoff-decision data to that server; generation uses the source
+model's provider. Failed attempted calls retain unknown/partial usage.
+
+On **Pi 0.99.1+**, `request_session_switch` allows the session model to propose an
+existing real member of the enabled virtual session using `target_session_id`,
+`reason`, and `preservation_notes`. A bounded request-local member list exposes IDs
+and summaries without changing the system prompt. The tool cannot create sessions
+or select members of another virtual session. Switching must require unique prior
+context, not merely save tokens or match keywords.
+
+The tool returns **scheduled** and waits for final settlement and idle state before
+using Pi's supported command-dispatch bridge (`expandPromptTemplates: true`) to
+enter the existing command-capable dispatcher. It never switches during tool
+execution. The target receives the original request and any required handoff,
+using its own model and context, without another routing classification. Only one
+model-requested switch is allowed per user submission to prevent ping-pong.
+Pending switches and compaction requests are mutually exclusive. New input,
+queued input, shutdown, session changes, tree navigation, or compaction cancel
+pending switches. Requests are process-local and do not survive reload. Source
+model generation and the deferred switch tool require Pi 0.99.1+; older Pi can
+still route, but requires manual handoff input/confirmation when generation is
+needed.
+
 ## Model-requested compaction
 
 With routing enabled for the current member session on **Pi 0.99.1+**, the

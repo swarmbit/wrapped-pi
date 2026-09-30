@@ -85,7 +85,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
     const submitted: string[] = [];
     const ui = {
       notify: vi.fn((..._args: any[]) => assertAlive()),
-      select: vi.fn().mockResolvedValue("Create a new focused session"),
+      select: vi.fn(async (title: string) => title.startsWith("Handoff decision/") ? "Proceed without handoff" : "Create a new focused session"),
       confirm: vi.fn().mockResolvedValue(true),
       input: vi.fn(),
       getEditorComponent: () => { assertAlive(); return factory; },
@@ -137,6 +137,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
       }),
       sendUserMessage: vi.fn(async (text: string) => {
         assertAlive();
+        orchestrator.beforeRequest(text, ctx);
         idle = false;
         sent.push({ realId: id, text });
         entries.push({ type: "message", id: `user-${++serial}`, timestamp: `time-${serial}`, message: { role: "user", content: text } });
@@ -316,6 +317,60 @@ describe("orchestrator integration", () => {
     expect(displayedUsers()).toEqual([]);
     await h.current.orchestrator.command("on Atlas", h.current.ctx);
     expect(displayedUsers()).toEqual(["First task", "Different task", "Return to first task"]);
+  });
+
+  it("shares the handoff decision for classifier and model-requested switches", async () => {
+    const backend: DecisionBackend = {
+      evaluate: vi.fn(async (): Promise<DecisionResult> => ({ decision: { action: "new", reason: "Independent work", confidence: 0.99, margin: 0.98 } })),
+      evaluateHandoff: vi.fn(async () => ({ needed: false })),
+    };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const firstId = h.current.id;
+    await h.submit("Independent Docker work");
+    expect(backend.evaluateHandoff).toHaveBeenCalledOnce();
+    const routeCalls = vi.mocked(backend.evaluate).mock.calls.length;
+    const handle = h.current.orchestrator.scheduleSwitch(firstId, "OAuth context is required", "Preserve networking findings", h.current.ctx);
+    await h.current.orchestrator.command(`__dispatch ${handle}`, h.current.ctx);
+    expect(h.current.id).toBe(firstId);
+    expect(backend.evaluate).toHaveBeenCalledTimes(routeCalls);
+    expect(backend.evaluateHandoff).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(backend.evaluateHandoff!).mock.calls[1][0].preservationNotes).toBe("Preserve networking findings");
+    const targetId = h.store().read().members.find(member => member.id !== firstId)!.id;
+    expect(() => h.current.orchestrator.scheduleSwitch(targetId, "again", "", h.current.ctx)).toThrow("Only one");
+    h.current.orchestrator.beforeRequest("Independent Docker work", h.current.ctx);
+    expect(() => h.current.orchestrator.scheduleSwitch(targetId, "new submission", "", h.current.ctx)).not.toThrow();
+  });
+
+  it("generates a source-model handoff before replacing the runtime", async () => {
+    const backend: DecisionBackend = {
+      evaluate: vi.fn(async (): Promise<DecisionResult> => ({ decision: { action: "new", reason: "Independent work", confidence: 0.99, margin: 0.98 } })),
+      evaluateHandoff: vi.fn(async () => ({ needed: true })),
+    };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const complete = vi.fn().mockResolvedValue({ stopReason: "stop", content: [{ type: "text", text: "Preserve PKCE and unfinished tests" }], usage: { input: 20, output: 5 } });
+    h.current.ctx.model = { id: "source" };
+    h.current.ctx.modelRegistry = { complete };
+    await h.submit("Continue that in independent work");
+    expect(h.sent.at(-1)?.text).toContain("Continue that in independent work\n\n--- Orchestrator handoff");
+    expect(h.sent.at(-1)?.text).toContain("Preserve PKCE");
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("holds a switch when handoff confirmation is cancelled", async () => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async (): Promise<DecisionResult> => ({ decision: { action: "new", reason: "Independent", confidence: 0.99, margin: 0.98 } })) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const sourceId = h.current.id;
+    h.current.ctx.ui.select.mockResolvedValue("Cancel switch");
+    await h.submit("Another task");
+    expect(h.current.id).toBe(sourceId);
+    expect(h.sent).toHaveLength(1);
+    expect(h.current.editor.getText()).toBe("Another task");
   });
 
   it("uses a configured decision model to reuse the same member and aggregates calls once", async () => {

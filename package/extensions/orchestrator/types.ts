@@ -62,7 +62,8 @@ export interface RuntimeState {
   busy: boolean;
   epoch: number;
   transition?: { reason: "new" | "resume"; virtualId: string; targetFile?: string };
-  pending: Map<string, { text: string; virtualId: string }>;
+  pending: Map<string, { text: string; virtualId: string; modelSwitch?: { sourceId: string; targetId: string; reason: string; preservationNotes: string } }>;
+  currentRequest?: { sessionId: string; text: string; modelSwitches: number; awaitingDelivery?: boolean };
   history: Map<string, string>;
   heldDrafts: string[];
 }

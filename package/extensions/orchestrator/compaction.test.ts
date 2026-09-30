@@ -63,7 +63,7 @@ describe("deferred model-requested compaction", () => {
     await expect(f.call()).rejects.toThrow("unavailable");
   });
 
-  it.each(["before_agent_start", "session_start", "session_shutdown", "session_tree", "session_compact"])("cancels deferred work on %s, even after scheduling", async event => {
+  it.each(["input", "before_agent_start", "session_start", "session_shutdown", "session_tree", "session_compact"])("cancels deferred work on %s, even after scheduling", async event => {
     vi.useFakeTimers();
     const f = fixture();
     await f.call();
