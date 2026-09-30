@@ -91,8 +91,8 @@ export function installCompaction(pi: ExtensionAPI, enabled: (ctx: ExtensionCont
   pi.on("session_tree", reset);
   pi.on("session_compact", reset);
 
-  // Register by name through a compatibility type: the development API (0.79.1)
-  // predates this notification. Unsupported versions never accept requests.
+  // Register by name through a compatibility type; gate the feature by Pi version
+  // because older runtimes lack this notification. Unsupported versions never accept requests.
   const onSettled = pi.on.bind(pi) as unknown as (name: "agent_settled", handler: (event: unknown, ctx: ExtensionContext) => void) => void;
   if (options.supported) onSettled("agent_settled", (_event, ctx) => {
     const request = pending;

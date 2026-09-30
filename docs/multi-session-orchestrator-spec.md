@@ -689,7 +689,7 @@ Implementation must verify these contracts against the chosen pinned Pi release.
 
 ## 19. Implementation progress — first slice
 
-Implemented in `package/extensions/orchestrator/` against the repository's Pi 0.79.1 APIs without upgrading Pi:
+Implemented in `package/extensions/orchestrator/` against the repository's pinned Pi 0.99.1 APIs, with compatibility paths for Pi 0.79.1 where supported:
 
 - `/orchestrator` creation, activation, rename, list/status, member selection, explicit attachment, disable, and manual compaction.
 - Named virtual metadata and real membership, independently persisted with atomic JSON writes and exclusive mutation/execution locks. SQLite migration remains optional future work.

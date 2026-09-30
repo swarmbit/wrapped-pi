@@ -147,7 +147,7 @@ Here is every supported key in a `wpi.yml` file:
 ```yaml
 # ── Pi settings ────────────────────────────────────────────
 pi:
-  version: 0.79.1   # pin to a specific pi version (default: baked-in)
+  version: 0.99.1   # pin to a specific pi version (default: baked-in)
 
 # ── Docker settings ────────────────────────────────────────
 docker:
