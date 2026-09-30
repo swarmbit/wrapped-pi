@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
-  type ExtensionContext } from "@earendil-works/pi-coding-agent";
+  type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { SystemOneBackend, permitsModelSelection, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type ModelSelectionResult, type RoutingCandidate, type RoutingDecision } from "./decision";
 import { loadModelOptions, modelIdentity } from "./model-config";
@@ -96,12 +96,40 @@ export class Orchestrator {
       member.id !== ctx.sessionManager.getSessionId() && existsSync(member.file));
   }
 
-  scheduleSwitch(targetId: string, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+  listSessions(ctx: ExtensionContext) {
+    if (!this.compactionEnabled(ctx)) throw new Error("Enable orchestration in a member of the active virtual session first.");
     const { state, store } = this.initialize(ctx);
-    if (!this.switchCandidates(ctx).some(member => member.id === targetId)) throw new Error("Target is not another active virtual-session member.");
-    if (state.currentRequest?.modelSwitches) throw new Error("Only one model-requested switch is allowed per user submission.");
-    const target = store.read().members.find(member => member.id === targetId)!;
-    transcript(target, store.workspace);
+    this.observe(ctx);
+    return store.read().members.filter(member => member.virtualId === state.activeId && existsSync(member.file))
+      .map(member => {
+        const isCurrent = member.id === ctx.sessionManager.getSessionId();
+        const entries = transcript(member, store.workspace) as SessionEntry[];
+        const branch = isCurrent ? ctx.sessionManager.getBranch() : savedBranch(entries);
+        const context = isCurrent ? ctx.getContextUsage() : undefined;
+        return { id: member.id, name: member.name, isCurrent, lastActivityAt: member.lastActivityAt,
+          summary: sessionContextSummary(branch),
+          context: { tokens: context?.tokens ?? savedContextTokens(entries),
+            contextWindow: context?.contextWindow ?? null, estimated: !isCurrent || !context } };
+      });
+  }
+
+  scheduleSwitch(targetId: string, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    return this.scheduleSessionChange(targetId, reason, preservationNotes, ctx);
+  }
+
+  scheduleNewSession(reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    return this.scheduleSessionChange(undefined, reason, preservationNotes, ctx);
+  }
+
+  private scheduleSessionChange(targetId: string | undefined, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    const { state, store } = this.initialize(ctx);
+    if (!this.compactionEnabled(ctx)) throw new Error("Enable orchestration in a member of the active virtual session first.");
+    if (targetId !== undefined) {
+      if (!this.switchCandidates(ctx).some(member => member.id === targetId)) throw new Error("Target is not another active virtual-session member.");
+      const target = store.read().members.find(member => member.id === targetId)!;
+      transcript(target, store.workspace);
+    }
+    if (state.currentRequest?.modelSwitches) throw new Error("Only one model-requested session change is allowed per user submission.");
     const latest = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "user");
     const text = state.currentRequest?.sessionId === ctx.sessionManager.getSessionId()
       ? state.currentRequest.text : latest?.type === "message" ? textOf(latest.message) : "";
@@ -493,7 +521,9 @@ export class Orchestrator {
           },
         }));
       const decision: RoutingDecision | undefined = modelSwitch
-        ? { action: "reuse", realId: modelSwitch.targetId, reason: modelSwitch.reason }
+        ? modelSwitch.targetId === undefined
+          ? { action: "new", reason: modelSwitch.reason }
+          : { action: "reuse", realId: modelSwitch.targetId, reason: modelSwitch.reason }
         : await this.pickDecision(text, candidates, ctx, virtualId, token, store);
       if (!decision) {
         store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });

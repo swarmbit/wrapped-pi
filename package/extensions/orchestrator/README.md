@@ -316,8 +316,8 @@ model's provider. Failed attempted calls retain unknown/partial usage.
 
 On **Pi 0.99.1+**, `request_session_switch` allows the session model to propose an
 existing real member of the enabled virtual session using `target_session_id`,
-`reason`, and `preservation_notes`. A bounded request-local member list exposes IDs
-and summaries without changing the system prompt. The tool cannot create sessions
+`reason`, and `preservation_notes`. The agent uses `list_sessions` to discover IDs
+and recent context; no member-list message is injected. The switch tool cannot create sessions
 or select members of another virtual session. Switching should favor a clearly
 better-fitting task context, not merely save tokens or match keywords.
 
@@ -326,13 +326,50 @@ using Pi's supported command-dispatch bridge (`expandPromptTemplates: true`) to
 enter the existing command-capable dispatcher. It never switches during tool
 execution. The target receives the original request and any required handoff,
 using its own model and context, without another routing classification. Only one
-model-requested switch is allowed per user submission to prevent ping-pong.
+model-requested session change (switch or creation) is allowed per user submission
+to prevent ping-pong.
 Pending switches and compaction requests are mutually exclusive. New input,
 queued input, shutdown, session changes, tree navigation, or compaction cancel
 pending switches. Requests are process-local and do not survive reload. Source
 model generation and the deferred switch tool require Pi 0.99.1+; older Pi can
 still route, but requires manual handoff input/confirmation when generation is
 needed.
+
+### Agent session discovery and creation
+
+The orchestrator exposes four agent tools: `list_sessions`,
+`request_session_switch`, `request_new_session`, and `request_compaction`.
+They operate within the enabled virtual session; they are not global Pi session tools.
+
+No session-member lists or routing reminders are automatically injected into the
+conversation. Tool descriptions guide the agent to call **`list_sessions`** to inspect
+available members, including the current member, without changing sessions. Results
+include IDs, names, last activity, context-token estimates, and summaries of the
+latest ten user/assistant messages. Saved member transcripts are read without
+opening or migrating them, and their workspace/session identity is checked.
+
+The list is paginated with `offset` and `limit` (default/max ten), and `next_offset`
+indicates more results. List summaries are limited to 2,000 characters with an
+explicit `summary_truncated` flag. Use `session_id` for one member's longer summary
+(up to 12,000 characters). Tool calls in summaries indicate attempts, not verified
+success; summaries omit tool results and thinking. Outbound results are secret-redacted.
+Missing transcript files and other virtual sessions/workspaces are excluded;
+unreadable or identity-mismatched transcripts fail the listing rather than exposing
+a different session's context.
+
+**`request_new_session`** lets the agent schedule a fresh **real member**, not a
+new virtual session, when the incoming task is distinct or self-contained and
+no existing member fits. It takes `reason` and `preservation_notes`. Dependent
+follow-ups normally stay in the current member. The new member receives the original
+user request and any handoff selected by the normal >60% confidence gate; it uses
+the existing new-member model selector or falls back to the current model.
+
+Creation is deferred until final settlement and idle state through the same dispatcher
+as existing-member switches, without another routing-classifier call. The tool returns
+**scheduled**, not created. Creation and switching share a one-change-per-submission
+budget and are mutually exclusive with pending compaction. New/queued input,
+shutdown, session changes, tree navigation, and compaction cancel pending creation,
+just as they cancel pending switches. Pi 0.99.1+ is required for deferred actions.
 
 ## Model-requested compaction
 

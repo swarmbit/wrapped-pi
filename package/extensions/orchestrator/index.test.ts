@@ -494,6 +494,44 @@ describe("orchestrator integration", () => {
     expect(() => h.current.orchestrator.scheduleSwitch(targetId, "new submission", "", h.current.ctx)).not.toThrow();
   });
 
+  it("lists fresh context only from the active virtual session", async () => {
+    const h = harness();
+    expect(() => h.current.orchestrator.listSessions(h.current.ctx)).toThrow("Enable orchestration");
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const atlasId = h.current.id;
+    await h.current.orchestrator.command("new Other", h.current.ctx);
+    await h.submit("Unrelated private task");
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    const members = h.current.orchestrator.listSessions(h.current.ctx);
+    expect(members).toHaveLength(1);
+    expect(members[0]).toMatchObject({ id: atlasId, isCurrent: true });
+    expect(members[0].summary).toContain("Implement OAuth");
+    expect(JSON.stringify(members)).not.toContain("Unrelated private task");
+  });
+
+  it("creates a new member on a model request without reclassifying or allowing ping-pong", async () => {
+    const backend: DecisionBackend = {
+      evaluate: vi.fn(), evaluateHandoff: vi.fn(async () => ({ needed: false, confidence: 0.9 })),
+    };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("A distinct task");
+    const sourceId = h.current.id;
+    const sourceModel = h.current.ctx.model;
+    const handle = h.current.orchestrator.scheduleNewSession("This task needs focused context", "Keep exact identifiers", h.current.ctx);
+    expect(h.store().read().members).toHaveLength(1);
+    await h.current.orchestrator.command(`__dispatch ${handle}`, h.current.ctx);
+    expect(h.current.id).not.toBe(sourceId);
+    expect(h.current.ctx.model).toEqual(sourceModel);
+    expect(h.store().read().members).toHaveLength(2);
+    expect(h.sent.at(-1)?.text).toBe("A distinct task");
+    expect(backend.evaluate).not.toHaveBeenCalled();
+    expect(backend.evaluateHandoff).toHaveBeenCalledWith(expect.objectContaining({ preservationNotes: "Keep exact identifiers" }), expect.any(AbortSignal), undefined);
+    expect(() => h.current.orchestrator.scheduleNewSession("Again", "", h.current.ctx)).toThrow("Only one");
+    expect(() => h.current.orchestrator.scheduleSwitch(sourceId, "Again", "", h.current.ctx)).toThrow("Only one");
+  });
+
   it("generates a source-model handoff before replacing the runtime", async () => {
     const backend: DecisionBackend = {
       evaluate: vi.fn(async (): Promise<DecisionResult> => ({ decision: { action: "new", reason: "Independent work", confidence: 0.99, margin: 0.98 } })),

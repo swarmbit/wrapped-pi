@@ -67,7 +67,7 @@ export interface RuntimeState {
     fallbackModel?: { provider: string; id: string };
     modelError?: string;
   };
-  pending: Map<string, { text: string; virtualId: string; modelSwitch?: { sourceId: string; targetId: string; reason: string; preservationNotes: string } }>;
+  pending: Map<string, { text: string; virtualId: string; modelSwitch?: { sourceId: string; targetId?: string; reason: string; preservationNotes: string } }>;
   currentRequest?: { sessionId: string; text: string; modelSwitches: number; awaitingDelivery?: boolean };
   history: Map<string, string>;
   heldDrafts: string[];
