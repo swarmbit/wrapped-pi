@@ -316,6 +316,7 @@ The default package includes several extensions:
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
 - **dynamic-system-prompts** — Select Markdown instructions from `.pi/system-prompts/` to append to the session system prompt (`/system-prompts`; see [extension README](package/extensions/dynamic-system-prompts/README.md))
 - **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
+- **multiagent** — Persistent background agents with separate live Pi conversation views, steering, follow-ups, and individual stop controls (`/multiagents`; see `package/extensions/multiagent/README.md`)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
 - **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md) and [local Laya Compose example](example/laya/README.md))
 - **tps** — Displays tokens-per-second metrics after each agent run

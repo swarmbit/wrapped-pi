@@ -31,7 +31,7 @@ describe("deferred session-switch tool", () => {
   it("lists current and other members with bounded summaries and pagination", async () => {
     const f = fixture();
     f.orchestrator.listSessions.mockReturnValue(Array.from({ length: 12 }, (_, index) => ({
-      id: `member-${index}`, name: "Task", isCurrent: index === 0, summary: "x".repeat(13000),
+      id: `member-${index}`, name: "Task", isCurrent: index === 0, summary: JSON.stringify([{ role: "user", content: "x".repeat(13000) }]),
     })));
     const first = await f.list();
     expect(first.details.sessions).toHaveLength(10);

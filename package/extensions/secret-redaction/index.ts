@@ -45,7 +45,11 @@ export default function secretRedaction(pi: ExtensionAPI): void {
       const restored = session.redactor.restore(event.input, event.toolName === "bash" || event.toolName === "powershell");
       // A subagent is another model, not a credential-consuming application. Keep
       // its task masked; its extension resolves the same persisted token records.
-      if (event.toolName !== "subagent") Object.assign(event.input, restored);
+      if (event.toolName === "multiagent" || event.toolName === "multiagent_parent") {
+        // Restore local routing fields (e.g. cwd), never model-facing messages.
+        const { task: _task, message: _message, ...local } = restored as Record<string, unknown>;
+        Object.assign(event.input, local);
+      } else if (event.toolName !== "subagent") Object.assign(event.input, restored);
       const filename = (restored as Record<string, unknown>).path ?? (restored as Record<string, unknown>).file_path;
       if (typeof filename === "string" && ["read", "edit", "write"].includes(event.toolName)) {
         session.scanFile(path.resolve(ctx.cwd, filename));

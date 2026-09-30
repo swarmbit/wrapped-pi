@@ -1,0 +1,15 @@
+{
+  "name": "wpi-multiagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persistent interactive child agents for Pi",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.99.1",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  }
+}

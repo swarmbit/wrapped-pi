@@ -164,7 +164,12 @@ Routing itself does not trigger compaction; model-requested compaction is descri
 Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
 extractive view of the active branch's latest 50 nonempty user/assistant text
-messages, newest first. Full text is retained without character truncation; tool
+messages, newest first. New summaries remain JSON strings in the registry, encoding
+an array of `{ "role": "user"|"assistant", "content": "full message text" }`
+objects (newest first). The decision API receives that array as a genuine nested
+JSON array. UI lists and handoff consumers project structured summaries to readable
+role-prefixed text.
+Full text is retained without character truncation; tool
 calls, tool results, reasoning, and image payloads are excluded. Tool-only,
 reasoning-only, and whitespace-only messages do not count toward the limit.
 Assistant claims are not independent verification of successful actions. This

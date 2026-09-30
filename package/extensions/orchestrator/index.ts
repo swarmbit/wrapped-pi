@@ -6,7 +6,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { SystemOneBackend, permitsModelSelection, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type ModelSelectionResult, type RoutingCandidate, type RoutingDecision } from "./decision";
 import { loadModelOptions, modelIdentity } from "./model-config";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
-import { sessionContextSummary } from "./context-summary";
+import { readableSessionContextSummary, sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
 import { installCompaction } from "./compaction";
 import { prepareHandoff } from "./handoff";
@@ -542,8 +542,8 @@ export class Orchestrator {
           ctx.sessionManager.getBranch().some(entry => entry.type === "message")) {
         deliveryText = await prepareHandoff({
           request: text,
-          sourceSummary: sessionContextSummary(ctx.sessionManager.getBranch()),
-          destinationSummary: destination?.summary || "No prior context available.",
+          sourceSummary: readableSessionContextSummary(sessionContextSummary(ctx.sessionManager.getBranch())),
+          destinationSummary: destination ? readableSessionContextSummary(destination.summary) : "No prior context available.",
           switchReason: decision.reason,
           preservationNotes: modelSwitch?.preservationNotes,
           sourceContext: candidates.find(item => item.id === sourceId)?.metrics?.context,

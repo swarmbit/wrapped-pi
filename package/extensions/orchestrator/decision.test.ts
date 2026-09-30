@@ -133,7 +133,7 @@ describe("decision adapter", () => {
     expect(request.questions.route.type).toBe("choice");
     expect(request.model).toBe("english");
     expect(request.state.sessions).toHaveLength(2);
-    expect(request.state.sessions[0].messages).toBe("PKCE tests");
+    expect(request.state.sessions[0].messages).toEqual([]);
     expect(request.questions.route.criteria.S0).not.toContain("Implement OAuth callback");
   });
   it("emphasizes explicit session and handoff preferences in routing", async () => {
@@ -147,16 +147,28 @@ describe("decision adapter", () => {
     expect(body.questions.route.instructions).toContain("preserve that intent for the separate handoff decision");
     expect(body.questions.route.instructions).toContain("Do not invent an unlisted target or guess an ambiguous reference");
   });
+  it("always sends structured message arrays, treating invalid summaries as empty", async () => {
+    response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
+    const structured = JSON.stringify([{ role: "assistant", content: "Done" }, { role: "user", content: "Continue" }]);
+    await new SystemOneBackend("http://localhost", "m").evaluate("Continue", [
+      { ...members[0], summary: structured }, { ...members[1], summary: "not-json" },
+    ]);
+    const raw = vi.mocked(fetch).mock.calls[0][1]!.body as string;
+    const request = JSON.parse(raw);
+    expect(Array.isArray(request.state.sessions[0].messages)).toBe(true);
+    expect(request.state.sessions[0].messages).toEqual(JSON.parse(structured));
+    expect(request.state.sessions[1].messages).toEqual([]);
+  });
   it("sends full recent context without silently truncating it", async () => {
     response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
-    const summary = `assistant: Reviewing file.ts\n${"context".repeat(2000)}`;
+    const summary = JSON.stringify([{ role: "assistant", content: `Reviewing file.ts\n${"context".repeat(2000)}` }]);
     await new SystemOneBackend("http://localhost", "m").evaluate("Continue", [{ ...members[0], summary, isCurrent: true }, members[1]]);
     const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
-    expect(request.state.sessions[0].messages).toBe(summary);
+    expect(request.state.sessions[0].messages).toEqual(JSON.parse(summary));
     expect(request.questions.route.criteria.NEW).toContain("self-contained work");
     expect(request.questions.route.criteria.S1).toContain("clearly better fit");
     expect(request.questions.route.instructions).toContain("latest 50 nonempty user/assistant text messages");
-    expect(request.questions.route.instructions).toContain("Tool calls, tool results, and reasoning are excluded");
+    expect(request.questions.route.instructions).toContain("Tool calls, tool results, reasoning, and images are excluded");
   });
   it("includes session identifiers and context size but omits lifetime spending", async () => {
     response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
@@ -171,8 +183,8 @@ describe("decision adapter", () => {
     }));
     await new SystemOneBackend("http://localhost", "m").evaluate("Add tests", candidates);
     const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
-    expect(request.state.sessions[0]).toEqual({ key: "S0", id: "auth", name: "OAuth", isCurrent: false, messages: "PKCE tests", context: candidates[0].metrics?.context });
-    expect(request.state.sessions[1]).toEqual({ key: "S1", id: "docker", name: "Docker", isCurrent: false, messages: "Ports", context: candidates[1].metrics?.context });
+    expect(request.state.sessions[0]).toEqual({ key: "S0", id: "auth", name: "OAuth", isCurrent: false, messages: [], context: candidates[0].metrics?.context });
+    expect(request.state.sessions[1]).toEqual({ key: "S1", id: "docker", name: "Docker", isCurrent: false, messages: [], context: candidates[1].metrics?.context });
     expect(request.questions.route.instructions).toContain("Actively avoid growing very long sessions");
     expect(request.questions.route.instructions).toContain("Historical lifetime spending is sunk cost");
   });

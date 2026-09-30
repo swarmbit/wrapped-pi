@@ -22,7 +22,9 @@ subagent/
 │   ├── scout.md         # Fast recon, returns compressed context
 │   ├── planner.md       # Creates implementation plans
 │   ├── reviewer.md      # Code review
-│   └── worker.md        # General-purpose (full capabilities)
+│   ├── worker.md        # General-purpose (full capabilities)
+│   ├── expert.md        # Reasoning consultant, requests evidence from parent
+│   └── runner.md        # Executes concrete tool operations
 └── prompts/             # Workflow presets (prompt templates)
     ├── implement.md     # scout -> planner -> worker
     ├── scout-and-plan.md    # scout -> planner (no implementation)
@@ -136,6 +138,31 @@ Project agents override user agents with the same name when `agentScope: "both"`
 | `planner` | Implementation plans | Sonnet | read, grep, find, ls |
 | `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
 | `worker` | General-purpose | Sonnet | (all default) |
+| `expert` | Reasoning; evidence requests through parent | openai-codex/gpt-6-astra | multiagent_parent (managed multiagent child) |
+| `runner` | Concrete tool execution | openai-codex/gpt-6-luna | read, bash, edit, write, grep, find, ls |
+
+### Expert with runner through multiagent
+
+These two definitions support the parent-mediated workflow in the separate
+[`multiagent` extension](../multiagent/README.md). Expert no longer uses `subagent`
+or contacts runner directly: it requests evidence through `multiagent_parent`,
+and the parent assigns runner and relays results. Runner executes bounded tasks
+and uses its parent mailbox for questions, material updates, and completion reports.
+
+Install both definitions in the user agent directory. In this repository, select
+`/system-prompts multiagent` to use `.pi/system-prompts/multiagent.md`; for other
+projects, copy that prompt into `~/.pi/agent/system-prompts/`. This is the new
+persistent workflow, not the older `expert-runner` subagent preset.
+
+```json
+{"action":"start","agent":"expert","task":"Analyze the failing tests using this evidence: ... Request missing data from the parent and report your recommendation through multiagent_parent."}
+```
+
+Invoke that JSON with the `multiagent` tool, not `subagent`. Its managed children
+receive `multiagent_parent` automatically, including runner's restricted loadout.
+Expert's mailbox-only definition is intended for managed multiagent children;
+runner can still return normal responses when used outside this workflow.
+These tool lists select model-visible tools; they are not an OS security sandbox.
 
 ## Workflow Prompts
 

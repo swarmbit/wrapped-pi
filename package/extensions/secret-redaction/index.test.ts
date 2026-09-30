@@ -83,6 +83,23 @@ describe("extension round trip", () => {
     expect(getSessionSecrets(child).redactor.restore(task)).toBe(`Use ${secret}`);
   });
 
+  it("keeps multiagent tasks and steering masked while restoring local routing", async () => {
+    const redactor = getSessionSecrets(ctx).redactor;
+    const task = redactor.redact(`Use ${secret}`);
+    const message = redactor.redact(`Then check ${secret}`);
+    const cwd = redactor.redact(`/workspace/${secret}`);
+    const event = { toolName: "multiagent", input: { action: "start", agent: "runner", task, message, cwd } };
+    expect(await hooks.tool_call(event, ctx)).toBeUndefined();
+    expect(event.input.task).toBe(task);
+    expect(event.input.message).toBe(message);
+    expect(event.input.cwd).toBe(`/workspace/${secret}`);
+    const child = { ...ctx, sessionManager: { getSessionId: () => "multiagent-child" } };
+    expect(getSessionSecrets(child).redactor.restore(task)).toBe(`Use ${secret}`);
+    const reply = { toolName: "multiagent_parent", input: { kind: "question", message } };
+    expect(await hooks.tool_call(reply, ctx)).toBeUndefined();
+    expect(reply.input.message).toBe(message);
+  });
+
   it("blocks unknown placeholders without mutating arguments", async () => {
     const input = { content: "__WPI_SECRET_missing__" };
     const result = await hooks.tool_call({ toolName: "write", input }, ctx);

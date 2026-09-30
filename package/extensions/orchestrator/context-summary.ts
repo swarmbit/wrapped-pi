@@ -11,18 +11,30 @@ function messageContext(message: unknown): string {
   }).join("\n");
 }
 
-/** Extractive routing context: 50 full user/assistant text messages, newest first.
- * No model calls, text truncation, reasoning, tool calls, or tool results.
- * Non-text and whitespace-only messages do not count toward the limit.
- * Callers supply only the active branch.
- */
+/** Structured extractive context stored as a JSON string for registry compatibility. */
 export function sessionContextSummary(entries: SessionEntry[]): string {
-  const messages: string[] = [];
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const entry of entries) {
     if (entry.type !== "message" || !["user", "assistant"].includes(entry.message.role)) continue;
-    const text = messageContext(entry.message);
-    if (text.trim()) messages.push(`${entry.message.role}: ${text}`);
+    const content = messageContext(entry.message);
+    if (content.trim()) messages.push({ role: entry.message.role as "user" | "assistant", content });
   }
-  return messages.slice(-50).reverse().map((message, index) =>
-    `${index === 0 ? "Latest message" : "Earlier message"}:\n${message}`).join("\n\n");
+  return JSON.stringify(messages.slice(-50).reverse());
+}
+
+export type ContextMessage = { role: "user" | "assistant"; content: string };
+
+/** Decode structured summaries; invalid or absent stored data yields an empty context. */
+export function decodeSessionContextSummary(summary: string): ContextMessage[] {
+  let value: unknown;
+  try { value = JSON.parse(summary); } catch { return []; }
+  if (!Array.isArray(value) || value.some(item => !item || typeof item !== "object" || Array.isArray(item) ||
+      !["user", "assistant"].includes(item.role) || typeof item.content !== "string")) return [];
+  return value.map(item => ({ role: item.role, content: item.content }));
+}
+
+/** Human-readable projection for UI and text-only consumers. */
+export function readableSessionContextSummary(summary: string): string {
+  return decodeSessionContextSummary(summary).map((message, index) =>
+    `${index === 0 ? "Latest message" : "Earlier message"}:\\n${message.role}: ${message.content}`).join("\\n\\n");
 }
