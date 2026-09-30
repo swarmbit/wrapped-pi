@@ -147,7 +147,7 @@ Here is every supported key in a `wpi.yml` file:
 ```yaml
 # ── Pi settings ────────────────────────────────────────────
 pi:
-  version: 0.79.1   # pin to a specific pi version (default: baked-in)
+  version: 0.99.1   # pin to a specific pi version (default: baked-in)
 
 # ── Docker settings ────────────────────────────────────────
 docker:
@@ -314,8 +314,10 @@ The default package includes several extensions:
 
 - **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
+- **dynamic-system-prompts** — Select Markdown instructions from `.pi/system-prompts/` to append to the session system prompt (`/system-prompts`; see [extension README](package/extensions/dynamic-system-prompts/README.md))
 - **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
+- **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md) and [local Laya Compose example](example/laya/README.md))
 - **tps** — Displays tokens-per-second metrics after each agent run
 - **web** — Firecrawl-based web browsing and scraping tools (`web_fetch`, `web_search`, `web_screenshot`)
 
@@ -332,6 +334,24 @@ never executes credential commands or sources shell files. Request and tool-resu
 text is inspected for credential field names, authorization headers, URL passwords,
 private keys, and common provider-token formats. Short/common values are masked only
 in credential contexts to avoid corrupting ordinary code.
+
+To add credential field or environment-variable names, set `secretRedaction.keys`
+in `~/.pi/wpi.yml` or the project's `.pi/wpi.yml`:
+
+```yaml
+secretRedaction:
+  keys:
+    - CUSTOM_CREDENTIAL
+    - databaseCode
+```
+
+Both lists are combined with built-in detection. Names match exactly after
+camelCase, case, and separator normalization (`databaseCode` matches
+`DATABASE_CODE`); they are not regexes or suffix patterns. Values under these names
+are learned from environment variables, scanned files, structured fields, and text
+assignments. Changes are picked up on the next request; previously learned secrets
+remain protected for the session. Invalid key lists block redaction rather than
+silently disabling it. Do not put secret values in this list.
 
 Detected values become opaque `__WPI_SECRET_...__` placeholders in user input,
 tool results, conversation context, system prompts, and provider request bodies.

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Orchestrator · Decision logs</title>
+  <link rel="stylesheet" href="./style.css">
+  <script defer src="./logs.js"></script>
+  <script defer src="./viewer.js"></script>
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">WPI / ORCHESTRATOR</p><h1>Decision logs</h1><p class="subtitle">Follow the request. Understand the decision.</p></div>
+    <div class="actions"><button id="load" class="primary">Open logs</button><button id="reload" disabled>Reload files</button><button id="clear" disabled>Clear</button></div>
+  </header>
+  <input id="files" type="file" multiple hidden>
+  <section class="import" id="drop" aria-label="Load log files"><span id="file-label">Drop JSONL logs here, or choose Open logs.</span><span class="privacy">Local only · no uploads · no telemetry</span></section>
+  <p id="notice" role="status" aria-live="polite"></p>
+  <section id="stats" class="stats" aria-label="Decision statistics"></section>
+  <section class="filters" aria-label="Filters">
+    <label class="search">Search<input id="search" type="search" placeholder="Request, model, session, error, or ID…" autocomplete="off"></label>
+    <label>Decision<select id="kind"><option value="">All kinds</option><option value="routing">Routing</option><option value="handoff">Handoff</option><option value="model">Worker model</option><option value="unknown">Unknown</option></select></label>
+    <label>Status<select id="status"><option value="">All statuses</option><option value="ok">Successful</option><option value="error">Errors / fallbacks</option><option value="incomplete">Incomplete</option></select></label>
+    <span id="count" class="muted"></span>
+  </section>
+  <main>
+    <section class="history" aria-label="Decision history"><div class="section-title">DECISION HISTORY <span>Newest first</span></div><div id="calls"></div></section>
+    <section class="details" aria-label="Selected decision"><div id="detail-empty" class="empty"><h2>Your decisions, in context.</h2><p>Load logs from <code>/orchestrator debug status</code> and select a decision to inspect it.</p><p>Choose current logs and rotated backups together. Malformed lines are skipped; overlapping snapshots are deduplicated.</p></div><div id="detail" hidden></div></section>
+  </main>
+  <footer>TPS is estimated end-to-end throughput, not decoder speed. Unknown metrics are shown as —. Logs may contain sensitive task context even after redaction.</footer>
+</body>
+</html>

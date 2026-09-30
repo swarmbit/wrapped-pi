@@ -1,0 +1,850 @@
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
+  type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { SystemOneBackend, permitsModelSelection, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type ModelSelectionResult, type RoutingCandidate, type RoutingDecision } from "./decision";
+import { loadModelOptions, modelIdentity } from "./model-config";
+import { decorateEditor, isOrdinarySubmission } from "./editor";
+import { sessionContextSummary } from "./context-summary";
+import { runtimeFor } from "./runtime";
+import { installCompaction } from "./compaction";
+import { prepareHandoff } from "./handoff";
+import { beginDecisionDebug, decisionDebugPath, writeDecisionDebug } from "./debug";
+import { installSessionSwitch } from "./session-switch";
+import { historyMessages, savedBranch } from "./history";
+import { bindChatHistory } from "./history-ui";
+import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
+import type { MemberSession, RuntimeState } from "./types";
+import { compactUsage, extractUsage, normalizeUsage, savedContextTokens, sumUsage, usageLine } from "./usage";
+import { redactForLlm } from "../secret-redaction/state";
+
+type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type SwitchOptions = NonNullable<Parameters<ExtensionCommandContext["switchSession"]>[1]>;
+type ReplacedSessionContext = Parameters<NonNullable<SwitchOptions["withSession"]>>[0];
+
+const UI_KEY = "wpi-orchestrator";
+const INTERNAL_PREFIX = "/orchestrator __dispatch ";
+const COMMANDS = [
+  { name: "help", usage: "help", description: "Show all orchestrator commands" },
+  { name: "new", usage: "new <name>", description: "Create and enable a named virtual session" },
+  { name: "on", usage: "on <name-or-id>", description: "Resume and enable a virtual session" },
+  { name: "off", usage: "off", description: "Disable routing and hide status" },
+  { name: "list", usage: "list", description: "List virtual sessions and usage" },
+  { name: "status", usage: "status", description: "Show detailed status and usage" },
+  { name: "rename", usage: "rename <name>", description: "Rename the selected virtual session" },
+  { name: "delete", usage: "delete [name-or-id]", description: "Delete a virtual session after confirmation; keep real transcripts" },
+  { name: "sessions", usage: "sessions", description: "Select a real member session" },
+  { name: "attach", usage: "attach [name-or-id]", description: "Attach the current real session after confirmation" },
+  { name: "compact", usage: "compact [instructions]", description: "Compact the current real session" },
+  { name: "debug", usage: "debug [on|off|status]", description: "Toggle decision debug logs or show their filesystem path" },
+  { name: "drafts", usage: "drafts", description: "Restore a held unsent draft" },
+];
+const HELP = ["Orchestrator commands:", ...COMMANDS.map(command =>
+  `/orchestrator ${command.usage} — ${command.description}`)].join("\n");
+
+export function parseCommand(args: string): { action: string; argument: string } {
+  const match = args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  let argument = match?.[2]?.trim() ?? "";
+  if ((argument.startsWith('"') && argument.endsWith('"')) ||
+      (argument.startsWith("'") && argument.endsWith("'"))) argument = argument.slice(1, -1);
+  return { action: match?.[1]?.toLowerCase() ?? "", argument };
+}
+
+function textOf(message: unknown): string {
+  const content = (message as { content?: unknown })?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter(item => item.type === "text" && typeof item.text === "string").map(item => item.text).join("\n");
+}
+
+function realName(virtualName: string, text: string): string {
+  const title = text.split("\n").find(line => line.trim())?.trim().replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 60) || "New task";
+  return `${virtualName} / ${title}`;
+}
+
+/** Read only; never invoke SessionManager.open() to mutate/migrate other files. */
+function transcript(member: MemberSession, workspace: string): unknown[] {
+  const lines = readFileSync(member.file, "utf8").split("\n").filter(line => line.trim());
+  const header = JSON.parse(lines[0] ?? "null");
+  if (header?.type !== "session" || header.id !== member.id || canonicalWorkspace(header.cwd) !== workspace) {
+    throw new Error("Member transcript identity/workspace does not match the registry.");
+  }
+  return lines.slice(1).map(line => JSON.parse(line));
+}
+
+export class Orchestrator {
+  private store?: RegistryStore;
+  private state?: RuntimeState;
+  private savedFactory?: EditorFactory;
+  private wrapperFactory?: EditorFactory;
+  private chatHistory?: ReturnType<typeof bindChatHistory>;
+
+  constructor(private readonly pi: ExtensionAPI, private readonly backend?: DecisionBackend) {}
+
+  compactionEnabled(ctx: ExtensionContext): boolean {
+    if (ctx.mode !== "tui") return false;
+    const { store, state } = this.initialize(ctx);
+    return state.enabled && !!state.activeId &&
+      store.read().members.some(member => member.id === ctx.sessionManager.getSessionId() && member.virtualId === state.activeId);
+  }
+
+  switchCandidates(ctx: ExtensionContext): MemberSession[] {
+    if (!this.compactionEnabled(ctx)) return [];
+    const { store, state } = this.initialize(ctx);
+    return store.read().members.filter(member => member.virtualId === state.activeId &&
+      member.id !== ctx.sessionManager.getSessionId() && existsSync(member.file));
+  }
+
+  listSessions(ctx: ExtensionContext) {
+    if (!this.compactionEnabled(ctx)) throw new Error("Enable orchestration in a member of the active virtual session first.");
+    const { state, store } = this.initialize(ctx);
+    this.observe(ctx);
+    return store.read().members.filter(member => member.virtualId === state.activeId && existsSync(member.file))
+      .map(member => {
+        const isCurrent = member.id === ctx.sessionManager.getSessionId();
+        const entries = transcript(member, store.workspace) as SessionEntry[];
+        const branch = isCurrent ? ctx.sessionManager.getBranch() : savedBranch(entries);
+        const context = isCurrent ? ctx.getContextUsage() : undefined;
+        return { id: member.id, name: member.name, isCurrent, lastActivityAt: member.lastActivityAt,
+          summary: sessionContextSummary(branch),
+          context: { tokens: context?.tokens ?? savedContextTokens(entries),
+            contextWindow: context?.contextWindow ?? null, estimated: !isCurrent || !context } };
+      });
+  }
+
+  scheduleSwitch(targetId: string, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    return this.scheduleSessionChange(targetId, reason, preservationNotes, ctx);
+  }
+
+  scheduleNewSession(reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    return this.scheduleSessionChange(undefined, reason, preservationNotes, ctx);
+  }
+
+  private scheduleSessionChange(targetId: string | undefined, reason: string, preservationNotes: string, ctx: ExtensionContext): string {
+    const { state, store } = this.initialize(ctx);
+    if (!this.compactionEnabled(ctx)) throw new Error("Enable orchestration in a member of the active virtual session first.");
+    if (targetId !== undefined) {
+      if (!this.switchCandidates(ctx).some(member => member.id === targetId)) throw new Error("Target is not another active virtual-session member.");
+      const target = store.read().members.find(member => member.id === targetId)!;
+      transcript(target, store.workspace);
+    }
+    if (state.currentRequest?.modelSwitches) throw new Error("Only one model-requested session change is allowed per user submission.");
+    const latest = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "user");
+    const text = state.currentRequest?.sessionId === ctx.sessionManager.getSessionId()
+      ? state.currentRequest.text : latest?.type === "message" ? textOf(latest.message) : "";
+    if (!text.trim()) throw new Error("No user request is available to transfer.");
+    const token = randomUUID();
+    state.pending.set(token, { text, virtualId: state.activeId!, modelSwitch: {
+      sourceId: ctx.sessionManager.getSessionId(), targetId, reason, preservationNotes,
+    } });
+    return token;
+  }
+
+  cancelSwitch(token: string, ctx: ExtensionContext): void {
+    this.initialize(ctx).state.pending.delete(token);
+  }
+
+  switchPending(handle: string, ctx: ExtensionContext): boolean {
+    return !!this.initialize(ctx).state.pending.get(handle)?.modelSwitch;
+  }
+
+  beforeRequest(prompt: string, ctx: ExtensionContext): void {
+    const { state } = this.initialize(ctx);
+    const current = state.currentRequest;
+    if (current?.awaitingDelivery && current.sessionId === ctx.sessionManager.getSessionId() &&
+        (prompt === current.text || prompt.startsWith(`${current.text}\n\n--- Orchestrator handoff:`))) {
+      current.awaitingDelivery = false;
+    } else {
+      // A new submission resets the switch budget even if its text is identical.
+      state.currentRequest = undefined;
+    }
+  }
+
+  private initialize(ctx: ExtensionContext): { store: RegistryStore; state: RuntimeState } {
+    const workspace = canonicalWorkspace(ctx.cwd);
+    if (!this.store || this.store.workspace !== workspace) {
+      this.store = new RegistryStore(registryPath(workspace), workspace);
+      this.state = runtimeFor(workspace);
+    }
+    return { store: this.store, state: this.state! };
+  }
+
+  async start(reason: string, ctx: ExtensionContext): Promise<void> {
+    if (ctx.mode !== "tui") return;
+    const { store, state } = this.initialize(ctx);
+    const transition = state.transition;
+    const internal = transition && transition.reason === reason &&
+      (!transition.targetFile || transition.targetFile === ctx.sessionManager.getSessionFile());
+    if (internal) {
+      state.activeId = transition.virtualId;
+      state.enabled = true;
+    } else {
+      state.enabled = false;
+      state.activeId = store.read().lastSelectedVirtualId;
+    }
+    state.boundSessionId = ctx.sessionManager.getSessionId();
+    if (internal && reason === "new" && transition.initialModel) {
+      // The old pi API is invalid after replacement. Apply through this fresh
+      // extension instance, before withSession can send the first worker request.
+      try {
+        const apply = async (identity: { provider: string; id: string }) => {
+          const model = ctx.modelRegistry.find(identity.provider, identity.id);
+          if (!model || !await this.pi.setModel(model)) throw new Error("Model unavailable.");
+        };
+        try { await apply(transition.initialModel); }
+        catch {
+          if (!transition.fallbackModel) throw new Error("No source model fallback.");
+          await apply(transition.fallbackModel);
+          ctx.ui.notify("Selected model unavailable; new session retained the source model.", "warning");
+        }
+      } catch {
+        transition.modelError = "Could not initialize the new session with its selected or source model. No worker request was sent.";
+        ctx.ui.notify(transition.modelError, "error");
+      }
+    }
+    if (state.enabled) this.installEditor(ctx);
+    this.observe(ctx);
+    if (!internal && state.activeId) ctx.ui.notify("Orchestrator paused. Use /orchestrator on <name> to resume.", "info");
+  }
+
+  shutdown(reason: string, ctx: ExtensionContext): void {
+    if (ctx.mode !== "tui") return;
+    this.observe(ctx);
+    this.restoreEditor(ctx, false);
+    const { state } = this.initialize(ctx);
+    if (!state.transition || state.transition.reason !== reason) state.enabled = false;
+  }
+
+  observe(ctx: ExtensionContext): void {
+    if (ctx.mode !== "tui") return;
+    const { store, state } = this.initialize(ctx);
+    const id = ctx.sessionManager.getSessionId();
+    if (store.read().members.some(member => member.id === id)) {
+      store.reconcile(id, extractUsage(ctx.sessionManager.getEntries(), id), {
+        name: ctx.sessionManager.getSessionName() || "Unnamed real session",
+        summary: sessionContextSummary(ctx.sessionManager.getBranch()),
+      });
+    }
+    this.showStatus(ctx, store, state);
+  }
+
+  private installEditor(ctx: ExtensionContext): void {
+    const { store, state } = this.initialize(ctx);
+    const commands = this.pi.getCommands?.().filter(command => command.name === "orchestrator" || command.name.startsWith("orchestrator:"));
+    if (commands && commands.length > 1) {
+      state.enabled = false;
+      ctx.ui.notify("Multiple /orchestrator commands are registered; remove the duplicate before enabling editor routing.", "warning");
+      return;
+    }
+    if (this.wrapperFactory) {
+      if (ctx.ui.getEditorComponent() === this.wrapperFactory) {
+        this.chatHistory?.refresh();
+        return;
+      }
+      state.enabled = false;
+      ctx.ui.notify("Another extension replaced the editor; orchestrator routing is paused.", "warning");
+      return;
+    }
+    this.savedFactory = ctx.ui.getEditorComponent();
+    const previous = this.savedFactory;
+    this.wrapperFactory = (tui, theme, keybindings) => {
+      this.chatHistory?.dispose();
+      this.chatHistory = bindChatHistory(tui, (manager, original) => {
+        if (!state.enabled || !state.activeId) return original;
+        const members = store.read().members.filter(member => member.virtualId === state.activeId);
+        const branches = members.map(member => member.id === manager.getSessionId()
+          ? manager.getBranch()
+          : savedBranch(transcript(member, store.workspace) as ReturnType<typeof manager.getBranch>));
+        return { ...original, messages: historyMessages(branches) };
+      });
+      if (!this.chatHistory) ctx.ui.notify("Unified chat history is unavailable on this Pi version; showing the current real session only.", "warning");
+      const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      return decorateEditor(base, text => {
+        if (!state.enabled || !isOrdinarySubmission(text)) return text;
+        // A newly submitted user draft supersedes a model's deferred switch,
+        // even when the command dispatcher is still busy finishing the old run.
+        for (const [handle, request] of state.pending) {
+          if (request.modelSwitch) state.pending.delete(handle);
+        }
+        if (ctx.ui.getEditorComponent() !== this.wrapperFactory) {
+          state.enabled = false;
+          ctx.ui.notify("Editor ownership changed; routing paused.", "warning");
+          return text;
+        }
+        // Preserve Pi's current-session steering behavior while it is working.
+        if (!ctx.isIdle() || ctx.hasPendingMessages()) return text;
+        const token = randomUUID();
+        state.pending.set(token, { text, virtualId: state.activeId! });
+        const heldIndex = state.heldDrafts.indexOf(text);
+        if (heldIndex >= 0) state.heldDrafts.splice(heldIndex, 1);
+        state.history.set(token, text);
+        if (state.history.size > 64) state.history.delete(state.history.keys().next().value!);
+        return INTERNAL_PREFIX + token;
+      }, text => {
+        const token = text.startsWith(INTERNAL_PREFIX) ? text.slice(INTERNAL_PREFIX.length) : "";
+        return state.history.get(token) ?? text;
+      });
+    };
+    ctx.ui.setEditorComponent(this.wrapperFactory);
+  }
+
+  private restoreEditor(ctx: ExtensionContext, refreshChat = true): void {
+    this.chatHistory?.dispose(refreshChat);
+    this.chatHistory = undefined;
+    if (this.wrapperFactory && ctx.ui.getEditorComponent() === this.wrapperFactory) {
+      ctx.ui.setEditorComponent(this.savedFactory);
+    }
+    this.wrapperFactory = undefined;
+    this.savedFactory = undefined;
+  }
+
+  private showStatus(ctx: ExtensionContext, store: RegistryStore, state: RuntimeState): void {
+    const data = store.read();
+    const virtual = data.virtualSessions.find(item => item.id === state.activeId);
+    if (!state.enabled || !virtual) {
+      ctx.ui.setStatus(UI_KEY, undefined);
+      ctx.ui.setWidget(UI_KEY, undefined);
+      return;
+    }
+    const realId = ctx.sessionManager.getSessionId();
+    const groupUsage = sumUsage(data.usage.filter(item => item.virtualId === virtual.id).map(item => item.usage));
+    const currentUsage = sumUsage(extractUsage(ctx.sessionManager.getEntries(), realId).map(item => item.usage));
+    const name = virtual.name.replace(/[\r\n\t]/g, " ");
+    const line = `${name} · V ${compactUsage(groupUsage)} · R ${compactUsage(currentUsage)}`;
+    ctx.ui.setStatus(UI_KEY, undefined);
+    ctx.ui.setWidget(UI_KEY, (_tui, theme) => ({
+      render: width => [truncateToWidth(theme.fg("muted", line), width)],
+      invalidate() {},
+    }));
+  }
+
+  private restoreHeldDraft(ctx: ExtensionContext, state: RuntimeState): void {
+    const draft = state.heldDrafts.at(-1);
+    if (!draft) return;
+    if (!ctx.ui.getEditorText()) ctx.ui.setEditorText(draft);
+    ctx.ui.notify(`${state.heldDrafts.length} unsent draft(s) retained in /orchestrator drafts.`, "info");
+  }
+
+  private async enable(id: string, ctx: ExtensionCommandContext): Promise<void> {
+    const { state } = this.initialize(ctx);
+    if (state.busy) throw new Error("An orchestrator operation is already in progress.");
+    const epoch = ++state.epoch;
+    state.busy = true;
+    try { await this.activate(id, epoch, ctx); }
+    finally { state.busy = false; }
+  }
+
+  private async activate(id: string, epoch: number, ctx: ExtensionCommandContext): Promise<void> {
+    const { store, state } = this.initialize(ctx);
+    await ctx.waitForIdle();
+    if (state.epoch !== epoch) throw new Error("Orchestrator activation cancelled.");
+    const data = store.read();
+    const virtual = data.virtualSessions.find(item => item.id === id);
+    if (!virtual) throw new Error("Unknown orchestrator.");
+    const member = data.members.find(item => item.id === virtual.lastRealSessionId && item.virtualId === id);
+    if (member && existsSync(member.file)) transcript(member, store.workspace);
+    store.update(registry => { registry.lastSelectedVirtualId = id; });
+    state.activeId = id;
+    state.enabled = true;
+    if (member && existsSync(member.file) && member.id !== ctx.sessionManager.getSessionId()) {
+      state.transition = { reason: "resume", virtualId: id, targetFile: member.file };
+      try {
+        const result = await ctx.switchSession(member.file, {
+          withSession: async fresh => { this.showStatus(fresh, store, state); },
+        });
+        if (result.cancelled) {
+          state.enabled = false;
+          this.showStatus(ctx, store, state);
+          ctx.ui.notify("Session switch cancelled; routing remains paused.", "warning");
+        }
+      } finally { state.transition = undefined; }
+      return;
+    }
+    this.installEditor(ctx);
+    this.showStatus(ctx, store, state);
+  }
+
+  private async pickDecision(text: string, candidates: RoutingCandidate[], ctx: ExtensionCommandContext,
+    virtualId: string, requestId: string, store: RegistryStore): Promise<RoutingDecision | undefined> {
+    const debug = beginDecisionDebug(ctx, "routing", requestId, virtualId, { text, candidates });
+    let backendResult: DecisionResult | undefined;
+    let backendError: unknown;
+    try {
+      const decision = await this.pickDecisionCore(text, candidates, ctx, virtualId, requestId, store,
+        debug.trace, result => { backendResult = result; }, error => { backendError = error; });
+      debug.finish({ backendResult, effectiveDecision: decision ?? null, backendCalled: !!(backendResult || backendError),
+        outcome: decision?.action === "reuse" && !candidates.some(item => item.id === decision.realId)
+          ? "invalid_target_rejected" : decision ? "selected" : "cancelled" }, backendResult?.usage, backendError);
+      return decision;
+    } catch (error) {
+      debug.finish({ backendResult, outcome: "blocked" }, backendResult?.usage, error);
+      throw error;
+    }
+  }
+
+  private async pickDecisionCore(text: string, candidates: RoutingCandidate[], ctx: ExtensionCommandContext,
+    virtualId: string, requestId: string, store: RegistryStore, trace: DecisionTrace | undefined,
+    onResult: (result: DecisionResult) => void, onError: (error: unknown) => void): Promise<RoutingDecision | undefined> {
+    if (!candidates.length) return { action: "new", reason: "No eligible member session exists." };
+    if (this.backend) {
+      try {
+        // Direct classifier calls do not pass through Pi's provider hooks.
+        const safeInput = redactForLlm({ text, contexts: candidates.map(item => ({ summary: item.summary })) }, ctx);
+        const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.contexts[index] }));
+        const result = await this.backend.evaluate(safeInput.text, safeCandidates, undefined, trace);
+        onResult(result);
+        store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: result.usage ?? normalizeUsage(undefined) });
+        if (result.decision.action !== "clarify") {
+          if (result.decision.action === "reuse" && !candidates.some(item => item.id === result.decision.realId)) {
+            // Dispatch fails closed on this invalid target; never substitute another session.
+            return result.decision;
+          }
+          const current = candidates.find(item => item.id === ctx.sessionManager.getSessionId());
+          if (result.decision.action === "reuse" && result.decision.realId === current?.id) return result.decision;
+          if (permitsSessionChange(result.decision)) return result.decision;
+          ctx.ui.notify("Session choice confidence was not above 60%; continuing the current session.", "info");
+        } else ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
+      } catch (error) {
+        onError(error);
+        store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: normalizeUsage(undefined) });
+        ctx.ui.notify("Decision backend unavailable or invalid; continuing the current session.", "warning");
+      }
+      const current = candidates.find(item => item.id === ctx.sessionManager.getSessionId());
+      if (!current) throw new Error("No eligible current session for decision fallback. No worker request was sent.");
+      return { action: "reuse", realId: current.id, reason: "Decision was inconclusive or unavailable; retained the current session." };
+    }
+    const labels = candidates.map(item => `Continue: ${item.name} [${item.id.slice(0, 8)}]`);
+    const selection = await ctx.ui.select("Stay in the current session unless a change is necessary", [...labels, "Create a new focused session"]);
+    if (!selection) return undefined;
+    const index = labels.indexOf(selection);
+    if (index >= 0) return { action: "reuse", realId: candidates[index].id, reason: "User selected task continuity." };
+    if (selection === "Create a new focused session") return { action: "new", reason: "User selected independent work." };
+    throw new Error("Invalid task selection.");
+  }
+
+  private async pickNewSessionModel(text: string, ctx: ExtensionCommandContext,
+    virtualId: string, requestId: string, store: RegistryStore): Promise<{ provider: string; id: string } | undefined> {
+    const fallback = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+    const debug = beginDecisionDebug(ctx, "model", requestId, virtualId, { request: text,
+      currentModel: fallback ? `${fallback.provider}/${fallback.id}` : null });
+    let result: ModelSelectionResult | undefined;
+    let called = false;
+    let error: unknown;
+    try {
+      const configured = loadModelOptions(ctx.cwd);
+      if (!configured.length || !this.backend?.evaluateModel) return fallback;
+      const available = new Set(ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`));
+      const models = configured.filter(option => available.has(option.model));
+      if (!models.length) throw new Error("No configured worker model is available.");
+      const input = redactForLlm({ request: text,
+        context: sessionContextSummary(ctx.sessionManager.getBranch()).slice(0, 12000),
+        currentModel: fallback ? `${fallback.provider}/${fallback.id}` : undefined, models }, ctx);
+      called = true;
+      result = await this.backend.evaluateModel(input, undefined, debug.trace);
+      store.record({ source: `model-decision:${requestId}`, virtualId, category: "decision",
+        usage: result.usage ?? normalizeUsage(undefined) });
+      if (!result.model || !models.some(option => option.model === result!.model) || !permitsModelSelection(result)) {
+        throw new Error("Model selection was ambiguous or outside the available allowlist.");
+      }
+      return modelIdentity(result.model);
+    } catch (caught) {
+      error = caught;
+      if (called && !result) store.record({ source: `model-decision:${requestId}`, virtualId,
+        category: "decision", usage: normalizeUsage(undefined) });
+      ctx.ui.notify("Model selection unavailable or ambiguous; new session will retain the source model.", "warning");
+      return fallback;
+    } finally {
+      debug.finish({ backendResult: result ?? null, backendCalled: called,
+        effectiveModel: result?.model && !error ? result.model : fallback ? `${fallback.provider}/${fallback.id}` : null,
+        outcome: result?.model && !error ? "selected" : "source_model_retained" }, result?.usage, error);
+    }
+  }
+
+  private async dispatch(token: string, ctx: ExtensionCommandContext): Promise<void> {
+    const { store, state } = this.initialize(ctx);
+    const envelope = state.pending.get(token);
+    if (!envelope || !state.enabled || envelope.virtualId !== state.activeId) {
+      throw new Error("Invalid or expired orchestrator submission. No worker request was sent.");
+    }
+    if (state.busy) {
+      state.heldDrafts.push(envelope.text);
+      ctx.ui.setEditorText(envelope.text);
+      state.pending.delete(token);
+      ctx.ui.notify("Routing is already in progress; this draft was not sent. Submit again after it finishes.", "warning");
+      return;
+    }
+    const sourceId = ctx.sessionManager.getSessionId();
+    const virtualId = envelope.virtualId;
+    const text = envelope.text;
+    const modelSwitch = envelope.modelSwitch;
+    if (modelSwitch && (modelSwitch.sourceId !== sourceId || state.currentRequest?.modelSwitches)) {
+      state.pending.delete(token);
+      throw new Error("Model switch expired or its switch budget was exhausted.");
+    }
+    let release: (() => void) | undefined;
+    let replaced = false;
+    let admitted = false;
+    try {
+      release = store.lease();
+      state.busy = true;
+      await ctx.waitForIdle();
+      if (state.activeId !== virtualId || !state.enabled) throw new Error("Orchestrator activation changed before routing.");
+      if (!ctx.sessionManager.getSessionFile()) throw new Error("Orchestration requires persistent Pi sessions; remove --no-session.");
+      this.observe(ctx);
+      const data = store.read();
+      const previous = data.requests.find(item => item.id === token);
+      if (previous) throw new Error("This request was already admitted; do not replay potentially side-effecting work.");
+      store.update(registry => { registry.requests.push({ id: token, virtualId, state: "pending" }); });
+      admitted = true;
+      const virtual = data.virtualSessions.find(item => item.id === virtualId)!;
+      const members = data.members.filter(item => item.virtualId === virtualId && existsSync(item.file));
+      const savedTokens = new Map<string, number | null>();
+      for (const member of members) {
+        const entries = transcript(member, store.workspace);
+        store.reconcile(member.id, extractUsage(entries, member.id));
+        savedTokens.set(member.id, savedContextTokens(entries));
+      }
+      const reconciled = store.read();
+      const currentContext = ctx.getContextUsage();
+      const candidates: RoutingCandidate[] = shortlist(text,
+        reconciled.members.filter(item => members.some(member => member.id === item.id)),
+        modelSwitch?.targetId ?? (members.some(member => member.id === sourceId) ? sourceId : virtual.lastRealSessionId))
+        .map(member => ({
+          ...member,
+          isCurrent: member.id === sourceId,
+          metrics: {
+            lifetimeUsage: sumUsage(reconciled.usage.filter(item => item.realId === member.id).map(item => item.usage)),
+            context: member.id === sourceId
+              ? { tokens: currentContext?.tokens ?? null, contextWindow: currentContext?.contextWindow ?? null, estimated: false }
+              : { tokens: savedTokens.get(member.id) ?? null, contextWindow: null, estimated: true },
+          },
+        }));
+      const decision: RoutingDecision | undefined = modelSwitch
+        ? modelSwitch.targetId === undefined
+          ? { action: "new", reason: modelSwitch.reason }
+          : { action: "reuse", realId: modelSwitch.targetId, reason: modelSwitch.reason }
+        : await this.pickDecision(text, candidates, ctx, virtualId, token, store);
+      if (!decision) {
+        store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
+        ctx.ui.setEditorText(text);
+        ctx.ui.notify("Routing cancelled; draft restored.", "info");
+        return;
+      }
+      if (!state.enabled || state.activeId !== virtualId) throw new Error("Orchestration was disabled before dispatch; no worker request was sent.");
+      const destination = decision.action === "reuse" ? candidates.find(item => item.id === decision.realId) : undefined;
+      if (decision.action === "reuse" && !destination) throw new Error("Decision selected a session outside the candidate allowlist.");
+      writeDecisionDebug(ctx, { event: "switch_proposal", requestId: token, virtualId,
+        sourceSessionId: sourceId, origin: modelSwitch ? "session_model" : "router", decision });
+      const handoffEpoch = state.epoch;
+      let deliveryText: string | undefined = text;
+      if ((decision.action === "new" || decision.realId !== sourceId) &&
+          ctx.sessionManager.getBranch().some(entry => entry.type === "message")) {
+        deliveryText = await prepareHandoff({
+          request: text,
+          sourceSummary: sessionContextSummary(ctx.sessionManager.getBranch()),
+          destinationSummary: destination?.summary || "No prior context available.",
+          switchReason: decision.reason,
+          preservationNotes: modelSwitch?.preservationNotes,
+          sourceContext: candidates.find(item => item.id === sourceId)?.metrics?.context,
+          destinationContext: destination?.metrics?.context ?? (decision.action === "new"
+            ? { tokens: 0, contextWindow: null, estimated: false } : undefined),
+        }, ctx, this.backend, store, virtualId, token);
+      }
+      if (deliveryText === undefined) {
+        store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
+        ctx.ui.setEditorText(text);
+        writeDecisionDebug(ctx, { event: "dispatch_held", requestId: token, virtualId, reason: "handoff_cancelled" });
+        ctx.ui.notify("Switch held; original request restored. No destination request was sent.", "warning");
+        return;
+      }
+      if (!state.enabled || state.activeId !== virtualId || state.epoch !== handoffEpoch ||
+          (modelSwitch && !state.pending.has(token))) throw new Error("Orchestration or user input changed during handoff preparation.");
+      writeDecisionDebug(ctx, { event: "dispatch_prepared", requestId: token, virtualId,
+        sourceSessionId: sourceId, decision, handoffApplied: deliveryText !== text });
+      // Every route gets an awaited, fresh-context delivery in this first slice.
+      // This also replaces the runtime on same-member reuse (documented limitation).
+      const deliver = async (fresh: ReplacedSessionContext) => {
+        replaced = true;
+        const realId = fresh.sessionManager.getSessionId();
+        try {
+          if (state.transition?.modelError) throw new Error(state.transition.modelError);
+          store.update(registry => {
+            const request = registry.requests.find(item => item.id === token)!;
+            request.realId = realId;
+            request.reason = decision.reason;
+            request.state = "dispatching";
+            registry.virtualSessions.find(item => item.id === virtualId)!.lastRealSessionId = realId;
+          });
+          this.showStatus(fresh, store, state);
+          if (realId !== sourceId) {
+            fresh.ui.notify(`Session changed to ${fresh.sessionManager.getSessionName() || "Unnamed real session"}. ${decision.reason}`, "info");
+          }
+          state.currentRequest = { sessionId: realId, text, modelSwitches: modelSwitch ? 1 : 0, awaitingDelivery: true };
+          await fresh.sendUserMessage(deliveryText!);
+          store.reconcile(realId, extractUsage(fresh.sessionManager.getEntries(), realId), {
+            name: fresh.sessionManager.getSessionName() || "Unnamed real session",
+            summary: sessionContextSummary(fresh.sessionManager.getBranch()),
+          });
+          const lastAssistant = [...fresh.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
+          const failed = lastAssistant?.type === "message" && lastAssistant.message.role === "assistant"
+            && ["aborted", "error"].includes(lastAssistant.message.stopReason);
+          store.update(registry => { registry.requests.find(item => item.id === token)!.state = failed ? "interrupted" : "completed"; });
+          this.showStatus(fresh, store, state);
+        } catch {
+          store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
+          fresh.ui.notify("Orchestrated request interrupted. Inspect the real transcript before retrying; tools may have changed files.", "error");
+        } finally {
+          this.restoreHeldDraft(fresh, state);
+        }
+      };
+      if (decision.action === "new") {
+        const name = realName(virtual.name, text);
+        const fallbackModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+        const initialModel = await this.pickNewSessionModel(text, ctx, virtualId, token, store);
+        if (!state.enabled || state.activeId !== virtualId || state.epoch !== handoffEpoch) {
+          throw new Error("Orchestration changed during model selection; no worker request was sent.");
+        }
+        state.transition = { reason: "new", virtualId, initialModel, fallbackModel };
+        const result = await ctx.newSession({
+          setup: async manager => {
+            const file = manager.getSessionFile();
+            if (!file) throw new Error("New Pi session is not persistent.");
+            manager.appendSessionInfo(name);
+            store.attach({ id: manager.getSessionId(), virtualId, file, name,
+              summary: `Latest message:\nuser: ${text}`, lastActivityAt: new Date().toISOString(), origin: "created", baselineSources: [] }, []);
+          },
+          withSession: deliver,
+        });
+        if (result.cancelled) throw new Error("New session creation cancelled.");
+      } else {
+        const member = candidates.find(item => item.id === decision.realId);
+        if (!member) throw new Error("Decision selected a session outside the candidate allowlist.");
+        transcript(member, store.workspace);
+        state.transition = { reason: "resume", virtualId, targetFile: member.file };
+        const result = await ctx.switchSession(member.file, { withSession: deliver });
+        if (result.cancelled) throw new Error("Session switch cancelled.");
+      }
+    } catch (error) {
+      writeDecisionDebug(ctx, { event: "dispatch_error", requestId: token, virtualId,
+        error: error instanceof Error ? error.message : String(error) });
+      if (admitted) {
+        try {
+          store.update(registry => {
+            const request = registry.requests.find(item => item.id === token);
+            if (request) request.state = "interrupted";
+          });
+        } catch { /* preserve the original failure if the registry itself is unavailable */ }
+      }
+      // Never use old session-bound UI after replacement or failed teardown.
+      if (!replaced && state.boundSessionId === sourceId) {
+        ctx.ui.setEditorText(text);
+        ctx.ui.notify(error instanceof Error ? error.message : "Routing failed; draft restored.", "error");
+      } else if (!replaced) {
+        console.error("Orchestrator session replacement failed; inspect /orchestrator status and the real transcript before retrying.");
+      }
+    } finally {
+      state.transition = undefined;
+      state.busy = false;
+      state.pending.delete(token);
+      release?.();
+    }
+  }
+
+  async command(args: string, ctx: ExtensionCommandContext): Promise<void> {
+    if (ctx.mode !== "tui") throw new Error("/orchestrator currently requires the Pi terminal editor.");
+    const { store, state } = this.initialize(ctx);
+    const { action, argument } = parseCommand(args);
+    if (action === "__dispatch") { await this.dispatch(argument, ctx); return; }
+    if (action === "help") { ctx.ui.notify(HELP, "info"); return; }
+    if (action === "debug") {
+      if (argument && !["on", "off", "status"].includes(argument)) throw new Error("Use /orchestrator debug [on|off|status].");
+      if (argument !== "status") {
+        const enabled = argument ? argument === "on" : !state.debugEnabled;
+        if (!enabled) writeDecisionDebug(ctx, { event: "debug_disabled" });
+        state.debugEnabled = enabled;
+        state.debugWarningShown = false;
+        if (enabled) writeDecisionDebug(ctx, { event: "debug_enabled" });
+      }
+      ctx.ui.notify(`Decision debug: ${state.debugEnabled ? "on" : "off"}\nLog: ${decisionDebugPath(ctx.cwd)}\nLogs contain redacted task/context data; share carefully.`, "info");
+      return;
+    }
+    if (state.busy && !["status", "list", "off"].includes(action)) {
+      throw new Error("An orchestrator request is running. Wait for it to finish before changing sessions.");
+    }
+    if (action === "off") {
+      state.epoch++;
+      state.enabled = false;
+      this.restoreEditor(ctx);
+      this.showStatus(ctx, store, state);
+      return;
+    }
+    if (action === "new") { await this.enable(store.create(argument).id, ctx); return; }
+    if (action === "on") { await this.enable(store.find(argument).id, ctx); return; }
+    if (action === "rename") {
+      if (!state.activeId) throw new Error("Select an orchestrator first.");
+      store.rename(state.activeId, argument);
+      this.showStatus(ctx, store, state);
+      return;
+    }
+    if (action === "delete") {
+      if (!argument && !state.activeId) throw new Error("Select an orchestrator or use /orchestrator delete <name-or-id>.");
+      const virtual = store.find(argument || state.activeId!);
+      state.busy = true;
+      try {
+        if (!(await ctx.ui.confirm(`Delete orchestrator ${virtual.name}?`,
+          "Its membership, usage, and request metadata will be removed. Real Pi session transcripts are kept. This cannot be undone."))) return;
+        store.delete(virtual.id);
+        for (const [token, pending] of state.pending) {
+          if (pending.virtualId !== virtual.id) continue;
+          if (!state.heldDrafts.includes(pending.text)) state.heldDrafts.push(pending.text);
+          state.pending.delete(token);
+        }
+        if (state.activeId === virtual.id) {
+          state.epoch++;
+          state.enabled = false;
+          state.activeId = undefined;
+          this.restoreEditor(ctx);
+        }
+        this.showStatus(ctx, store, state);
+        ctx.ui.notify(`Deleted orchestrator ${virtual.name}. Real session transcripts were kept.`, "info");
+      } finally { state.busy = false; }
+      return;
+    }
+    if (action === "attach") {
+      if (!state.activeId && !argument) throw new Error("Select an orchestrator or use /orchestrator attach <name-or-id>.");
+      await ctx.waitForIdle();
+      const file = ctx.sessionManager.getSessionFile();
+      if (!file) throw new Error("Cannot attach an ephemeral session.");
+      const virtual = store.find(argument || state.activeId!);
+      const id = ctx.sessionManager.getSessionId();
+      const firstRequest = ctx.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
+      const name = ctx.sessionManager.getSessionName() || realName(virtual.name, firstRequest?.type === "message" ? textOf(firstRequest.message) : "Attached task");
+      if (store.read().members.some(member => member.id === id)) throw new Error("Real session already belongs to an orchestrator.");
+      if (!(await ctx.ui.confirm(`Attach current real session to ${virtual.name}?`, "Its context becomes a routing candidate. Earlier costs are excluded from the virtual total."))) return;
+      if (!ctx.sessionManager.getSessionName()) this.pi.setSessionName(name);
+      store.attach({ id, virtualId: virtual.id, file, name,
+        summary: sessionContextSummary(ctx.sessionManager.getBranch()), lastActivityAt: new Date().toISOString(), origin: "attached", baselineSources: [] }, extractUsage(ctx.sessionManager.getEntries(), id));
+      await this.enable(virtual.id, ctx);
+      return;
+    }
+    if (action === "drafts") {
+      const labels = state.heldDrafts.map((text, index) => `${index + 1}. ${text.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 80)}`);
+      if (!labels.length) { ctx.ui.notify("No held drafts.", "info"); return; }
+      const choice = await ctx.ui.select("Restore an unsent draft (process-local, not an execution queue)", labels);
+      const index = choice ? labels.indexOf(choice) : -1;
+      if (index >= 0) ctx.ui.setEditorText(state.heldDrafts[index]);
+      return;
+    }
+    if (action === "compact") {
+      await ctx.waitForIdle();
+      await new Promise<void>((resolve, reject) => ctx.compact({ customInstructions: argument || "Preserve task decisions, constraints, exact identifiers, and unfinished work.", onComplete: () => resolve(), onError: reject }));
+      this.observe(ctx);
+      return;
+    }
+    this.observe(ctx);
+    if (action === "status") {
+      const data = store.read();
+      const virtual = data.virtualSessions.find(item => item.id === state.activeId);
+      const events = data.usage.filter(item => item.virtualId === virtual?.id);
+      const members = data.members.filter(item => item.virtualId === virtual?.id);
+      const lines = [virtual ? `Orchestrator: ${virtual.name} [${virtual.id}]` : "No orchestrator selected.",
+        `Routing: ${state.enabled ? "on" : "paused"}`,
+        `Virtual created: ${data.virtualSessions.length} | real created: ${members.filter(item => item.origin === "created").length} | attached: ${members.filter(item => item.origin === "attached").length} | members: ${members.length}`,
+        `Registry: ${store.file}`, usageLine("Virtual total", sumUsage(events.map(item => item.usage)))];
+      for (const category of ["worker", "tool", "decision", "summary", "warming"] as const) {
+        lines.push(usageLine(category, sumUsage(events.filter(item => item.category === category).map(item => item.usage))));
+      }
+      const realId = ctx.sessionManager.getSessionId();
+      lines.push(usageLine("Current real lifetime (not added again)", sumUsage(extractUsage(ctx.sessionManager.getEntries(), realId).map(item => item.usage))));
+      lines.push(usageLine("Current real contribution", sumUsage(events.filter(item => item.realId === realId).map(item => item.usage))));
+      lines.push(`Decision backend: ${this.backend ? "configured" : "manual clarification (no paid classifier calls)"}`);
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+    if (action === "list") {
+      const data = store.read();
+      ctx.ui.notify(data.virtualSessions.map(virtual => `${virtual.name} [${virtual.id}] | ${data.members.filter(item => item.virtualId === virtual.id).length} real sessions | `
+        + usageLine("total", sumUsage(data.usage.filter(item => item.virtualId === virtual.id).map(item => item.usage)))).join("\n") || "No virtual sessions. Use /orchestrator new <name>.", "info");
+      return;
+    }
+    if (action === "sessions") {
+      const data = store.read();
+      const members = data.members.filter(item => item.virtualId === state.activeId);
+      const labels = members.map(item => `${item.name} [${item.id.slice(0, 8)}]`);
+      const selected = await ctx.ui.select("Real member sessions", labels);
+      const index = selected ? labels.indexOf(selected) : -1;
+      if (index >= 0) {
+        store.update(registry => { registry.virtualSessions.find(item => item.id === state.activeId)!.lastRealSessionId = members[index].id; });
+        await this.enable(state.activeId!, ctx);
+      }
+      return;
+    }
+    if (!action) {
+      const data = store.read();
+      const labels = data.virtualSessions.map(item => `${item.name} [${item.id.slice(0, 8)}]`);
+      const choice = await ctx.ui.select("Orchestrator", ["Help — available commands", "Create a named virtual session", ...labels]);
+      if (choice === "Help — available commands") {
+        ctx.ui.notify(HELP, "info");
+      } else if (choice === "Create a named virtual session") {
+        const name = await ctx.ui.input("Virtual session name");
+        if (name !== undefined) await this.enable(store.create(name).id, ctx);
+      } else if (choice) {
+        const index = labels.indexOf(choice);
+        if (index >= 0) await this.enable(data.virtualSessions[index].id, ctx);
+      }
+      return;
+    }
+    throw new Error(`Unknown orchestrator command: ${action}. Use /orchestrator help for available commands.`);
+  }
+}
+
+export default function (pi: ExtensionAPI) {
+  // No network calls during extension load. Hosted classification is opt-in.
+  const url = process.env.WPI_ORCHESTRATOR_DECISION_URL;
+  let backend: DecisionBackend | undefined;
+  let invalidBackend = false;
+  if (url) {
+    try { backend = new SystemOneBackend(url, process.env.WPI_ORCHESTRATOR_DECISION_MODEL || "english",
+      process.env.WPI_ORCHESTRATOR_DECISION_API_KEY); }
+    catch { invalidBackend = true; }
+  }
+  const orchestrator = new Orchestrator(pi, backend);
+  const actionGate = {};
+  installCompaction(pi, ctx => orchestrator.compactionEnabled(ctx), undefined, actionGate);
+  const sessionSwitch = installSessionSwitch(pi, orchestrator, actionGate);
+  pi.on("before_agent_start", (event, ctx) => orchestrator.beforeRequest(event.prompt, ctx));
+  const safe = async (ctx: ExtensionContext, operation: () => void | Promise<void>) => {
+    try { await operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
+  };
+  pi.registerCommand("orchestrator", {
+    description: "Named virtual sessions and routing; /orchestrator help lists commands",
+    getArgumentCompletions: prefix => {
+      const matches = COMMANDS.filter(command => command.name.startsWith(prefix.toLowerCase()));
+      return matches.length ? matches.map(command => ({
+        value: command.name, label: command.usage, description: command.description,
+      })) : null;
+    },
+    handler: async (args, ctx) => {
+      try { await orchestrator.command(args, ctx); }
+      catch (error) {
+        // Management errors occur before replacement; dispatch owns its fresh-context errors.
+        try { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator command failed.", "error"); } catch { /* old runtime was invalidated */ }
+      } finally {
+        const command = parseCommand(args);
+        if (command.action === "__dispatch") sessionSwitch.finishDispatch(command.argument);
+      }
+    },
+  });
+  pi.on("session_start", (event, ctx) => safe(ctx, async () => {
+    await orchestrator.start(event.reason, ctx);
+    if (invalidBackend && ctx.mode === "tui") ctx.ui.notify("Invalid orchestrator decision URL; manual clarification is available.", "warning");
+  }));
+  pi.on("session_shutdown", (event, ctx) => safe(ctx, () => orchestrator.shutdown(event.reason, ctx)));
+  // Reconciliation, not a claim that low-level agent_end is the final settled boundary.
+  // Awaited fresh-context dispatch performs the authoritative completion update.
+  pi.on("turn_end", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
+  pi.on("agent_end", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
+  pi.on("session_compact", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
+  pi.on("session_tree", (_event, ctx) => safe(ctx, () => orchestrator.observe(ctx)));
+}

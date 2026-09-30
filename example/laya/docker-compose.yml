@@ -1,0 +1,31 @@
+services:
+  laya:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "${LAYA_BIND_ADDRESS:-127.0.0.1}:${LAYA_PORT:-8000}:8000"
+    environment:
+      LAYA_HOST: "0.0.0.0"
+      LAYA_PORT: "8000"
+      LAYA_DEVICE: cpu
+      # Preload only English before accepting requests. Clients must also
+      # send model=english; LAYA_MODELS controls preload, not model routing.
+      LAYA_PRELOAD: "1"
+      LAYA_MODELS: english
+      LAYA_AUTO_TASK: "0"
+      LAYA_THREADS: "${LAYA_THREADS:-4}"
+      OMP_NUM_THREADS: "${LAYA_THREADS:-4}"
+      LAYA_API_KEY: "${LAYA_API_KEY:-}"
+      HF_HOME: /home/laya/.cache/huggingface
+    volumes:
+      - model-cache:/home/laya/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 10m
+      retries: 5
+
+volumes:
+  model-cache:

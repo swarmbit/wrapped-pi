@@ -3,7 +3,27 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isCredentialName, PLACEHOLDER_SOURCE, SecretRedactor, type SecretStorage } from "./redactor";
+import yaml from "js-yaml";
+import { PLACEHOLDER_SOURCE, SecretRedactor, type SecretStorage } from "./redactor";
+
+/** Config errors must not echo YAML snippets that may contain credentials. */
+function readCredentialKeys(filename: string): string[] {
+  let text: string;
+  try {
+    const stat = fs.lstatSync(filename);
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return [];
+    text = fs.readFileSync(filename, "utf8");
+  } catch { return []; }
+  try {
+    const config = yaml.load(text, { schema: yaml.JSON_SCHEMA }) as { secretRedaction?: { keys?: unknown } } | undefined;
+    const keys = config?.secretRedaction?.keys;
+    if (keys === undefined) return [];
+    if (!Array.isArray(keys) || keys.some(key => typeof key !== "string" || !key.trim())) throw new Error();
+    return keys.map(key => key.trim());
+  } catch {
+    throw new Error("Invalid secretRedaction.keys configuration; expected a list of non-empty key names in wpi.yml");
+  }
+}
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const tokenPattern = new RegExp(`^${PLACEHOLDER_SOURCE}$`);
@@ -68,7 +88,7 @@ export class FileSecretStorage implements SecretStorage {
 function discoverAuth(redactor: SecretRedactor, document: unknown): void {
   if (!document || typeof document !== "object") return;
   for (const [key, value] of Object.entries(document)) {
-    if (typeof value === "string" && (["key", "access", "refresh"].includes(key) || isCredentialName(key)) && !value.startsWith("!")) {
+    if (typeof value === "string" && (["key", "access", "refresh"].includes(key) || redactor.isCredentialName(key)) && !value.startsWith("!")) {
       redactor.registerSecret(process.env[value] ?? value);
     } else if (value && typeof value === "object") discoverAuth(redactor, value);
   }
@@ -77,6 +97,7 @@ function discoverAuth(redactor: SecretRedactor, document: unknown): void {
 export class SessionSecrets {
   readonly redactor: SecretRedactor;
   private readonly scanned = new Map<string, string>();
+  private configuredKeys = "";
 
   constructor(readonly agentDir: string, sessionId: string) {
     this.redactor = new SecretRedactor(new FileSecretStorage(path.join(agentDir, "secret-redaction"), sessionId));
@@ -99,6 +120,8 @@ export class SessionSecrets {
     let document: unknown;
     if (filename.endsWith(".json")) {
       try { document = JSON.parse(text); } catch { /* scan malformed files as text */ }
+    } else if (path.basename(filename) === "wpi.yml") {
+      try { document = yaml.load(text, { schema: yaml.JSON_SCHEMA }); } catch { /* scan malformed files as text */ }
     }
     if (document !== undefined) {
       if (["auth.json", "models.json"].includes(path.basename(filename))) discoverAuth(this.redactor, document);
@@ -107,7 +130,7 @@ export class SessionSecrets {
     this.redactor.discover(text);
     // Dotenv interprets escaped newlines in double quotes. Learn the decoded value too.
     for (const match of text.matchAll(/(?:^|\n)\s*(?:export\s+)?([\w]+)\s*=\s*"((?:\\.|[^"\\])*)"/g)) {
-      if (isCredentialName(match[1])) {
+      if (this.redactor.isCredentialName(match[1])) {
         this.redactor.registerSecret(match[2].replace(/\\n/g, "\n").replace(/\\r/g, "\r"));
       }
     }
@@ -115,11 +138,22 @@ export class SessionSecrets {
   }
 
   refresh(cwd: string): void {
+    const configFiles = [...new Set([
+      path.join(path.dirname(this.agentDir), "wpi.yml"),
+      path.join(cwd, ".pi", "wpi.yml"),
+    ])];
+    const keys = [...new Set(configFiles.flatMap(readCredentialKeys))].sort();
+    const signature = JSON.stringify(keys);
+    if (signature !== this.configuredKeys) {
+      this.redactor.setCredentialKeys(keys);
+      this.configuredKeys = signature;
+      // Previously scanned files may contain newly configured credential fields.
+      this.scanned.clear();
+    }
     this.redactor.discover({ ...process.env });
     this.scanFile(path.join(this.agentDir, "auth.json"));
     this.scanFile(path.join(this.agentDir, "models.json"));
-    this.scanFile(path.join(path.dirname(this.agentDir), "wpi.yml"));
-    this.scanFile(path.join(cwd, ".pi", "wpi.yml"));
+    for (const filename of configFiles) this.scanFile(filename);
     let names: string[];
     try { names = fs.readdirSync(cwd); } catch { return; }
     for (const name of names) {

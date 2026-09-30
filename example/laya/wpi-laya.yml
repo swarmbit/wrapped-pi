@@ -1,0 +1,10 @@
+# Merge into ~/.pi/wpi.yml or your project's .pi/wpi.yml.
+# Docker Desktop: publish Laya on a reachable interface (see README).
+# Linux Docker Engine: replace host.docker.internal with a reachable host IP.
+docker:
+  env:
+    WPI_ORCHESTRATOR_DECISION_URL: http://host.docker.internal:8000/v1/systemone
+    WPI_ORCHESTRATOR_DECISION_MODEL: english
+    # If LAYA_API_KEY is set on the server, configure the same value here
+    # in your private config, never in a committed project config.
+    # WPI_ORCHESTRATOR_DECISION_API_KEY: <your-private-key>

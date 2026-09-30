@@ -1,0 +1,15 @@
+{
+  "name": "wpi-dynamic-system-prompts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Select Markdown instructions appended to the session system prompt",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.99.1"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}
