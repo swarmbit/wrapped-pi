@@ -314,6 +314,7 @@ The default package includes several extensions:
 
 - **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
+- **dynamic-system-prompts** — Select Markdown instructions from `.pi/system-prompts/` to append to the session system prompt (`/system-prompts`; see [extension README](package/extensions/dynamic-system-prompts/README.md))
 - **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
 - **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md) and [local Laya Compose example](example/laya/README.md))
