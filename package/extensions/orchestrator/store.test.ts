@@ -41,6 +41,51 @@ describe("persistent virtual registry", () => {
     expect(store.find("One").id).toBe(a.id);
   });
 
+  it("deletes only the target metadata and preserves real transcripts", () => {
+    const one = store.create("One");
+    const two = store.create("Two");
+    const real = member(one.id);
+    writeFileSync(real.file, "preserved transcript");
+    store.attach(real, [{ source: "baseline", realId: real.id, category: "worker", usage }]);
+    store.record({ source: "worker", virtualId: one.id, realId: real.id, category: "worker", usage });
+    store.record({ source: "decision", virtualId: one.id, category: "decision", usage });
+    store.record({ source: "other", virtualId: two.id, category: "decision", usage });
+    store.update(data => {
+      data.lastSelectedVirtualId = one.id;
+      data.requests.push({ id: "request", virtualId: one.id, state: "completed" });
+    });
+    store.delete(one.id);
+    const data = store.read();
+    expect(data.virtualSessions).toEqual([two]);
+    expect(data.members).toEqual([]);
+    expect(data.requests).toEqual([]);
+    expect(data.usage.map(event => event.source)).toEqual(["other"]);
+    expect(data.lastSelectedVirtualId).toBeUndefined();
+    expect(readFileSync(real.file, "utf8")).toBe("preserved transcript");
+    expect(store.create("One").id).not.toBe(one.id);
+  });
+
+  it("refuses deletion during execution or registry contention without changing metadata", () => {
+    const one = store.create("One");
+    const before = readFileSync(store.file, "utf8");
+    const release = store.lease();
+    expect(() => store.delete(one.id)).toThrow("Another orchestrator");
+    release();
+    writeFileSync(`${store.file}.lock`, "busy");
+    expect(() => store.delete(one.id)).toThrow("locked");
+    expect(existsSync(`${store.file}.execution`)).toBe(false);
+    expect(readFileSync(store.file, "utf8")).toBe(before);
+  });
+
+  it("rejects unknown deletion and retains another group's resume selection", () => {
+    const one = store.create("One");
+    const two = store.create("Two");
+    expect(() => store.delete("missing")).toThrow("no longer exists");
+    expect(existsSync(`${store.file}.execution`)).toBe(false);
+    store.delete(one.id);
+    expect(store.read().lastSelectedVirtualId).toBe(two.id);
+  });
+
   it("excludes pre-attachment costs and deduplicates repeated observations", () => {
     const virtual = store.create("One");
     const before = { source: "before", realId: "real-1", category: "worker" as const, usage };

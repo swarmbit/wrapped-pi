@@ -90,6 +90,22 @@ export class RegistryStore {
     });
   }
 
+  /** Delete registry metadata only; real Pi transcript files remain untouched. */
+  delete(id: string): void {
+    const release = this.lease();
+    try {
+      this.update(data => {
+        if (!data.virtualSessions.some(session => session.id === id)) throw new Error("Orchestrator no longer exists.");
+        const realIds = new Set(data.members.filter(member => member.virtualId === id).map(member => member.id));
+        data.virtualSessions = data.virtualSessions.filter(session => session.id !== id);
+        data.members = data.members.filter(member => member.virtualId !== id);
+        data.usage = data.usage.filter(event => event.virtualId !== id && !(event.realId && realIds.has(event.realId)));
+        data.requests = data.requests.filter(request => request.virtualId !== id);
+        if (data.lastSelectedVirtualId === id) delete data.lastSelectedVirtualId;
+      });
+    } finally { release(); }
+  }
+
   attach(member: MemberSession, baseline: UsageEvent[]): void {
     this.update(data => {
       if (!data.virtualSessions.some(session => session.id === member.virtualId)) throw new Error("Unknown orchestrator.");

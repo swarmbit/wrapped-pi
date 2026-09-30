@@ -10,8 +10,14 @@ export interface DecisionResult {
   decision: RoutingDecision;
   usage?: TokenUsage;
 }
+export interface RoutingCandidate extends MemberSession {
+  metrics?: {
+    lifetimeUsage: TokenUsage;
+    context: { tokens: number | null; contextWindow: number | null; estimated: boolean };
+  };
+}
 export interface DecisionBackend {
-  evaluate(text: string, candidates: MemberSession[], signal?: AbortSignal): Promise<DecisionResult>;
+  evaluate(text: string, candidates: RoutingCandidate[], signal?: AbortSignal): Promise<DecisionResult>;
 }
 
 /** Explicitly configured Jev/System One compatible server (e.g. local Laya). */
@@ -23,8 +29,8 @@ export class SystemOneBackend implements DecisionBackend {
     }
   }
 
-  async evaluate(text: string, candidates: MemberSession[], signal?: AbortSignal): Promise<DecisionResult> {
-    if (text.length > 4000) throw new Error("Request exceeds the experimental decision input budget; clarify instead of truncating it.");
+  async evaluate(text: string, candidates: RoutingCandidate[], signal?: AbortSignal): Promise<DecisionResult> {
+    if (text.length > 4000) throw new Error("Request exceeds the experimental decision input budget; retain the current session instead of truncating it.");
     const options: Record<string, string> = { NEW: "A separate, independent goal; no existing task context is necessary." };
     const ids = new Map<string, string>();
     candidates.forEach((candidate, index) => {
@@ -39,8 +45,9 @@ export class SystemOneBackend implements DecisionBackend {
         model: this.model,
         state: { request: text.slice(0, 4000), sessions: candidates.map((item, index) => ({
           key: `S${index}`, summary: (item.summary || item.goal).slice(0, 1500),
+          metrics: item.metrics ?? null,
         })) },
-        questions: { route: { type: "choice", instructions: "Which session context does the request continue? Use the session context summaries, prioritizing the latest turn. Similar keywords alone do not imply continuity. Select NEW for independent work.", criteria: options } },
+        questions: { route: { type: "choice", instructions: "Which session context does the request continue? Use the session context summaries, prioritizing the latest turn. Similar keywords alone do not imply continuity. Select NEW for independent work. Candidate metrics report cumulative lifetime tokens and estimated USD cost, not the price of the next request. Context tokens describe current prompt size; null means unknown and incomplete flags mean partial data, not zero. Prioritize required task context over savings. Use context size and usage only as secondary signals between equally relevant sessions; prefer a smaller relevant context when it avoids unnecessary tokens. Never abandon needed context or choose NEW solely because historical cost or lifetime tokens are high.", criteria: options } },
       }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
     });
@@ -71,7 +78,7 @@ export class SystemOneBackend implements DecisionBackend {
         cacheRead: 0, cacheWrite: 0 });
     }
     const decision: RoutingDecision = !confident
-      ? { action: "clarify", reason: "Decision scores are ambiguous; choose a task." }
+      ? { action: "clarify", reason: "Decision scores are ambiguous; retain the current session." }
       : choice === "NEW"
         ? { action: "new", reason: "Decision model selected independent work." }
         : { action: "reuse", realId: ids.get(choice), reason: "Decision model selected task continuity." };

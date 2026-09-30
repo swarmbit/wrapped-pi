@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SystemOneBackend, shortlist } from "./decision";
+import { SystemOneBackend, shortlist, type RoutingCandidate } from "./decision";
+import { normalizeUsage } from "./usage";
 import type { MemberSession } from "./types";
 const members: MemberSession[] = [
   { id: "auth", virtualId: "v", file: "a", name: "OAuth", goal: "Implement OAuth callback", summary: "PKCE tests", lastActivityAt: "2026-01-01", origin: "created", baselineSources: [] },
@@ -23,6 +24,25 @@ describe("decision adapter", () => {
     expect(request.state.sessions).toHaveLength(2);
     expect(request.state.sessions[0].summary).toBe("PKCE tests");
     expect(request.questions.route.criteria.S0).not.toContain("Implement OAuth callback");
+  });
+  it("sends usage and context metrics with continuity-first routing instructions", async () => {
+    response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
+    const candidates: RoutingCandidate[] = members.map((member, index) => ({
+      ...member,
+      metrics: {
+        lifetimeUsage: normalizeUsage(index === 0
+          ? { input: 1200, output: 300, cacheRead: 5000, cacheWrite: 100, cost: { total: 0.25 } }
+          : undefined),
+        context: { tokens: index === 0 ? 6600 : null, contextWindow: null, estimated: true },
+      },
+    }));
+    await new SystemOneBackend("http://localhost", "m").evaluate("Add tests", candidates);
+    const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(request.state.sessions[0].metrics).toEqual(candidates[0].metrics);
+    expect(request.state.sessions[1].metrics.lifetimeUsage.incompleteCost).toBe(true);
+    expect(request.state.sessions[1].metrics.context.tokens).toBeNull();
+    expect(request.questions.route.instructions).toContain("Prioritize required task context over savings");
+    expect(request.questions.route.instructions).toContain("not the price of the next request");
   });
   it.each([0.6001, 0.61, 0.7, 0.85])("automatically continues a session above 60%% (score %s)", async score => {
     response("S0", { NEW: 1 - score, S0: score, S1: 0 });

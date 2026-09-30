@@ -3,13 +3,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
   type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { SystemOneBackend, shortlist, type DecisionBackend, type RoutingDecision } from "./decision";
+import { SystemOneBackend, shortlist, type DecisionBackend, type RoutingCandidate, type RoutingDecision } from "./decision";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
 import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
 import type { MemberSession, RuntimeState } from "./types";
-import { extractUsage, normalizeUsage, sumUsage, usageLine } from "./usage";
+import { compactUsage, extractUsage, normalizeUsage, savedContextTokens, sumUsage, usageLine } from "./usage";
 import { redactForLlm } from "../secret-redaction/state";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
@@ -26,6 +26,7 @@ const COMMANDS = [
   { name: "list", usage: "list", description: "List virtual sessions and usage" },
   { name: "status", usage: "status", description: "Show detailed status and usage" },
   { name: "rename", usage: "rename <name>", description: "Rename the selected virtual session" },
+  { name: "delete", usage: "delete [name-or-id]", description: "Delete a virtual session after confirmation; keep real transcripts" },
   { name: "sessions", usage: "sessions", description: "Select a real member session" },
   { name: "attach", usage: "attach [name-or-id]", description: "Attach the current real session after confirmation" },
   { name: "compact", usage: "compact [instructions]", description: "Compact the current real session" },
@@ -179,24 +180,14 @@ export class Orchestrator {
       ctx.ui.setWidget(UI_KEY, undefined);
       return;
     }
-    const members = data.members.filter(item => item.virtualId === virtual.id);
     const realId = ctx.sessionManager.getSessionId();
-    const current = members.find(item => item.id === realId);
     const groupUsage = sumUsage(data.usage.filter(item => item.virtualId === virtual.id).map(item => item.usage));
     const currentUsage = sumUsage(extractUsage(ctx.sessionManager.getEntries(), realId).map(item => item.usage));
-    const contribution = sumUsage(data.usage.filter(item => item.virtualId === virtual.id && item.realId === realId).map(item => item.usage));
-    const context = ctx.getContextUsage();
-    const lines = [
-      `Orchestrator: ${virtual.name} | routing ${state.enabled ? "on" : "paused"} | virtual created ${data.virtualSessions.length}`
-        + ` | real created ${members.filter(item => item.origin === "created").length} (+${members.filter(item => item.origin === "attached").length} attached)`,
-      `Current real: ${current?.name ?? "pending first request / unmanaged entry session"}`
-        + (current ? ` | context ${context?.tokens ?? "?"} / ${context?.contextWindow ?? "?"}` : ""),
-      usageLine("Virtual total", groupUsage),
-      ...(current ? [usageLine("Real lifetime", currentUsage), usageLine("Real contribution", contribution)] : []),
-    ];
-    ctx.ui.setStatus(UI_KEY, `orchestrator ${virtual.name}: ${state.enabled ? "on" : "paused"}`);
+    const name = virtual.name.replace(/[\r\n\t]/g, " ");
+    const line = `${name} · V ${compactUsage(groupUsage)} · R ${compactUsage(currentUsage)}`;
+    ctx.ui.setStatus(UI_KEY, undefined);
     ctx.ui.setWidget(UI_KEY, (_tui, theme) => ({
-      render: width => lines.map(line => truncateToWidth(theme.fg("muted", line), width)),
+      render: width => [truncateToWidth(theme.fg("muted", line), width)],
       invalidate() {},
     }));
   }
@@ -247,7 +238,7 @@ export class Orchestrator {
     this.showStatus(ctx, store, state);
   }
 
-  private async pickDecision(text: string, candidates: MemberSession[], ctx: ExtensionCommandContext,
+  private async pickDecision(text: string, candidates: RoutingCandidate[], ctx: ExtensionCommandContext,
     virtualId: string, requestId: string, store: RegistryStore): Promise<RoutingDecision | undefined> {
     if (!candidates.length) return { action: "new", reason: "No eligible member session exists." };
     if (this.backend) {
@@ -258,11 +249,14 @@ export class Orchestrator {
         const result = await this.backend.evaluate(safeInput.text, safeCandidates);
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: result.usage ?? normalizeUsage(undefined) });
         if (result.decision.action !== "clarify") return result.decision;
-        ctx.ui.notify(result.decision.reason, "info");
+        ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
       } catch {
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: normalizeUsage(undefined) });
-        ctx.ui.notify("Decision backend unavailable or invalid; choose a task manually.", "warning");
+        ctx.ui.notify("Decision backend unavailable or invalid; continuing the current session.", "warning");
       }
+      const current = candidates.find(item => item.id === ctx.sessionManager.getSessionId());
+      if (!current) throw new Error("No eligible current session for decision fallback. No worker request was sent.");
+      return { action: "reuse", realId: current.id, reason: "Decision was inconclusive or unavailable; retained the current session." };
     }
     const labels = candidates.map(item => `Continue: ${item.name} [${item.id.slice(0, 8)}]`);
     const selection = await ctx.ui.select("Route this request (same topic is not necessarily the same task)", ["Create a new focused session", ...labels]);
@@ -306,8 +300,25 @@ export class Orchestrator {
       admitted = true;
       const virtual = data.virtualSessions.find(item => item.id === virtualId)!;
       const members = data.members.filter(item => item.virtualId === virtualId && existsSync(item.file));
-      for (const member of members) store.reconcile(member.id, extractUsage(transcript(member, store.workspace), member.id));
-      const candidates = shortlist(text, members, virtual.lastRealSessionId);
+      const savedTokens = new Map<string, number | null>();
+      for (const member of members) {
+        const entries = transcript(member, store.workspace);
+        store.reconcile(member.id, extractUsage(entries, member.id));
+        savedTokens.set(member.id, savedContextTokens(entries));
+      }
+      const reconciled = store.read();
+      const currentContext = ctx.getContextUsage();
+      const candidates: RoutingCandidate[] = shortlist(text,
+        reconciled.members.filter(item => members.some(member => member.id === item.id)), virtual.lastRealSessionId)
+        .map(member => ({
+          ...member,
+          metrics: {
+            lifetimeUsage: sumUsage(reconciled.usage.filter(item => item.realId === member.id).map(item => item.usage)),
+            context: member.id === sourceId
+              ? { tokens: currentContext?.tokens ?? null, contextWindow: currentContext?.contextWindow ?? null, estimated: false }
+              : { tokens: savedTokens.get(member.id) ?? null, contextWindow: null, estimated: true },
+          },
+        }));
       const decision = await this.pickDecision(text, candidates, ctx, virtualId, token, store);
       if (!decision) {
         store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
@@ -330,6 +341,9 @@ export class Orchestrator {
             registry.virtualSessions.find(item => item.id === virtualId)!.lastRealSessionId = realId;
           });
           this.showStatus(fresh, store, state);
+          if (realId !== sourceId) {
+            fresh.ui.notify(`Session changed to ${fresh.sessionManager.getSessionName() || "Unnamed real session"}. ${decision.reason}`, "info");
+          }
           await fresh.sendUserMessage(text);
           store.reconcile(realId, extractUsage(fresh.sessionManager.getEntries(), realId), {
             name: fresh.sessionManager.getSessionName() || "Unnamed real session",
@@ -415,6 +429,30 @@ export class Orchestrator {
       if (!state.activeId) throw new Error("Select an orchestrator first.");
       store.rename(state.activeId, argument);
       this.showStatus(ctx, store, state);
+      return;
+    }
+    if (action === "delete") {
+      if (!argument && !state.activeId) throw new Error("Select an orchestrator or use /orchestrator delete <name-or-id>.");
+      const virtual = store.find(argument || state.activeId!);
+      state.busy = true;
+      try {
+        if (!(await ctx.ui.confirm(`Delete orchestrator ${virtual.name}?`,
+          "Its membership, usage, and request metadata will be removed. Real Pi session transcripts are kept. This cannot be undone."))) return;
+        store.delete(virtual.id);
+        for (const [token, pending] of state.pending) {
+          if (pending.virtualId !== virtual.id) continue;
+          if (!state.heldDrafts.includes(pending.text)) state.heldDrafts.push(pending.text);
+          state.pending.delete(token);
+        }
+        if (state.activeId === virtual.id) {
+          state.epoch++;
+          state.enabled = false;
+          state.activeId = undefined;
+          this.restoreEditor(ctx);
+        }
+        this.showStatus(ctx, store, state);
+        ctx.ui.notify(`Deleted orchestrator ${virtual.name}. Real session transcripts were kept.`, "info");
+      } finally { state.busy = false; }
       return;
     }
     if (action === "attach") {

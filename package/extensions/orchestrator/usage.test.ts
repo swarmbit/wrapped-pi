@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractUsage, normalizeUsage, sumUsage, usageLine } from "./usage";
+import { compactUsage, emptyUsage, extractUsage, formatTokens, normalizeUsage, savedContextTokens, sumUsage, usageLine } from "./usage";
 
 const usage = { input: 10, output: 2, cacheRead: 100, cacheWrite: 20, totalTokens: 999, cost: { total: 0.2 } };
 const assistant = { type: "message", id: "entry-1", timestamp: "2026-01-01", message: {
@@ -7,6 +7,24 @@ const assistant = { type: "message", id: "entry-1", timestamp: "2026-01-01", mes
 } };
 
 describe("usage accounting", () => {
+  it("formats compact counters like the normal Pi footer", () => {
+    expect([0, 999, 1000, 9999, 10000, 999999, 1000000, 10000000].map(formatTokens))
+      .toEqual(["0", "999", "1.0k", "10.0k", "10k", "1000k", "1.0M", "10M"]);
+    expect(compactUsage(normalizeUsage(usage))).toBe("~$0.2000 ↑10 ↓2 R100 W20");
+    expect(compactUsage(emptyUsage())).toBe("~$0.0000");
+    expect(compactUsage(normalizeUsage(undefined))).toBe("partial $0.0000 (partial tokens)");
+  });
+  it("estimates saved context from the leaf branch rather than lifetime totals", () => {
+    const earlier = { ...assistant, id: "earlier", parentId: null };
+    const abandoned = { ...assistant, id: "abandoned", parentId: "earlier",
+      message: { ...assistant.message, usage: { ...usage, input: 9999 } } };
+    const leaf = { type: "message", id: "leaf", parentId: "earlier", message: { role: "user" } };
+    expect(savedContextTokens([earlier, abandoned, leaf])).toBe(132);
+    expect(savedContextTokens([assistant, { type: "compaction", id: "summary" }])).toBeNull();
+    expect(savedContextTokens([{ ...assistant, message: { role: "assistant" } }])).toBeNull();
+    expect(savedContextTokens([])).toBeNull();
+    expect(savedContextTokens([{ id: "cycle", parentId: "cycle" }])).toBeNull();
+  });
   it("uses mutually exclusive normalized categories, not raw totals", () => {
     expect(normalizeUsage(usage)).toEqual({ input: 10, output: 2, cacheRead: 100, cacheWrite: 20,
       totalTokens: 132, cost: 0.2, incompleteTokens: false, incompleteCost: false });

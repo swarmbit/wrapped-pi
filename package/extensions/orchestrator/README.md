@@ -30,7 +30,8 @@ Now add tests for that.
 
 Creating the virtual session does not adopt the currently open real transcript.
 The first request creates a descriptively named real session. Subsequent requests
-use an optional decision backend or ask you to choose a member/new session.
+use an optional decision backend or ask you to choose a member/new session when no backend is configured.
+With a backend configured, inconclusive decisions retain the current member without a picker.
 
 ```text
 /orchestrator on "Project Atlas"
@@ -60,10 +61,17 @@ also offers a help entry.
 | `/orchestrator list` | List virtual sessions, member counts, and aggregate usage |
 | `/orchestrator status` | Counts, detailed virtual/current-real usage, and cost categories |
 | `/orchestrator rename <name>` | Rename the selected virtual session without changing identity |
+| `/orchestrator delete [name-or-id]` | Delete the named or selected virtual session after confirmation; keep real transcripts |
 | `/orchestrator sessions` | Select a named real member |
 | `/orchestrator attach [name-or-id]` | Explicitly attach the current unowned real session after confirmation |
 | `/orchestrator compact [instructions]` | Run Pi's callback-based manual compaction |
 | `/orchestrator drafts` | Recover held, unsent text drafts (process-local, never automatically executed) |
+
+Deletion removes the virtual session's membership, usage, and request metadata,
+but never deletes real Pi transcript files. Deleting the selected virtual session
+pauses routing and restores the editor; pending unsent text remains recoverable
+through `/orchestrator drafts`. Other virtual sessions are unchanged. Deletion is
+refused while an orchestrator operation holds the workspace execution lease.
 
 Attachment here means **session membership**. Prior usage is excluded from the
 virtual aggregate; the real-lifetime view still includes recorded prior usage.
@@ -94,7 +102,20 @@ use the appropriate reachable host/service address and pass the environment
 variables into the container. See the [Laya multilingual Docker Compose example](../../../example/laya/README.md)
 for a CPU-only Jev-compatible server, test request, and wpi configuration.
 
-Only up to three session context summaries are submitted. Each summary refreshes
+Up to three candidates are submitted with session context summaries and usage
+metrics. Metrics include lifetime input/output/cache tokens, estimated USD cost,
+and completeness flags, including usage before attachment. The active session
+uses Pi's live context size/window. Inactive sessions use a last-response token
+estimate from the saved leaf branch; their context window is unknown. Missing
+usage and post-compaction context estimates remain partial/unknown, not zero.
+These metrics are constructed for routing and do not change registry membership.
+
+The classifier is instructed to prioritize task continuity, using context size
+and usage only as secondary signals between equally relevant sessions. Historical
+cost is not a next-request price: high cumulative usage alone must not cause a
+new session or discard needed context. This does not add automatic compaction.
+
+Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
 extractive view of the active branch's latest three user/assistant turns, newest
 first; empty assistant messages and tool results are excluded. This adds no model
@@ -104,13 +125,15 @@ an empty-summary fallback).
 
 Direct classifier inputs are processed by the bundled shared secret-redaction
 helper before being sent. Endpoint configuration is an explicit authorization to
-send these session context summaries and the
+send these session context summaries, usage/context metrics, and the
 incoming request to that endpoint; review privacy and retention first.
 
 The highest-scoring choice automatically selects continuation or new work when
 its score is **above 60%**, without an additional margin requirement. Scores at or
-below 60%, invalid candidates, over-budget requests, timeouts, and backend failures
-fall back to user selection. These scores are **not** calibrated certainty. No physical-model selection or proactive economic
+below 60%, invalid backend responses, over-budget requests, timeouts, and backend failures
+retain the current eligible member without user selection. If no eligible current
+member exists, dispatch stops and preserves the draft rather than choosing another
+session. Without a configured backend, user selection remains available. These scores are **not** calibrated certainty. No physical-model selection or proactive economic
 compaction is implemented yet.
 
 ## Editor compatibility
@@ -147,15 +170,19 @@ opt-in until `/orchestrator` enables routing.
 
 ## Usage and persistence
 
-The status widget and footer are shown only while routing is enabled; disabling
-or pausing routing hides both. `/orchestrator status` remains available while
-inactive for an explicit status report.
+The info widget shows one line only while routing is enabled:
+`<name> · V ~$0.2500 ↑10 ↓2 R100 · R ~$0.2500 ↑10 ↓2 R100`.
+V is the selected virtual session's total usage; R is the active real
+session's lifetime usage, including usage before attachment. Each section uses
+Pi-style token counters: ↑ input, ↓ output, R cache reads, W cache writes.
+Zero counters are omitted and large counts use k/M abbreviations; missing token
+data is marked partial. There is no duplicate
+footer status. Disabling or pausing routing hides the widget.
 
-Status shows virtual sessions created in this workspace, created/attached real
-members, the current real name/context size, and separate virtual/real token totals.
-It breaks down uncached input, cache reads, cache writes, and output. These cumulative
-usage figures are not current context size. The current real total is a view of the
-same expenditure, **not** an extra cost to add to the virtual total.
+`/orchestrator status` remains available for a detailed report, including session
+counts, current real name/context size, token breakdowns, and cost categories.
+These cumulative usage figures are not current context size. The current real
+total overlaps the virtual total, **not** an extra cost to add to it.
 
 The ledger deduplicates copied entry identities and includes observed worker/tool
 usage, summary usage, warming, and classifier overhead. Older Pi releases do not

@@ -162,7 +162,7 @@ describe("orchestrator integration", () => {
     const h = harness();
     await h.current.orchestrator.command("help", h.current.ctx);
     const help = h.current.ctx.ui.notify.mock.calls.at(-1)[0];
-    for (const name of ["help", "new", "on", "off", "list", "status", "rename", "sessions", "attach", "compact", "drafts"]) {
+    for (const name of ["help", "new", "on", "off", "list", "status", "rename", "delete", "sessions", "attach", "compact", "drafts"]) {
       expect(help).toContain(`/orchestrator ${name}`);
     }
     expect(help).not.toContain("__dispatch");
@@ -171,6 +171,63 @@ describe("orchestrator integration", () => {
     expect(h.current.ctx.ui.notify).toHaveBeenLastCalledWith(help, "info");
     expect(runtimeFor(workspace).enabled).toBe(false);
     expect(h.store().read().virtualSessions).toHaveLength(0);
+  });
+
+  it("deletes the selected group, restores the editor, and keeps transcripts and drafts", async () => {
+    const h = harness();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const file = h.current.ctx.sessionManager.getSessionFile();
+    const before = readFileSync(file, "utf8");
+    const state = runtimeFor(workspace);
+    state.pending.set("unsent", { text: "Retained draft", virtualId: state.activeId! });
+    await h.current.orchestrator.command("delete", h.current.ctx);
+    expect(h.current.ctx.ui.confirm).toHaveBeenCalledWith("Delete orchestrator Atlas?", expect.stringContaining("transcripts are kept"));
+    expect(h.store().read().virtualSessions).toEqual([]);
+    expect(state.activeId).toBeUndefined();
+    expect(state.enabled).toBe(false);
+    expect(state.busy).toBe(false);
+    expect(state.pending.size).toBe(0);
+    expect(state.heldDrafts).toContain("Retained draft");
+    expect(h.current.ctx.ui.getEditorComponent()).toBeUndefined();
+    expect(h.current.ctx.ui.setWidget).toHaveBeenLastCalledWith("wpi-orchestrator", undefined);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(h.current.ctx.switchSession).not.toHaveBeenCalled();
+  });
+
+  it("cancels deletion without changes and can delete an inactive group by name or ID", async () => {
+    const h = harness();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    const activeId = runtimeFor(workspace).activeId;
+    const factory = h.current.ctx.ui.getEditorComponent();
+    const other = h.store().create("Other Project");
+    const before = h.store().read();
+    h.current.ctx.ui.confirm.mockResolvedValueOnce(false);
+    await h.current.orchestrator.command('delete "Other Project"', h.current.ctx);
+    expect(h.store().read()).toEqual(before);
+    expect(runtimeFor(workspace).busy).toBe(false);
+    await h.current.orchestrator.command(`delete ${other.id}`, h.current.ctx);
+    expect(h.store().read().virtualSessions.map(item => item.id)).toEqual([activeId]);
+    expect(runtimeFor(workspace).activeId).toBe(activeId);
+    expect(runtimeFor(workspace).enabled).toBe(true);
+    expect(h.current.ctx.ui.getEditorComponent()).toBe(factory);
+  });
+
+  it("rejects deletion without a target, while busy, or during another process's execution", async () => {
+    const h = harness();
+    await expect(h.current.orchestrator.command("delete", h.current.ctx)).rejects.toThrow("Select an orchestrator");
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    const state = runtimeFor(workspace);
+    state.busy = true;
+    await expect(h.current.orchestrator.command("delete", h.current.ctx)).rejects.toThrow("request is running");
+    state.busy = false;
+    const release = h.store().lease();
+    try {
+      await expect(h.current.orchestrator.command("delete", h.current.ctx)).rejects.toThrow("Another orchestrator");
+      expect(h.store().read().virtualSessions).toHaveLength(1);
+      expect(state.enabled).toBe(true);
+      expect(state.busy).toBe(false);
+    } finally { release(); }
   });
 
   it("hides inactive status while keeping explicit status available", async () => {
@@ -234,29 +291,102 @@ describe("orchestrator integration", () => {
     expect(h.store().read().usage).toHaveLength(3);
   });
 
-  it("updates Current real after clarification selects a new or existing session", async () => {
-    const backend: DecisionBackend = { evaluate: vi.fn(async () => ({
-      decision: { action: "clarify" as const, reason: "Uncertain" },
-    })) };
+  it.each(["ambiguous", "unavailable"])("keeps the current session without a picker when the backend is %s", async mode => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async () => {
+      if (mode === "unavailable") throw new Error("Backend unavailable");
+      return { decision: { action: "clarify" as const, reason: "Uncertain" } };
+    }) };
     const h = harness(backend);
-    const currentRealLine = () => {
-      const factory = h.current.ctx.ui.setWidget.mock.calls.at(-1)[1];
-      return factory({}, h.current.ctx.ui.theme).render(1000)[1];
-    };
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
     await h.submit("Implement OAuth");
     const firstId = h.current.id;
-    expect(currentRealLine()).toContain("Atlas / Implement OAuth");
-    h.current.ctx.ui.select.mockResolvedValueOnce("Create a new focused session");
+    await h.submit("Now add tests for that");
+    expect(h.current.id).toBe(firstId);
+    expect(h.current.ctx.ui.select).not.toHaveBeenCalled();
+    expect(h.sent).toHaveLength(2);
+    const data = h.store().read();
+    expect(data.members).toHaveLength(1);
+    expect(data.requests.at(-1)).toMatchObject({ state: "completed", realId: firstId });
+    expect(data.requests.at(-1)?.reason).toContain("retained the current session");
+    expect(data.usage.filter(item => item.category === "decision")).toHaveLength(1);
+  });
+
+  it("shows one line of virtual and active real costs after routing between sessions", async () => {
+    const evaluate = vi.fn<DecisionBackend["evaluate"]>();
+    const backend: DecisionBackend = { evaluate };
+    const h = harness(backend);
+    const infoLine = () => {
+      const factory = h.current.ctx.ui.setWidget.mock.calls.at(-1)[1];
+      const lines = factory({}, h.current.ctx.ui.theme).render(1000);
+      expect(lines).toHaveLength(1);
+      expect(h.current.ctx.ui.setStatus).toHaveBeenLastCalledWith("wpi-orchestrator", undefined);
+      return lines[0];
+    };
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    expect(infoLine()).toBe("Atlas · V ~$0.0000 · R ~$0.0000");
+    await h.submit("Implement OAuth");
+    const firstId = h.current.id;
+    expect(infoLine()).toBe("Atlas · V ~$0.2500 ↑10 ↓2 R100 · R ~$0.2500 ↑10 ↓2 R100");
+    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Independent task" } });
     await h.submit("Set up Docker");
     expect(h.current.id).not.toBe(firstId);
-    expect(currentRealLine()).toContain("Atlas / Set up Docker");
-    expect(currentRealLine()).not.toContain("Implement OAuth");
-    h.current.ctx.ui.select.mockResolvedValueOnce(`Continue: Atlas / Implement OAuth [${firstId.slice(0, 8)}]`);
+    expect(infoLine()).toBe("Atlas · V partial $0.5000 ↑20 ↓4 R200 (partial tokens) · R ~$0.2500 ↑10 ↓2 R100");
+    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "OAuth follow-up" } });
     await h.submit("Add OAuth tests");
     expect(h.current.id).toBe(firstId);
-    expect(currentRealLine()).toContain("Atlas / Implement OAuth");
-    expect(currentRealLine()).not.toContain("Set up Docker");
+    expect(infoLine()).toBe("Atlas · V partial $0.7500 ↑30 ↓6 R300 (partial tokens) · R ~$0.5000 ↑20 ↓4 R200");
+  });
+
+  it("updates the info line when switching to a different virtual session", async () => {
+    const h = harness();
+    const infoLines = () => {
+      const factory = h.current.ctx.ui.setWidget.mock.calls.at(-1)[1];
+      return factory({}, h.current.ctx.ui.theme).render(1000);
+    };
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const atlasRealId = h.current.id;
+    expect(infoLines()).toEqual(["Atlas · V ~$0.2500 ↑10 ↓2 R100 · R ~$0.2500 ↑10 ↓2 R100"]);
+
+    await h.current.orchestrator.command("new Lisbon weather", h.current.ctx);
+    // Creating a virtual session does not adopt the still-active real session.
+    expect(infoLines()).toEqual(["Lisbon weather · V ~$0.0000 · R ~$0.2500 ↑10 ↓2 R100"]);
+    await h.submit("Check the rain in Lisbon");
+    expect(h.current.id).not.toBe(atlasRealId);
+    await h.current.orchestrator.command("compact", h.current.ctx);
+    expect(infoLines()).toEqual(["Lisbon weather · V ~$0.2700 ↑15 ↓3 R100 · R ~$0.2700 ↑15 ↓3 R100"]);
+
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    expect(h.current.id).toBe(atlasRealId);
+    expect(infoLines()).toEqual(["Atlas · V ~$0.2500 ↑10 ↓2 R100 · R ~$0.2500 ↑10 ↓2 R100"]);
+
+    await h.current.orchestrator.command("on Lisbon weather", h.current.ctx);
+    expect(infoLines()).toEqual(["Lisbon weather · V ~$0.2700 ↑15 ↓3 R100 · R ~$0.2700 ↑15 ↓3 R100"]);
+  });
+
+  it("provides reconciled lifetime usage and live/saved context for each routing candidate", async () => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async () => ({
+      decision: { action: "new" as const, reason: "Independent task" },
+    })) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    const firstId = h.current.id;
+    await h.submit("Set up Docker");
+    await h.current.orchestrator.command("compact", h.current.ctx);
+    const secondId = h.current.id;
+    await h.submit("Review the deployment");
+    const candidates = vi.mocked(backend.evaluate).mock.calls.at(-1)![1];
+    expect(candidates.find(item => item.id === firstId)?.metrics).toEqual({
+      lifetimeUsage: { input: 10, output: 2, cacheRead: 100, cacheWrite: 0,
+        totalTokens: 112, cost: 0.25, incompleteTokens: false, incompleteCost: false },
+      context: { tokens: 112, contextWindow: null, estimated: true },
+    });
+    expect(candidates.find(item => item.id === secondId)?.metrics).toEqual({
+      lifetimeUsage: { input: 15, output: 3, cacheRead: 100, cacheWrite: 0,
+        totalTokens: 118, cost: 0.27, incompleteTokens: false, incompleteCost: false },
+      context: { tokens: 24, contextWindow: 200000, estimated: false },
+    });
   });
 
   it("clarifies when no backend is configured and restores cancelled input", async () => {
@@ -349,6 +479,9 @@ describe("orchestrator integration", () => {
     const h = harness();
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
     await h.current.ctx.sendUserMessage("Existing work");
+    h.current.orchestrator.observe(h.current.ctx);
+    const widget = h.current.ctx.ui.setWidget.mock.calls.at(-1)[1]({}, h.current.ctx.ui.theme);
+    expect(widget.render(1000)).toEqual(["Atlas · V ~$0.0000 · R ~$0.2500 ↑10 ↓2 R100"]);
     await h.current.orchestrator.command("off", h.current.ctx);
     await h.current.orchestrator.command("attach Atlas", h.current.ctx);
     const data = h.store().read();
