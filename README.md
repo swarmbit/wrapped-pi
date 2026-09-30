@@ -334,6 +334,24 @@ text is inspected for credential field names, authorization headers, URL passwor
 private keys, and common provider-token formats. Short/common values are masked only
 in credential contexts to avoid corrupting ordinary code.
 
+To add credential field or environment-variable names, set `secretRedaction.keys`
+in `~/.pi/wpi.yml` or the project's `.pi/wpi.yml`:
+
+```yaml
+secretRedaction:
+  keys:
+    - CUSTOM_CREDENTIAL
+    - databaseCode
+```
+
+Both lists are combined with built-in detection. Names match exactly after
+camelCase, case, and separator normalization (`databaseCode` matches
+`DATABASE_CODE`); they are not regexes or suffix patterns. Values under these names
+are learned from environment variables, scanned files, structured fields, and text
+assignments. Changes are picked up on the next request; previously learned secrets
+remain protected for the session. Invalid key lists block redaction rather than
+silently disabling it. Do not put secret values in this list.
+
 Detected values become opaque `__WPI_SECRET_...__` placeholders in user input,
 tool results, conversation context, system prompts, and provider request bodies.
 Before tool execution, placeholders in string arguments are restored. Original files,

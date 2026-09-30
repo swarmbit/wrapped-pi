@@ -108,8 +108,9 @@ native chat with a console diagnostic. Pi upgrades need compatibility testing.
 ## Optional local/hosted decision model
 
 There are no classifier calls until you explicitly configure an endpoint. The
-first request in an empty virtual session does not need classification. Otherwise,
-without a backend, the extension asks you to choose a task rather than guessing.
+first request in an empty virtual session does not need routing classification
+(but can use the optional new-session model selector below). Otherwise, without a
+backend, the extension asks you to choose a task rather than guessing.
 
 Set these variables in the environment **of the Pi process**:
 
@@ -175,12 +176,56 @@ timeouts, and backend failures retain the current eligible member. If none exist
 and no strongly supported route is available, dispatch stops and preserves the draft.
 Without a configured backend, the picker lists the current session first; explicit
 user choices can still switch or create a session. The first request in an empty
-virtual session creates its first member without classification. These scores are
-**not** calibrated certainty or proof of task fit. No physical-model selection is implemented.
+virtual session creates its first member without routing classification. These scores are
+**not** calibrated certainty or proof of task fit.
+
+## Worker model selection at creation
+
+Optionally configure the models the selector may choose in `~/.pi/wpi.yml` or
+`.pi/wpi.yml` in the workspace:
+
+```yaml
+orchestrator:
+  models:
+    - model: provider/fast-model
+      summary: Simple questions, small edits, and routine tasks.
+    - model: provider/strong-model
+      summary: Complex implementation, debugging, and architectural reasoning.
+```
+
+Use exact Pi `provider/model` IDs (the model ID may itself contain slashes).
+Models must already be registered and authenticated in Pi; this configuration
+neither registers providers nor supplies credentials. Summaries describe when to
+use each model, including any relevant capability, latency, or cost tradeoffs.
+A project list **replaces**, not merges, the user list; `models: []` disables selection.
+Edits are read before each new member creation. Lists allow up to 32 unique models,
+with nonempty summaries of at most 2,000 characters.
+
+After routing chooses NEW, including the first member of an empty virtual session,
+a separate question to the configured decision backend selects **only the worker
+model**. It does not decide which session to reuse/create or whether a handoff is
+needed. The selector's own model remains `WPI_ORCHESTRATOR_DECISION_MODEL`.
+Only configured models available in Pi are candidates. The initial request,
+up to 12,000 characters of recent source context, current model ID, and model
+summaries pass through secret redaction before being sent to the backend.
+Requests over 4,000 characters fall back rather than being silently truncated.
+
+The controller requires a score of at least 80% and a margin of at least 60
+percentage points. Missing configuration/backend support, invalid configuration,
+unknown or unavailable models, ambiguous responses, and network failures retain
+the **source session's current model**. The fresh extension runtime applies and
+persists the selected or fallback model before the first worker request. If neither
+can be applied, delivery is interrupted; an arbitrary model is never substituted.
+Pi's native `setModel` also updates its default model setting.
+
+Subsequent requests and resumed sessions use Pi's saved model—no automatic
+mid-session or resume-time reselection. Manual Pi model changes remain possible.
+Selector usage is recorded separately under the `decision` category, including
+ambiguous responses; unreported usage/cost stays unknown.
 
 ## Decision debug logging
 
-Use `/orchestrator debug on` to inspect routing and handoff decisions. `debug off`
+Use `/orchestrator debug on` to inspect routing, handoff, and new-session model decisions. `debug off`
 stops logging immediately (including in-flight calls); `debug status` shows state
 and the log path without writing; `debug` alone toggles. These commands also work
 while an orchestrator request is running. Debugging is off by default, stays

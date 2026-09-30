@@ -49,6 +49,16 @@ describe("standalone orchestrator log viewer", () => {
     expect(logs.filter(calls, "", "routing", "incomplete")).toHaveLength(1);
     expect(logs.filter(calls, "not present", "", "")).toHaveLength(0);
   });
+  it("recognizes and filters new-session worker model decisions", () => {
+    const data = [
+      row("decision_start", { callId: "model", kind: "model", input: { request: "Implement feature" } }),
+      row("decision_end", { callId: "model", kind: "model", status: "ok", outcome: "selected", effectiveModel: "test/strong" }),
+    ];
+    const calls = logs.group(logs.parse([{ name: "log", text: jsonl(data) }]).records);
+    expect(logs.filter(calls, "strong", "model", "ok")).toHaveLength(1);
+    expect(calls[0].end.effectiveModel).toBe("test/strong");
+    expect(readFileSync(resolve(directory, "index.html"), "utf8")).toContain('<option value="model">Worker model</option>');
+  });
   it("keeps unknown totals partial instead of treating them as zero", () => {
     const calls = logs.group(logs.parse([{ name: "log", text: jsonl(fixture()) }]).records);
     expect(logs.stats(calls)).toMatchObject({ calls: 3, errors: 1, incomplete: 1, medianDuration: 350,

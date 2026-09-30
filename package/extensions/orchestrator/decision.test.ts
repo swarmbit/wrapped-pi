@@ -11,6 +11,53 @@ function response(choice: string, probabilities: Record<string, number>) {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: { route: { choice, probabilities } }, usage: { input_tokens: 42, output_tokens: 0 } }))));
 }
 
+describe("new-session model selection adapter", () => {
+  const input = { request: "Implement a feature", context: "Recent task context", currentModel: "test/current",
+    models: [{ model: "test/fast", summary: "Routine tasks" }, { model: "test/strong", summary: "Complex implementation" }] };
+  const modelResponse = (choice: string, probabilities: Record<string, number>) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: {
+      worker_model: { choice, probabilities },
+    }, usage: { input_tokens: 20, output_tokens: 0 } }))));
+  };
+  it("selects only an allowlisted model using its configured summary", async () => {
+    modelResponse("M1", { M0: 0.1, M1: 0.9 });
+    const result = await new SystemOneBackend("http://localhost", "selector").evaluateModel(input);
+    expect(result).toMatchObject({ model: "test/strong", confidence: 0.9, margin: 0.8 });
+    expect(result.usage?.input).toBe(20);
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.model).toBe("selector");
+    expect(body.questions.worker_model.criteria).toEqual({ M0: "Routine tasks", M1: "Complex implementation" });
+    expect(Object.keys(body.questions)).toEqual(["worker_model"]);
+    expect(body.state.request).toBe(input.request);
+    expect(body.state.context).toBe(input.context);
+    expect(body.state.currentModel).toBe("test/current");
+  });
+  it("returns no model on ambiguity but retains usage", async () => {
+    modelResponse("M1", { M0: 0.4, M1: 0.6 });
+    const result = await new SystemOneBackend("http://localhost", "selector").evaluateModel(input);
+    expect(result.model).toBeUndefined();
+    expect(result.usage?.input).toBe(20);
+  });
+  it.each([
+    ["M2", { M0: 0.1, M1: 0.9 }],
+    ["M1", { M1: 1 }],
+    ["M1", { M0: 0.1, M1: 0.9, EXTRA: 0 }],
+    ["M0", { M0: 0.1, M1: 0.9 }],
+    ["M1", { M0: -1, M1: 2 }],
+    ["M1", { M0: 0.3, M1: 0.9 }],
+  ])("rejects invalid choices and scores (%s)", async (choice, probabilities) => {
+    modelResponse(choice as string, probabilities as Record<string, number>);
+    await expect(new SystemOneBackend("http://localhost", "selector").evaluateModel(input)).rejects.toThrow();
+  });
+  it("rejects over-budget context or request before fetching", async () => {
+    modelResponse("M1", { M0: 0.1, M1: 0.9 });
+    const backend = new SystemOneBackend("http://localhost", "selector");
+    await expect(backend.evaluateModel({ ...input, request: "a".repeat(4001) })).rejects.toThrow("budget");
+    await expect(backend.evaluateModel({ ...input, context: "a".repeat(12001) })).rejects.toThrow("budget");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("handoff decision adapter", () => {
   const input = { request: "Continue that", sourceSummary: "PKCE selected", destinationSummary: "OAuth", switchReason: "Required prior context", preservationNotes: "Keep pending tests" };
   it.each(["NEEDED", "NOT_NEEDED"])("accepts a strong %s handoff decision", async choice => {

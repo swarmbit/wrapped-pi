@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
   type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { SystemOneBackend, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type RoutingCandidate, type RoutingDecision } from "./decision";
+import { SystemOneBackend, permitsModelSelection, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type ModelSelectionResult, type RoutingCandidate, type RoutingDecision } from "./decision";
+import { loadModelOptions, modelIdentity } from "./model-config";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
@@ -141,7 +142,7 @@ export class Orchestrator {
     return { store: this.store, state: this.state! };
   }
 
-  start(reason: string, ctx: ExtensionContext): void {
+  async start(reason: string, ctx: ExtensionContext): Promise<void> {
     if (ctx.mode !== "tui") return;
     const { store, state } = this.initialize(ctx);
     const transition = state.transition;
@@ -155,6 +156,25 @@ export class Orchestrator {
       state.activeId = store.read().lastSelectedVirtualId;
     }
     state.boundSessionId = ctx.sessionManager.getSessionId();
+    if (internal && reason === "new" && transition.initialModel) {
+      // The old pi API is invalid after replacement. Apply through this fresh
+      // extension instance, before withSession can send the first worker request.
+      try {
+        const apply = async (identity: { provider: string; id: string }) => {
+          const model = ctx.modelRegistry.find(identity.provider, identity.id);
+          if (!model || !await this.pi.setModel(model)) throw new Error("Model unavailable.");
+        };
+        try { await apply(transition.initialModel); }
+        catch {
+          if (!transition.fallbackModel) throw new Error("No source model fallback.");
+          await apply(transition.fallbackModel);
+          ctx.ui.notify("Selected model unavailable; new session retained the source model.", "warning");
+        }
+      } catch {
+        transition.modelError = "Could not initialize the new session with its selected or source model. No worker request was sent.";
+        ctx.ui.notify(transition.modelError, "error");
+      }
+    }
     if (state.enabled) this.installEditor(ctx);
     this.observe(ctx);
     if (!internal && state.activeId) ctx.ui.notify("Orchestrator paused. Use /orchestrator on <name> to resume.", "info");
@@ -375,6 +395,44 @@ export class Orchestrator {
     throw new Error("Invalid task selection.");
   }
 
+  private async pickNewSessionModel(text: string, ctx: ExtensionCommandContext,
+    virtualId: string, requestId: string, store: RegistryStore): Promise<{ provider: string; id: string } | undefined> {
+    const fallback = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+    const debug = beginDecisionDebug(ctx, "model", requestId, virtualId, { request: text,
+      currentModel: fallback ? `${fallback.provider}/${fallback.id}` : null });
+    let result: ModelSelectionResult | undefined;
+    let called = false;
+    let error: unknown;
+    try {
+      const configured = loadModelOptions(ctx.cwd);
+      if (!configured.length || !this.backend?.evaluateModel) return fallback;
+      const available = new Set(ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`));
+      const models = configured.filter(option => available.has(option.model));
+      if (!models.length) throw new Error("No configured worker model is available.");
+      const input = redactForLlm({ request: text,
+        context: sessionContextSummary(ctx.sessionManager.getBranch()).slice(0, 12000),
+        currentModel: fallback ? `${fallback.provider}/${fallback.id}` : undefined, models }, ctx);
+      called = true;
+      result = await this.backend.evaluateModel(input, undefined, debug.trace);
+      store.record({ source: `model-decision:${requestId}`, virtualId, category: "decision",
+        usage: result.usage ?? normalizeUsage(undefined) });
+      if (!result.model || !models.some(option => option.model === result!.model) || !permitsModelSelection(result)) {
+        throw new Error("Model selection was ambiguous or outside the available allowlist.");
+      }
+      return modelIdentity(result.model);
+    } catch (caught) {
+      error = caught;
+      if (called && !result) store.record({ source: `model-decision:${requestId}`, virtualId,
+        category: "decision", usage: normalizeUsage(undefined) });
+      ctx.ui.notify("Model selection unavailable or ambiguous; new session will retain the source model.", "warning");
+      return fallback;
+    } finally {
+      debug.finish({ backendResult: result ?? null, backendCalled: called,
+        effectiveModel: result?.model && !error ? result.model : fallback ? `${fallback.provider}/${fallback.id}` : null,
+        outcome: result?.model && !error ? "selected" : "source_model_retained" }, result?.usage, error);
+    }
+  }
+
   private async dispatch(token: string, ctx: ExtensionCommandContext): Promise<void> {
     const { store, state } = this.initialize(ctx);
     const envelope = state.pending.get(token);
@@ -480,6 +538,7 @@ export class Orchestrator {
         replaced = true;
         const realId = fresh.sessionManager.getSessionId();
         try {
+          if (state.transition?.modelError) throw new Error(state.transition.modelError);
           store.update(registry => {
             const request = registry.requests.find(item => item.id === token)!;
             request.realId = realId;
@@ -511,7 +570,12 @@ export class Orchestrator {
       };
       if (decision.action === "new") {
         const name = realName(virtual.name, text);
-        state.transition = { reason: "new", virtualId };
+        const fallbackModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+        const initialModel = await this.pickNewSessionModel(text, ctx, virtualId, token, store);
+        if (!state.enabled || state.activeId !== virtualId || state.epoch !== handoffEpoch) {
+          throw new Error("Orchestration changed during model selection; no worker request was sent.");
+        }
+        state.transition = { reason: "new", virtualId, initialModel, fallbackModel };
         const result = await ctx.newSession({
           setup: async manager => {
             const file = manager.getSessionFile();
@@ -720,8 +784,8 @@ export default function (pi: ExtensionAPI) {
   installCompaction(pi, ctx => orchestrator.compactionEnabled(ctx), undefined, actionGate);
   const sessionSwitch = installSessionSwitch(pi, orchestrator, actionGate);
   pi.on("before_agent_start", (event, ctx) => orchestrator.beforeRequest(event.prompt, ctx));
-  const safe = (ctx: ExtensionContext, operation: () => void) => {
-    try { operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
+  const safe = async (ctx: ExtensionContext, operation: () => void | Promise<void>) => {
+    try { await operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
   };
   pi.registerCommand("orchestrator", {
     description: "Named virtual sessions and routing; /orchestrator help lists commands",
@@ -742,8 +806,8 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
-  pi.on("session_start", (event, ctx) => safe(ctx, () => {
-    orchestrator.start(event.reason, ctx);
+  pi.on("session_start", (event, ctx) => safe(ctx, async () => {
+    await orchestrator.start(event.reason, ctx);
     if (invalidBackend && ctx.mode === "tui") ctx.ui.notify("Invalid orchestrator decision URL; manual clarification is available.", "warning");
   }));
   pi.on("session_shutdown", (event, ctx) => safe(ctx, () => orchestrator.shutdown(event.reason, ctx)));

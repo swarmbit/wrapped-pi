@@ -67,7 +67,7 @@ export interface DecisionDebugSpan {
   finish(data: Record<string, unknown>, usage?: TokenUsage, error?: unknown): void;
 }
 
-export function beginDecisionDebug(ctx: ExtensionContext, kind: "routing" | "handoff",
+export function beginDecisionDebug(ctx: ExtensionContext, kind: "routing" | "handoff" | "model",
   requestId: string, virtualId: string, input: unknown): DecisionDebugSpan {
   if (!runtimeFor(canonicalWorkspace(ctx.cwd)).debugEnabled) return { finish() {} };
   const callId = randomUUID();

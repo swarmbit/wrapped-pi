@@ -15,10 +15,14 @@ export interface SecretStorage {
 interface Span { start: number; end: number; value: string }
 
 /** Deliberately excludes KEY, TOKEN_COUNT, PASSWORD_FILE, API_KEY_NAME, etc. */
-export function isCredentialName(name: string): boolean {
-  const normalized = name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+function normalizeName(name: string): string {
+  return name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase();
+}
+
+export function isCredentialName(name: string): boolean {
+  const normalized = normalizeName(name);
   return /(?:^|_)(?:api_key|access_key(?:_id)?|secret_key|private_key|client_secret|signing_key|encryption_key|password|passwd|pwd|secret|token|credentials?|authorization|auth|cookie)$/.test(normalized);
 }
 
@@ -30,13 +34,13 @@ function isCandidate(value: string): boolean {
 }
 
 /** Find credential values, preserving their surrounding syntax byte-for-byte. */
-function credentialSpans(text: string, key = ""): Span[] {
+function credentialSpans(text: string, key: string, matchesName: (name: string) => boolean): Span[] {
   const spans: Span[] = [];
   const add = (start: number, value: string) => {
     if (isCandidate(value)) spans.push({ start, end: start + value.length, value });
   };
 
-  if (isCredentialName(key)) {
+  if (matchesName(key)) {
     const authorization = /^(?:Bearer|Basic)\s+(\S+)$/i.exec(text);
     if (authorization) add(text.length - authorization[1].length, authorization[1]);
     else add(0, text);
@@ -46,7 +50,7 @@ function credentialSpans(text: string, key = ""): Span[] {
   // Quoted values may contain whitespace, escaped quotes, or PEM newlines.
   const assignments = /(?<![\w.-])["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*[:=][ \t]*/g;
   for (const match of text.matchAll(assignments)) {
-    if (!isCredentialName(match[1])) continue;
+    if (!matchesName(match[1])) continue;
     const offset = match.index! + match[0].length;
     const parsed = /^(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;#&{}\[\]"'`]+))/.exec(text.slice(offset));
     if (!parsed) continue;
@@ -118,6 +122,16 @@ export class SecretRedactor {
   private readonly byToken = new Map<string, string>();
   private knownPattern: RegExp | undefined;
   private readonly scope: string;
+  private credentialKeys = new Set<string>();
+
+  /** Additional exact names, normalized like built-in names; never replace defaults. */
+  setCredentialKeys(keys: Iterable<string>): void {
+    this.credentialKeys = new Set([...keys].map(normalizeName));
+  }
+
+  isCredentialName(name: string): boolean {
+    return isCredentialName(name) || this.credentialKeys.has(normalizeName(name));
+  }
 
   constructor(private readonly storage?: SecretStorage) {
     this.scope = storage?.scope ?? randomBytes(8).toString("hex");
@@ -154,13 +168,13 @@ export class SecretRedactor {
   discover<T>(value: T): void {
     mapStrings(value, (text, key) => {
       for (const match of text.matchAll(placeholderPattern())) this.resolve(match[0]);
-      for (const span of credentialSpans(text, key)) this.registerSecret(span.value);
+      for (const span of credentialSpans(text, key, name => this.isCredentialName(name))) this.registerSecret(span.value);
       return text;
     });
   }
 
   private redactString(text: string, key: string): string {
-    const spans = credentialSpans(text, key);
+    const spans = credentialSpans(text, key, name => this.isCredentialName(name));
     // Short/common values are masked only in credential fields, never throughout code.
     if (!this.knownPattern) {
       const values = [...this.byValue.keys()].filter(value => value.length >= 8 && !COMMON_VALUES.has(value.toLowerCase()))

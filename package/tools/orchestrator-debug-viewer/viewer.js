@@ -34,6 +34,7 @@
     return node;
   }
   function outcome(call) {
+    if (call.kind === "model" && typeof call.end?.effectiveModel === "string") return `model → ${call.end.effectiveModel}`;
     const decision = call.end?.effectiveDecision || call.end?.backendResult?.decision;
     return typeof decision?.action === "string" ? `${decision.action}${typeof decision.realId === "string" ? ` → ${decision.realId.slice(0, 8)}` : ""}` : call.outcome.replaceAll("_", " ");
   }
@@ -98,7 +99,7 @@
       for (const [label, value] of [["Call", call.id], ["Request", call.requestId], ["Virtual session", call.virtualId], ["Real session", call.sessionId], ["Endpoint", typeof call.httpRequest?.endpoint === "string" ? call.httpRequest.endpoint : undefined]]) ids.append(el("dt", label), el("dd", value || "—"));
       panel.append(ids, block("Original request", call.request || "Not available in this snapshot."));
       if (call.end?.error) panel.append(block("Error", call.end.error));
-      panel.append(block("Controller outcome", { outcome: call.end?.outcome, effectiveDecision: call.end?.effectiveDecision, result: call.end?.result, backendResult: call.end?.backendResult, backendCalled: call.end?.backendCalled }));
+      panel.append(block("Controller outcome", { outcome: call.end?.outcome, effectiveDecision: call.end?.effectiveDecision, effectiveModel: call.end?.effectiveModel, result: call.end?.result, backendResult: call.end?.backendResult, backendCalled: call.end?.backendCalled }));
       panel.append(block("Usage and timing", { metrics: call.end?.metrics, usage: call.end?.usage }));
       const related = calls.filter(other => other.id !== call.id && call.requestId && other.requestId === call.requestId);
       if (related.length) {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -54,6 +54,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
   let current: any;
   let failWorker = false;
   let cancelReplacement = false;
+  let unavailableModels: string[] = [];
   let beforeSend: (() => Promise<void>) | undefined;
   const tui = {};
   const chat = new InteractiveMode({} as any) as any;
@@ -104,7 +105,19 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
       setWidget: vi.fn((..._args: any[]) => assertAlive()),
       theme: { fg: (_color: string, text: string) => text },
     };
-    const pi: any = { setSessionName: vi.fn((name: string) => { assertAlive(); manager.appendSessionInfo(name); }) };
+    let model = { provider: "test", id: "current" };
+    const available = [model, { provider: "test", id: "fast" }, { provider: "test", id: "strong" }, { provider: "test", id: "source" }];
+    const pi: any = {
+      setSessionName: vi.fn((name: string) => { assertAlive(); manager.appendSessionInfo(name); }),
+      setModel: vi.fn(async (next: typeof model) => {
+        assertAlive();
+        if (unavailableModels.includes(next.id)) return false;
+        model = next;
+        entries.push({ type: "model_change", id: `model-${++serial}`, timestamp: `time-${serial}`, provider: model.provider, modelId: model.id });
+        persist();
+        return true;
+      }),
+    };
     const orchestrator = new Orchestrator(pi, backend);
     const replace = async (reason: string, opts: any, targetId?: string, targetEntries?: any[]) => {
       assertAlive();
@@ -112,16 +125,26 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
       orchestrator.shutdown(reason, ctx as any);
       alive = false;
       const next = create(targetId);
-      if (targetEntries) { next.entries.push(...targetEntries); next.persist(); }
+      if (targetEntries) {
+        next.entries.push(...targetEntries);
+        const saved = targetEntries.filter(entry => entry.type === "model_change").at(-1);
+        if (saved) next.restoreModel({ provider: saved.provider, id: saved.modelId });
+        next.persist();
+      }
       current = next;
-      next.orchestrator.start(reason, next.ctx);
       await opts?.setup?.(next.ctx.sessionManager);
+      await next.orchestrator.start(reason, next.ctx);
       await opts?.withSession?.(next.ctx);
       chat.rebuildChatFromMessages();
       return { cancelled: false };
     };
     const ctx: any = {
       cwd: workspace, mode: "tui", hasUI: true, ui, sessionManager: manager,
+      get model() { assertAlive(); return model; },
+      modelRegistry: {
+        getAvailable: () => { assertAlive(); return available; },
+        find: (provider: string, id: string) => { assertAlive(); return available.find(item => item.provider === provider && item.id === id); },
+      },
       isIdle: () => { assertAlive(); return idle; },
       hasPendingMessages: () => false,
       getContextUsage: () => { assertAlive(); return { tokens: 24, contextWindow: 200000 }; },
@@ -153,6 +176,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
     chat.sessionManager = manager;
     ui.setEditorComponent(customFactory);
     return { orchestrator, ctx, pi, entries, persist, submitted, get editor() { return editor; }, id,
+      restoreModel: (next: typeof model) => { model = next; },
       setIdle: (value: boolean) => { idle = value; } };
   };
   current = create();
@@ -172,6 +196,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
   return { get current() { return current; }, chat, sent, submit, store,
     setFail: (value: boolean) => { failWorker = value; },
     setCancel: (value: boolean) => { cancelReplacement = value; },
+    setUnavailableModels: (ids: string[]) => { unavailableModels = ids; },
     setBeforeSend: (callback: () => Promise<void>) => { beforeSend = callback; },
     externalSwitch: () => {
       current.orchestrator.shutdown("resume", current.ctx);
@@ -182,6 +207,104 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
 }
 
 describe("orchestrator integration", () => {
+  const configureModels = () => {
+    mkdirSync(join(workspace, ".pi"));
+    writeFileSync(join(workspace, ".pi", "wpi.yml"), "orchestrator:\n  models:\n    - model: test/fast\n      summary: Routine tasks\n    - model: test/strong\n      summary: Complex tasks\n");
+  };
+
+  it("selects and persists a model before the first worker call, never reselecting on reuse or resume", async () => {
+    configureModels();
+    const backend: DecisionBackend = {
+      evaluate: vi.fn().mockImplementation(async (_text, candidates) => ({ decision: {
+        action: "reuse", realId: candidates[0].id, reason: "Continue",
+      } })),
+      evaluateModel: vi.fn().mockResolvedValue({ model: "test/strong", reason: "Complex", confidence: 0.9, margin: 0.8,
+        usage: { input: 15, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: 0, incompleteTokens: false, incompleteCost: true } }),
+    };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    const source = h.current;
+    h.setBeforeSend(async () => { expect(h.current.ctx.model.id).toBe("strong"); });
+    await h.submit("Design a complex implementation");
+    expect(source.pi.setModel).not.toHaveBeenCalled();
+    expect(h.current.pi.setModel).toHaveBeenCalledTimes(1);
+    expect(backend.evaluateModel).toHaveBeenCalledWith(expect.objectContaining({
+      request: "Design a complex implementation", currentModel: "test/current",
+      models: [{ model: "test/fast", summary: "Routine tasks" }, { model: "test/strong", summary: "Complex tasks" }],
+    }), undefined, undefined);
+    expect(h.current.entries.some((entry: any) => entry.type === "model_change" && entry.modelId === "strong")).toBe(true);
+    expect(h.store().read().usage.find(event => event.source.startsWith("model-decision:"))?.usage.input).toBe(15);
+    await h.submit("Continue that");
+    expect(h.current.ctx.model.id).toBe("strong");
+    expect(h.current.pi.setModel).not.toHaveBeenCalled();
+    await h.current.orchestrator.command("off", h.current.ctx);
+    h.externalSwitch();
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    expect(h.current.ctx.model.id).toBe("strong");
+    expect(backend.evaluateModel).toHaveBeenCalledTimes(1);
+    expect(h.current.pi.setModel).not.toHaveBeenCalled();
+  });
+
+  it.each(["failure", "ambiguous", "unknown", "unavailable"])("persists the source model on %s selection", async mode => {
+    configureModels();
+    const backend: DecisionBackend = {
+      evaluate: vi.fn(),
+      evaluateModel: vi.fn().mockImplementation(async () => {
+        if (mode === "failure") throw new Error("Offline");
+        return { model: mode === "unknown" ? "test/invented" : mode === "unavailable" ? "missing/model" : "test/fast",
+          reason: "Selection", confidence: mode === "ambiguous" ? 0.6 : 0.9, margin: mode === "ambiguous" ? 0.2 : 0.8 };
+      }),
+    };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Start work");
+    expect(h.sent).toHaveLength(1);
+    expect(h.current.ctx.model.id).toBe("current");
+    expect(h.current.entries.some((entry: any) => entry.type === "model_change" && entry.modelId === "current")).toBe(true);
+  });
+
+  it("falls back if applying the selected model fails, and blocks delivery if the fallback also fails", async () => {
+    configureModels();
+    const backend: DecisionBackend = { evaluate: vi.fn(), evaluateModel: vi.fn().mockResolvedValue({
+      model: "test/strong", reason: "Complex", confidence: 0.9, margin: 0.8,
+    }) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    h.setUnavailableModels(["strong"]);
+    await h.submit("Start complex work");
+    expect(h.current.ctx.model.id).toBe("current");
+    expect(h.sent).toHaveLength(1);
+    expect(h.current.pi.setModel).toHaveBeenCalledTimes(2);
+    backend.evaluate = vi.fn().mockResolvedValue({ decision: { action: "new", reason: "Distinct", confidence: 0.9, margin: 0.8 } });
+    h.setUnavailableModels(["strong", "current"]);
+    await h.submit("Independent complex task");
+    expect(h.sent).toHaveLength(1);
+    expect(h.store().read().requests.at(-1)?.state).toBe("interrupted");
+  });
+
+  it("filters unavailable configured models before sending the selector request", async () => {
+    configureModels();
+    writeFileSync(join(workspace, ".pi", "wpi.yml"), "orchestrator:\n  models:\n    - model: test/fast\n      summary: Routine tasks\n    - model: missing/model\n      summary: Complex tasks\n");
+    const backend: DecisionBackend = { evaluate: vi.fn(), evaluateModel: vi.fn().mockResolvedValue({
+      model: "test/fast", reason: "Only available option", confidence: 1, margin: 1,
+    }) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Start work");
+    expect(vi.mocked(backend.evaluateModel!).mock.calls[0][0].models).toEqual([{ model: "test/fast", summary: "Routine tasks" }]);
+    expect(h.current.ctx.model.id).toBe("fast");
+  });
+
+  it("retains the source model without a configured allowlist or selector support", async () => {
+    const backend: DecisionBackend = { evaluate: vi.fn(), evaluateModel: vi.fn() };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Start work");
+    expect(backend.evaluateModel).not.toHaveBeenCalled();
+    expect(h.current.ctx.model.id).toBe("current");
+    expect(h.sent).toHaveLength(1);
+  });
+
   it("offers help from the command and picker without enabling routing", async () => {
     const h = harness();
     await h.current.orchestrator.command("help", h.current.ctx);
@@ -329,7 +452,7 @@ describe("orchestrator integration", () => {
     await h.submit("Add tests");
     const path = decisionDebugPath(workspace);
     const lines = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const decisions = lines.filter(entry => entry.event === "decision_end");
+    const decisions = lines.filter(entry => entry.event === "decision_end" && entry.kind === "routing");
     expect(decisions).toHaveLength(2);
     expect(decisions[1].effectiveDecision).toMatchObject({ action: "reuse", realId: h.current.id });
     const before = readFileSync(path, "utf8");
@@ -380,7 +503,7 @@ describe("orchestrator integration", () => {
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
     await h.submit("Implement OAuth");
     const complete = vi.fn().mockResolvedValue({ stopReason: "stop", content: [{ type: "text", text: "Preserve PKCE and unfinished tests" }], usage: { input: 20, output: 5 } });
-    h.current.ctx.model = { id: "source" };
+    h.current.restoreModel({ provider: "test", id: "source" });
     h.current.ctx.modelRegistry = { complete };
     await h.submit("Continue that in independent work");
     expect(h.sent.at(-1)?.text).toContain("Continue that in independent work\n\n--- Orchestrator handoff");
