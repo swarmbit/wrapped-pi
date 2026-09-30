@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SystemOneBackend, shortlist, type RoutingCandidate } from "./decision";
+import { SystemOneBackend, permitsSessionChange, shortlist, type RoutingCandidate } from "./decision";
 import { normalizeUsage } from "./usage";
 import type { MemberSession } from "./types";
 const members: MemberSession[] = [
@@ -44,23 +44,58 @@ describe("decision adapter", () => {
     expect(request.questions.route.instructions).toContain("Prioritize required task context over savings");
     expect(request.questions.route.instructions).toContain("not the price of the next request");
   });
-  it.each([0.6001, 0.61, 0.7, 0.85])("automatically continues a session above 60%% (score %s)", async score => {
+  it.each([0.8, 0.85, 0.99])("automatically selects required context only at a strong score (score %s)", async score => {
     response("S0", { NEW: 1 - score, S0: score, S1: 0 });
     expect((await new SystemOneBackend("http://localhost", "m").evaluate("Follow up", members)).decision)
       .toMatchObject({ action: "reuse", realId: "auth" });
   });
-  it.each([0.5, 0.59, 0.6])("asks for clarification at or below 60%% (score %s)", async score => {
+  it.each([0.5, 0.6, 0.75, 0.7999])("rejects switching on insufficient scores (score %s)", async score => {
     response("S0", { NEW: (1 - score) / 2, S0: score, S1: (1 - score) / 2 });
     expect((await new SystemOneBackend("http://localhost", "m").evaluate("Follow up", members)).decision.action)
       .toBe("clarify");
   });
-  it("selects independent work above 60% without an additional margin", async () => {
+  it("rejects independent work at the previous permissive threshold", async () => {
     response("NEW", { NEW: 0.61, S0: 0.39, S1: 0 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("New task", members)).decision.action).toBe("clarify");
+  });
+  it("selects independent work at the 80% boundary", async () => {
+    response("NEW", { NEW: 0.8, S0: 0.2, S1: 0 });
     expect((await new SystemOneBackend("http://localhost", "m").evaluate("New task", members)).decision.action).toBe("new");
   });
-  it("selects independent work at a high score", async () => {
-    response("NEW", { NEW: 0.96, S0: 0.02, S1: 0.02 });
-    expect((await new SystemOneBackend("http://localhost", "m").evaluate("New task", members)).decision.action).toBe("new");
+  it.each([0.61, 0.7, 0.79, 0.7999])("retains the current session when NEW scores %s", async score => {
+    response("NEW", { NEW: score, S0: 1 - score, S1: 0 });
+    const candidates = members.map(member => ({ ...member, isCurrent: member.id === "auth" }));
+    const result = await new SystemOneBackend("http://localhost", "m").evaluate("Different topic", candidates);
+    expect(result.decision).toMatchObject({ action: "reuse", realId: "auth" });
+    const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(request.state.sessions[0].isCurrent).toBe(true);
+    expect(request.state.sessions[1].isCurrent).toBe(false);
+    expect(request.questions.route.instructions).toContain("Topic drift or a different keyword does not require isolation");
+    expect(request.questions.route.instructions).toContain("never justify changing sessions");
+  });
+  it("retains the current session on a moderately confident alternative and ambiguous follow-ups", async () => {
+    const candidates = members.map(member => ({ ...member, isCurrent: member.id === "auth" }));
+    response("S1", { NEW: 0.01, S0: 0.2, S1: 0.79 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("Add tests for that", candidates)).decision)
+      .toMatchObject({ action: "reuse", realId: "auth" });
+    response("S0", { NEW: 0.3, S0: 0.4, S1: 0.3 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("Fix it", candidates)).decision)
+      .toMatchObject({ action: "reuse", realId: "auth" });
+  });
+  it("allows another member only at a strong score and wide margin", async () => {
+    response("S1", { NEW: 0.01, S0: 0.01, S1: 0.98 });
+    expect((await new SystemOneBackend("http://localhost", "m").evaluate("Resume Docker networking", members.map(member => ({ ...member, isCurrent: member.id === "auth" })))).decision)
+      .toMatchObject({ action: "reuse", realId: "docker", confidence: 0.98, margin: 0.97 });
+  });
+  it("requires valid confidence and margin evidence from any backend", () => {
+    expect(permitsSessionChange({ action: "new", reason: "different" })).toBe(false);
+    expect(permitsSessionChange({ action: "new", reason: "different", confidence: 0.8, margin: 0.59 })).toBe(false);
+    expect(permitsSessionChange({ action: "reuse", reason: "context", confidence: 0.99, margin: 0.59 })).toBe(false);
+    expect(permitsSessionChange({ action: "reuse", reason: "context", confidence: 0.8, margin: 0.6 })).toBe(true);
+    expect(permitsSessionChange({ action: "new", reason: "isolated", confidence: 0.8, margin: 0.6 })).toBe(true);
+    for (const confidence of [NaN, Infinity, 1.1, -1]) {
+      expect(permitsSessionChange({ action: "new", reason: "invalid", confidence, margin: 0.99 })).toBe(false);
+    }
   });
   it("clarifies uncertain decisions instead of treating confidence as calibration", async () => {
     response("S0", { NEW: 0.3, S0: 0.4, S1: 0.3 });

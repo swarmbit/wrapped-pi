@@ -3,10 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
   type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { SystemOneBackend, shortlist, type DecisionBackend, type RoutingCandidate, type RoutingDecision } from "./decision";
+import { SystemOneBackend, permitsSessionChange, shortlist, type DecisionBackend, type RoutingCandidate, type RoutingDecision } from "./decision";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
+import { historyMessages, savedBranch } from "./history";
+import { bindChatHistory } from "./history-ui";
 import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
 import type { MemberSession, RuntimeState } from "./types";
 import { compactUsage, extractUsage, normalizeUsage, savedContextTokens, sumUsage, usageLine } from "./usage";
@@ -70,6 +72,7 @@ export class Orchestrator {
   private state?: RuntimeState;
   private savedFactory?: EditorFactory;
   private wrapperFactory?: EditorFactory;
+  private chatHistory?: ReturnType<typeof bindChatHistory>;
 
   constructor(private readonly pi: ExtensionAPI, private readonly backend?: DecisionBackend) {}
 
@@ -104,7 +107,7 @@ export class Orchestrator {
   shutdown(reason: string, ctx: ExtensionContext): void {
     if (ctx.mode !== "tui") return;
     this.observe(ctx);
-    this.restoreEditor(ctx);
+    this.restoreEditor(ctx, false);
     const { state } = this.initialize(ctx);
     if (!state.transition || state.transition.reason !== reason) state.enabled = false;
   }
@@ -123,7 +126,7 @@ export class Orchestrator {
   }
 
   private installEditor(ctx: ExtensionContext): void {
-    const { state } = this.initialize(ctx);
+    const { store, state } = this.initialize(ctx);
     const commands = this.pi.getCommands?.().filter(command => command.name === "orchestrator" || command.name.startsWith("orchestrator:"));
     if (commands && commands.length > 1) {
       state.enabled = false;
@@ -131,7 +134,10 @@ export class Orchestrator {
       return;
     }
     if (this.wrapperFactory) {
-      if (ctx.ui.getEditorComponent() === this.wrapperFactory) return;
+      if (ctx.ui.getEditorComponent() === this.wrapperFactory) {
+        this.chatHistory?.refresh();
+        return;
+      }
       state.enabled = false;
       ctx.ui.notify("Another extension replaced the editor; orchestrator routing is paused.", "warning");
       return;
@@ -139,6 +145,16 @@ export class Orchestrator {
     this.savedFactory = ctx.ui.getEditorComponent();
     const previous = this.savedFactory;
     this.wrapperFactory = (tui, theme, keybindings) => {
+      this.chatHistory?.dispose();
+      this.chatHistory = bindChatHistory(tui, (manager, original) => {
+        if (!state.enabled || !state.activeId) return original;
+        const members = store.read().members.filter(member => member.virtualId === state.activeId);
+        const branches = members.map(member => member.id === manager.getSessionId()
+          ? manager.getBranch()
+          : savedBranch(transcript(member, store.workspace) as ReturnType<typeof manager.getBranch>));
+        return { ...original, messages: historyMessages(branches) };
+      });
+      if (!this.chatHistory) ctx.ui.notify("Unified chat history is unavailable on this Pi version; showing the current real session only.", "warning");
       const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
       return decorateEditor(base, text => {
         if (!state.enabled || !isOrdinarySubmission(text)) return text;
@@ -164,7 +180,9 @@ export class Orchestrator {
     ctx.ui.setEditorComponent(this.wrapperFactory);
   }
 
-  private restoreEditor(ctx: ExtensionContext): void {
+  private restoreEditor(ctx: ExtensionContext, refreshChat = true): void {
+    this.chatHistory?.dispose(refreshChat);
+    this.chatHistory = undefined;
     if (this.wrapperFactory && ctx.ui.getEditorComponent() === this.wrapperFactory) {
       ctx.ui.setEditorComponent(this.savedFactory);
     }
@@ -248,8 +266,16 @@ export class Orchestrator {
         const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.contexts[index] }));
         const result = await this.backend.evaluate(safeInput.text, safeCandidates);
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: result.usage ?? normalizeUsage(undefined) });
-        if (result.decision.action !== "clarify") return result.decision;
-        ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
+        if (result.decision.action !== "clarify") {
+          if (result.decision.action === "reuse" && !candidates.some(item => item.id === result.decision.realId)) {
+            // Dispatch fails closed on this invalid target; never substitute another session.
+            return result.decision;
+          }
+          const current = candidates.find(item => item.id === ctx.sessionManager.getSessionId());
+          if (result.decision.action === "reuse" && result.decision.realId === current?.id) return result.decision;
+          if (permitsSessionChange(result.decision)) return result.decision;
+          ctx.ui.notify("Changing sessions was not strongly justified; continuing the current session.", "info");
+        } else ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
       } catch {
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: normalizeUsage(undefined) });
         ctx.ui.notify("Decision backend unavailable or invalid; continuing the current session.", "warning");
@@ -259,7 +285,7 @@ export class Orchestrator {
       return { action: "reuse", realId: current.id, reason: "Decision was inconclusive or unavailable; retained the current session." };
     }
     const labels = candidates.map(item => `Continue: ${item.name} [${item.id.slice(0, 8)}]`);
-    const selection = await ctx.ui.select("Route this request (same topic is not necessarily the same task)", ["Create a new focused session", ...labels]);
+    const selection = await ctx.ui.select("Stay in the current session unless a change is necessary", [...labels, "Create a new focused session"]);
     if (!selection) return undefined;
     const index = labels.indexOf(selection);
     if (index >= 0) return { action: "reuse", realId: candidates[index].id, reason: "User selected task continuity." };
@@ -309,9 +335,11 @@ export class Orchestrator {
       const reconciled = store.read();
       const currentContext = ctx.getContextUsage();
       const candidates: RoutingCandidate[] = shortlist(text,
-        reconciled.members.filter(item => members.some(member => member.id === item.id)), virtual.lastRealSessionId)
+        reconciled.members.filter(item => members.some(member => member.id === item.id)),
+        members.some(member => member.id === sourceId) ? sourceId : virtual.lastRealSessionId)
         .map(member => ({
           ...member,
+          isCurrent: member.id === sourceId,
           metrics: {
             lifetimeUsage: sumUsage(reconciled.usage.filter(item => item.realId === member.id).map(item => item.usage)),
             context: member.id === sourceId

@@ -82,6 +82,25 @@ Virtual sessions are routing namespaces, not Pi virtual models, merged model
 conversations, or inference-provider caches. Each request uses one real session's
 context. Group names and totals survive session replacement and process restart.
 
+## Continuous main-chat history
+
+While routing is enabled, the main chat combines the selected virtual session's
+member conversations in chronological order. Switching to a different real member
+or returning to an earlier task no longer hides the other members' messages.
+Pi's native message, streaming, and tool-output renderers remain in use.
+
+This is a display-only projection: no messages are copied into real transcripts or
+sent to another member's model context. History is reconstructed from member files
+when the chat is rebuilt, including messages before compaction. Only each member's
+active branch is displayed; abandoned branches are not merged into the conversation.
+Disabling routing restores the current real session's ordinary chat.
+
+Pi 0.79.1 has no public main-chat projection API. This feature uses a small,
+runtime-local adapter around its native chat renderer, isolated per terminal and
+removed on disable or shutdown. Unsupported renderer APIs produce a warning and
+fall back to real-session chat; unreadable member transcripts also fall back to
+native chat with a console diagnostic. Pi upgrades need compatibility testing.
+
 ## Optional local/hosted decision model
 
 There are no classifier calls until you explicitly configure an endpoint. The
@@ -110,10 +129,12 @@ estimate from the saved leaf branch; their context window is unknown. Missing
 usage and post-compaction context estimates remain partial/unknown, not zero.
 These metrics are constructed for routing and do not change registry membership.
 
-The classifier is instructed to prioritize task continuity, using context size
-and usage only as secondary signals between equally relevant sessions. Historical
-cost is not a next-request price: high cumulative usage alone must not cause a
-new session or discard needed context. This does not add automatic compaction.
+The classifier is instructed to stay in the current session by default. Follow-ups,
+corrections, tests, refinements, related work, and topic drift do not justify switching.
+Another member must supply unique prior context necessary for the request; NEW
+requires explicitly independent work needing isolation that no existing session
+can serve. Context size, token savings, and historical cost never justify a switch.
+This does not add automatic compaction.
 
 Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
@@ -128,13 +149,22 @@ helper before being sent. Endpoint configuration is an explicit authorization to
 send these session context summaries, usage/context metrics, and the
 incoming request to that endpoint; review privacy and retention first.
 
-The highest-scoring choice automatically selects continuation or new work when
-its score is **above 60%**, without an additional margin requirement. Scores at or
-below 60%, invalid backend responses, over-budget requests, timeouts, and backend failures
-retain the current eligible member without user selection. If no eligible current
-member exists, dispatch stops and preserves the draft rather than choosing another
-session. Without a configured backend, user selection remains available. These scores are **not** calibrated certainty. No physical-model selection or proactive economic
-compaction is implemented yet.
+Automatic changes require strong scores **and** a wide margin over the runner-up:
+
+- Another existing member: score **at least 80%**, margin **at least 60 percentage points**.
+- New real session: score **at least 80%**, margin **at least 60 percentage points**.
+- Staying in the current member needs no minimum score.
+
+The controller also enforces these gates for custom decision backends; proposals
+without valid `confidence` and `margin` evidence cannot automatically change sessions.
+Weak or ambiguous proposals, invalid backend responses, over-budget requests,
+timeouts, and backend failures retain the current eligible member. If none exists
+and no strongly supported route is available, dispatch stops and preserves the draft.
+Without a configured backend, the picker lists the current session first; explicit
+user choices can still switch or create a session. The first request in an empty
+virtual session creates its first member without classification. These scores are
+**not** calibrated certainty or proof of necessity. No physical-model selection or
+proactive economic compaction is implemented yet.
 
 ## Editor compatibility
 

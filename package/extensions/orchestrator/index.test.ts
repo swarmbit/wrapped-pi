@@ -8,6 +8,15 @@ import { registryPath, RegistryStore } from "./store";
 import { runtimeFor } from "./runtime";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
+  InteractiveMode: class {
+    ui: any;
+    sessionManager: any;
+    displayed: any;
+    renderSessionContext(context: any) { this.displayed = context; }
+    rebuildChatFromMessages() {
+      this.renderSessionContext({ messages: this.sessionManager.getBranch().filter((entry: any) => entry.type === "message").map((entry: any) => entry.message) });
+    }
+  },
   CustomEditor: class {
     text = "";
     history: string[] = [];
@@ -26,7 +35,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 vi.mock("@earendil-works/pi-tui", () => ({ truncateToWidth: (text: string, width: number) => text.slice(0, width) }));
 
 import extension, { Orchestrator, parseCommand } from "./index";
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, InteractiveMode } from "@earendil-works/pi-coding-agent";
 
 let dir: string;
 let workspace: string;
@@ -44,6 +53,9 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
   let failWorker = false;
   let cancelReplacement = false;
   let beforeSend: (() => Promise<void>) | undefined;
+  const tui = {};
+  const chat = new InteractiveMode({} as any) as any;
+  chat.ui = tui;
 
   const create = (id: string = randomUUID()) => {
     let alive = true;
@@ -51,7 +63,13 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
     const entries: any[] = [];
     const file = join(workspace, `${id}.jsonl`);
     const assertAlive = () => { if (!alive) throw new Error("STALE CONTEXT"); };
-    const persist = () => writeFileSync(file, [{ type: "session", version: 3, id, cwd: workspace }, ...entries].map(item => JSON.stringify(item)).join("\n") + "\n");
+    const persist = () => {
+      entries.forEach((entry, index) => {
+        if (entry.parentId === undefined) entry.parentId = entries[index - 1]?.id ?? null;
+        if (entry.timestamp?.startsWith("time-")) entry.timestamp = new Date(Number(entry.timestamp.slice(5)) * 1000).toISOString();
+      });
+      writeFileSync(file, [{ type: "session", version: 3, id, cwd: workspace }, ...entries].map(item => JSON.stringify(item)).join("\n") + "\n");
+    };
     const manager = {
       getSessionId: () => { assertAlive(); return id; },
       getSessionFile: () => { assertAlive(); return file; },
@@ -74,7 +92,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
         assertAlive();
         const draft = editor?.getText() ?? "";
         factory = next;
-        editor = next ? next({}, {}, {}) : new CustomEditor({} as any, {} as any, {} as any);
+        editor = next ? next(tui, {}, {}) : new CustomEditor({} as any, {} as any, {} as any);
         editor.onSubmit = (text: string) => submitted.push(text);
         editor.setText(draft);
       },
@@ -97,6 +115,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
       next.orchestrator.start(reason, next.ctx);
       await opts?.setup?.(next.ctx.sessionManager);
       await opts?.withSession?.(next.ctx);
+      chat.rebuildChatFromMessages();
       return { cancelled: false };
     };
     const ctx: any = {
@@ -128,12 +147,14 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
         idle = true;
       }),
     };
+    chat.sessionManager = manager;
     ui.setEditorComponent(customFactory);
     return { orchestrator, ctx, pi, entries, persist, submitted, get editor() { return editor; }, id,
       setIdle: (value: boolean) => { idle = value; } };
   };
   current = create();
   current.orchestrator.start("startup", current.ctx);
+  chat.rebuildChatFromMessages();
   const store = () => new RegistryStore(registryPath(workspace), workspace);
   const submit = async (text: string) => {
     const source = current;
@@ -145,7 +166,7 @@ function harness(backend?: DecisionBackend, customFactory?: (...args: any[]) => 
     await source.orchestrator.command(command.slice("/orchestrator ".length), source.ctx);
     return source;
   };
-  return { get current() { return current; }, sent, submit, store,
+  return { get current() { return current; }, chat, sent, submit, store,
     setFail: (value: boolean) => { failWorker = value; },
     setCancel: (value: boolean) => { cancelReplacement = value; },
     setBeforeSend: (callback: () => Promise<void>) => { beforeSend = callback; },
@@ -270,6 +291,32 @@ describe("orchestrator integration", () => {
     expect(h.sent[0].text).not.toContain("__dispatch");
   });
 
+  it("keeps A → B → A history in main chat while real model contexts stay isolated", async () => {
+    const h = harness();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("First task");
+    const firstId = h.current.id;
+    await h.submit("Different task");
+    expect(h.current.id).not.toBe(firstId);
+    const displayedUsers = () => h.chat.displayed.messages.filter((m: any) => m.role === "user").map((m: any) => m.content);
+    expect(displayedUsers()).toEqual(["First task", "Different task"]);
+    expect(h.current.entries.filter((entry: any) => entry.type === "message" && entry.message.role === "user").map((entry: any) => entry.message.content)).toEqual(["Different task"]);
+    const first = h.store().read().members.find(member => member.id === firstId)!;
+    h.current.ctx.ui.select.mockResolvedValueOnce(`Continue: ${first.name} [${firstId.slice(0, 8)}]`);
+    await h.submit("Return to first task");
+    expect(h.current.id).toBe(firstId);
+    expect(displayedUsers()).toEqual(["First task", "Different task", "Return to first task"]);
+    expect(h.current.entries.filter((entry: any) => entry.type === "message" && entry.message.role === "user").map((entry: any) => entry.message.content)).toEqual(["First task", "Return to first task"]);
+    await h.current.orchestrator.command("off", h.current.ctx);
+    expect(displayedUsers()).toEqual(["First task", "Return to first task"]);
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    expect(displayedUsers()).toEqual(["First task", "Different task", "Return to first task"]);
+    await h.current.orchestrator.command("new Other", h.current.ctx);
+    expect(displayedUsers()).toEqual([]);
+    await h.current.orchestrator.command("on Atlas", h.current.ctx);
+    expect(displayedUsers()).toEqual(["First task", "Different task", "Return to first task"]);
+  });
+
   it("uses a configured decision model to reuse the same member and aggregates calls once", async () => {
     const backend: DecisionBackend = { evaluate: vi.fn(async (_text, candidates) => ({ decision: { action: "reuse" as const, realId: candidates[0].id, reason: "continued task" } })) };
     const h = harness(backend);
@@ -327,14 +374,48 @@ describe("orchestrator integration", () => {
     await h.submit("Implement OAuth");
     const firstId = h.current.id;
     expect(infoLine()).toBe("Atlas · V ~$0.2500 ↑10 ↓2 R100 · R ~$0.2500 ↑10 ↓2 R100");
-    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Independent task" } });
+    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Independent task", confidence: 0.99, margin: 0.98 } });
     await h.submit("Set up Docker");
     expect(h.current.id).not.toBe(firstId);
     expect(infoLine()).toBe("Atlas · V partial $0.5000 ↑20 ↓4 R200 (partial tokens) · R ~$0.2500 ↑10 ↓2 R100");
-    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "OAuth follow-up" } });
+    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "OAuth follow-up", confidence: 0.99, margin: 0.98 } });
     await h.submit("Add OAuth tests");
     expect(h.current.id).toBe(firstId);
     expect(infoLine()).toBe("Atlas · V partial $0.7500 ↑30 ↓6 R300 (partial tokens) · R ~$0.5000 ↑20 ↓4 R200");
+  });
+
+  it.each([
+    { action: "new", reason: "Different keywords" },
+    { action: "new", reason: "Moderately confident", confidence: 0.75, margin: 0.7 },
+    { action: "new", reason: "Not quite strong enough", confidence: 0.7999, margin: 0.6 },
+    { action: "new", reason: "Insufficient margin", confidence: 0.99, margin: 0.59 },
+  ] as const)("keeps the current member when changing sessions is not strongly justified: $reason", async decision => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async () => ({ decision })) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("First task");
+    const firstId = h.current.id;
+    await h.submit("A related implementation question");
+    expect(h.current.id).toBe(firstId);
+    expect(h.store().read().members).toHaveLength(1);
+    expect(h.sent).toHaveLength(2);
+    expect(h.store().read().requests.at(-1)?.state).toBe("completed");
+    expect(vi.mocked(backend.evaluate).mock.calls[0][1][0].isCurrent).toBe(true);
+  });
+
+  it("rejects weak automatic switches to another eligible member", async () => {
+    const evaluate = vi.fn<DecisionBackend["evaluate"]>();
+    const h = harness({ evaluate });
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("First task");
+    const firstId = h.current.id;
+    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Requires isolation", confidence: 0.8, margin: 0.6 } });
+    await h.submit("Independent task");
+    const secondId = h.current.id;
+    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "Similar keywords", confidence: 0.79, margin: 0.7 } });
+    await h.submit("Add tests");
+    expect(h.current.id).toBe(secondId);
+    expect(h.store().read().members).toHaveLength(2);
   });
 
   it("updates the info line when switching to a different virtual session", async () => {
@@ -366,7 +447,7 @@ describe("orchestrator integration", () => {
 
   it("provides reconciled lifetime usage and live/saved context for each routing candidate", async () => {
     const backend: DecisionBackend = { evaluate: vi.fn(async () => ({
-      decision: { action: "new" as const, reason: "Independent task" },
+      decision: { action: "new" as const, reason: "Independent task", confidence: 0.99, margin: 0.98 },
     })) };
     const h = harness(backend);
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
@@ -397,6 +478,9 @@ describe("orchestrator integration", () => {
     await h.submit("What about Docker?");
     expect(h.sent).toHaveLength(1);
     expect(h.current.editor.getText()).toBe("What about Docker?");
+    const choices = h.current.ctx.ui.select.mock.calls.at(-1)[1];
+    expect(choices[0]).toContain(h.current.id.slice(0, 8));
+    expect(choices.at(-1)).toBe("Create a new focused session");
     expect(h.store().read().requests.at(-1)?.state).toBe("interrupted");
     expect(h.store().read().usage.filter(item => item.category === "decision")).toHaveLength(0);
   });
