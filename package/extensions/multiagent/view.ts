@@ -1,6 +1,7 @@
-import { AssistantMessageComponent, UserMessageComponent, ToolExecutionComponent, type Theme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, BranchSummaryMessageComponent, CompactionSummaryMessageComponent, createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createPowerShellToolDefinition, createReadToolDefinition, createWriteToolDefinition, CustomMessageComponent, getMarkdownTheme, UserMessageComponent, ToolExecutionComponent, type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, Text, matchesKey, truncateToWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
-import { MultiagentRuntime, type Child, type AssistantMessage } from "./runtime.js";
+import { MultiagentRuntime, childSessionCost, type Child, type AssistantMessage } from "./runtime.js";
+import { INCOMING_MAIL, renderIncomingMail } from "./mailbox.js";
 type TUI = ConstructorParameters<typeof ToolExecutionComponent>[5];
 
 /** Separate display-only conversation; never rewrites the parent session/context. */
@@ -57,19 +58,31 @@ export class MultiagentView implements Component, Focusable {
   private history(child: Child): Component[] {
     const components: Component[] = [];
     const tools = new Map<string, ToolExecutionComponent>();
+    const builtInRenderers: Record<string, any> = {
+      bash: createBashToolDefinition(child.cwd), edit: createEditToolDefinition(child.cwd), find: createFindToolDefinition(child.cwd),
+      grep: createGrepToolDefinition(child.cwd), ls: createLsToolDefinition(child.cwd), powershell: createPowerShellToolDefinition(child.cwd),
+      read: createReadToolDefinition(child.cwd), write: createWriteToolDefinition(child.cwd),
+    };
     const messages = child.partial ? [...child.messages, child.partial] : child.messages;
     for (const message of messages) {
       if (message.role === "user") {
         const text = typeof message.content === "string" ? message.content : message.content.map(p => p.type === "text" ? p.text : "[image]").join("\n");
-        components.push(new UserMessageComponent(text));
+        components.push(new UserMessageComponent(text, getMarkdownTheme()));
       } else if (message.role === "assistant") {
         // Sparse in-flight content arrays are valid while blocks arrive.
         const assistant = { ...message, content: message.content.filter(Boolean) } as AssistantMessage;
-        const component = new AssistantMessageComponent(assistant, true);
+        const component = new AssistantMessageComponent(assistant, true, getMarkdownTheme());
         if (message === child.partial) component.updateContent(assistant, true);
         components.push(component);
         for (const part of assistant.content) if (part.type === "toolCall") {
-          const tool = new ToolExecutionComponent(part.name, part.id, part.arguments, { showImages: false }, undefined, this.tui, child.cwd);
+          const fallbackRenderer = {
+            renderCall: (args: unknown, theme: Theme) => {
+              const fields = args && typeof args === "object" ? Object.entries(args as Record<string, unknown>) : [["input", args]];
+              const readable = fields.map(([key, value]) => `${key}: ${typeof value === "string" ? value : Array.isArray(value) ? `[${value.length} items]` : value && typeof value === "object" ? "{…}" : String(value)}`).join(" · ");
+              return new Text(theme.fg("toolTitle", `${part.name}${readable ? ` · ${readable}` : ""}`), 0, 0);
+            },
+          };
+          const tool = new ToolExecutionComponent(part.name, part.id, part.arguments, { showImages: false }, builtInRenderers[part.name] ?? fallbackRenderer, this.tui, child.cwd);
           tool.setArgsComplete(); tool.setExpanded(this.expanded);
           const progress = child.tools.get(part.id);
           if (progress) {
@@ -82,10 +95,13 @@ export class MultiagentView implements Component, Focusable {
         const tool = tools.get(message.toolCallId);
         if (tool) tool.updateResult(message);
         else components.push(new Text(`${message.toolName}\n${message.content.filter(p => p.type === "text").map(p => p.text).join("\n")}`, 1, 0));
-      } else if (message.role === "compactionSummary" || message.role === "branchSummary") {
-        components.push(new Text(`Context summary\n${message.summary}`, 1, 0));
+      } else if (message.role === "compactionSummary") {
+        components.push(new CompactionSummaryMessageComponent(message, getMarkdownTheme()));
+      } else if (message.role === "branchSummary") {
+        components.push(new BranchSummaryMessageComponent(message, getMarkdownTheme()));
       } else if (message.role === "custom" && message.display) {
-        components.push(new Text(typeof message.content === "string" ? message.content : message.content.filter(p => p.type === "text").map(p => p.text).join("\n"), 1, 0));
+        const renderer = message.customType === INCOMING_MAIL ? renderIncomingMail : undefined;
+        components.push(new CustomMessageComponent(message, renderer, getMarkdownTheme()));
       }
     }
     return components;
@@ -94,7 +110,11 @@ export class MultiagentView implements Component, Focusable {
     const child = this.runtime.get(this.selected);
     const tabs = [...this.runtime.children.values()].map(c => `${c.id === child.id ? "▸" : " "}${c.agent}:${c.id} ${c.status}`).join("  ");
     const input = this.input.render(width);
-    const height = Math.max(1, this.tui.terminal.rows - input.length - 5);
+    const queueLines = [
+      ...child.queue.steering.map(text => `Steer queued: ${text}`),
+      ...child.queue.followUp.map(text => `Follow-up queued: ${text}`),
+    ].map(text => truncateToWidth(this.theme.fg("warning", text.replace(/\s+/g, " ")), width));
+    const height = Math.max(1, this.tui.terminal.rows - input.length - 5 - queueLines.length);
     this.components ??= this.history(child);
     const history = this.components.flatMap(c => c.render(width));
     const offset = Math.min(this.offset, Math.max(0, history.length - height));
@@ -102,10 +122,15 @@ export class MultiagentView implements Component, Focusable {
     const visible = history.slice(Math.max(0, end - height), end);
     while (visible.length < height) visible.unshift("");
     const queued = child.queue.steering.length + child.queue.followUp.length;
+    const latestAssistant = [...child.messages, ...(child.partial ? [child.partial] : [])].reverse().find(message => message.role === "assistant") as AssistantMessage | undefined;
+    const model = latestAssistant?.provider && latestAssistant?.model
+      ? `${latestAssistant.provider}/${latestAssistant.model}` : child.model ? `requested ${child.model}` : "unknown until first response";
+    const cost = childSessionCost(child);
     return [
       truncateToWidth(this.theme.fg("accent", tabs), width),
-      truncateToWidth(`Session: ${child.sessionFile}`, width),
+      truncateToWidth(`Model: ${model} · Session cost: ${cost === undefined ? "unknown" : `$${cost.toFixed(4)}`}`, width),
       ...visible,
+      ...queueLines,
       truncateToWidth(this.theme.fg("muted", `Tab agent · PgUp/PgDn scroll · Ctrl+O tools · Ctrl+S stop · Ctrl+T mode · Esc parent`), width),
       truncateToWidth(this.notice || child.error || `${this.busy ? "Sending… " : ""}${this.mode === "steer" ? "Steer / send" : "Follow-up / send"} to ${child.agent} (${queued} queued). Enter submits.`, width),
       ...input,

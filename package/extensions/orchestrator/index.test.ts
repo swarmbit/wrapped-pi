@@ -663,8 +663,9 @@ describe("orchestrator integration", () => {
     expect(h.current.id).toBe(first);
     const data = h.store().read();
     expect(data.members).toHaveLength(1);
-    expect(data.members[0].summary).toContain("user: Now add tests for that");
-    expect(data.members[0].summary).toContain("Implement OAuth");
+    const messages = JSON.parse(data.members[0].summary);
+    expect(messages).toContainEqual({ role: "user", content: "Now add tests for that" });
+    expect(messages).toContainEqual({ role: "user", content: "Implement OAuth" });
     expect(vi.mocked(backend.evaluate).mock.calls[0][1][0].summary).toContain("Implement OAuth");
     expect(data.requests).toHaveLength(2);
     expect(data.usage.filter(item => item.category === "worker")).toHaveLength(2);

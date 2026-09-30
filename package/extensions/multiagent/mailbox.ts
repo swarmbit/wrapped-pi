@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
+import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { redactForLlm } from "../secret-redaction/state.js";
 
@@ -7,6 +9,21 @@ export const OUTGOING_MAIL = "wpi-multiagent-outgoing";
 export const INCOMING_MAIL = "wpi-multiagent-mail";
 export const MAIL_ACK = "wpi-multiagent-mail-ack";
 export const MAX_MAIL_TEXT = 4000;
+
+/** Shared readable card renderer for incoming mailbox messages in parent/child transcripts. */
+export const renderIncomingMail: MessageRenderer = (message, { expanded, outputPad }, theme) => {
+  const mail = message.details as Mail | undefined;
+  const kind = mail?.kind ?? "message";
+  const sender = mail?.agent ? `${mail.agent} (${mail.childId})` : "child agent";
+  const text = typeof message.content === "string" ? message.content : message.content
+    .filter(part => part.type === "text").map(part => part.text).join("\n");
+  const body = mail?.text ?? text;
+  const header = theme.fg(kind === "question" ? "warning" : kind === "result" ? "success" : "accent", `${kind.toUpperCase()} from ${sender}`);
+  const content = expanded ? `${header}\n${body}${mail ? `\n\nMailbox ID: ${mailId(mail)}` : ""}` : `${header}\n${body}`;
+  const box = new Box(outputPad, 1, value => theme.bg("customMessageBg", value));
+  box.addChild(new Text(content, 0, 0));
+  return box;
+};
 export type MailKind = "update" | "question" | "result";
 export interface OutgoingMail { id: string; kind: MailKind; text: string }
 export interface Mail extends OutgoingMail { childId: string; agent: string; receivedAt: number; acknowledged: boolean }

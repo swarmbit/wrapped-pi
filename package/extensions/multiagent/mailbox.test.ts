@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("../secret-redaction/state.js", () => ({ redactForLlm: vi.fn((value: any) => ({ ...value, text: value.text?.replace("sensitive-value", "MASKED") })) }));
-import { INCOMING_MAIL, MAIL_ACK, OUTGOING_MAIL, Mailbox, mailId, registerParentMailbox } from "./mailbox.js";
+import { INCOMING_MAIL, MAIL_ACK, OUTGOING_MAIL, Mailbox, mailId, registerParentMailbox, renderIncomingMail } from "./mailbox.js";
 const outgoing = { id: "12345678-1234-1234-1234-123456789abc", kind: "question" as const, text: "Which file should I change?" };
 const child = { id: "child-a", agent: "runner" };
 
 describe("parent mailbox", () => {
+  it("renders incoming mail as a readable themed card with expandable metadata", () => {
+    const message = { role: "custom", customType: INCOMING_MAIL, content: "private wrapper text", details: {
+      ...outgoing, childId: child.id, agent: child.agent, receivedAt: 1, acknowledged: false,
+    }, display: true, timestamp: 2 } as any;
+    const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
+    const compact = renderIncomingMail(message, { expanded: false, outputPad: 1 }, theme as any)!.render(80).join("\n");
+    expect(compact).toContain("QUESTION from runner (child-a)");
+    expect(compact).toContain("Which file should I change?");
+    expect(compact).not.toContain("private wrapper text");
+    const expanded = renderIncomingMail(message, { expanded: true, outputPad: 1 }, theme as any)!.render(80).join("\n");
+    expect(expanded).toContain("Mailbox ID: child-a:12345678-1234-1234-1234-123456789abc");
+  });
   it("persists before publication, binds sender identity, and deduplicates replay", () => {
     const persist = vi.fn(); const inbox = new Mailbox(persist);
     const mail = inbox.receive(child, { ...outgoing, childId: "spoofed", agent: "spoofed" })!;

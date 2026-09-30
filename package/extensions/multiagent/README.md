@@ -2,7 +2,9 @@
 
 Persistent, interactive child agents alongside the existing `subagent` tool. The existing subagent implementation is unchanged.
 
-Each child is a long-lived Pi RPC process with its own saved session and context. `/multiagents` opens a switchable, live conversation screen using Pi's native user, assistant, and tool components—not a single tool-result card. Escape returns to the parent without stopping children. This is an extension-owned screen, not an internal replacement of Pi's main transcript.
+Each child is a long-lived Pi RPC process with its own saved session and context. `/multiagents` opens a switchable, live conversation screen using Pi's native user, assistant, tool, summary, and custom-message components—not a single tool-result card. The header shows the latest actual provider/model and accumulated session cost; before a response it labels the configured model as requested. Escape returns to the parent without stopping children. This is an extension-owned screen, not an internal replacement of Pi's main transcript.
+
+In the parent UI, a compact above-editor widget lists nonterminal children with current runtime status, model, and accumulated recorded assistant usage cost. Running/starting children appear separately from idle children; restored sessions with no verified process are labeled unknown. A model from assistant metadata is actual; before the first reply the configured choice is labeled requested. Cost is summed from available assistant usage records and shown as unknown when none are available. The widget is live state and is cleared on session switch/shutdown. Launch tool calls (or command-start records) and durable stop/failure entries appear in parent history; normal completion is represented by explicit child mailbox reports rather than a redundant idle/completed history card.
 
 ## Quick start
 
@@ -33,7 +35,7 @@ In the conversation screen:
 - **Tab / Shift+Tab**: switch children.
 - **PgUp / PgDn**: scroll history; the bottom follows live output.
 - **Ctrl+O**: expand/collapse tool output.
-- **Enter**: send the input to the selected child. This screen uses a single-line input; command input can contain multi-line text.
+- **Enter**: send the input to the selected child. Queued steering/follow-up messages are listed above the controls. This screen uses a single-line input; command input can contain multi-line text.
 - **Ctrl+T**: toggle steering/follow-up delivery for input.
 - **Ctrl+S**: clear queued input and abort the selected child only.
 - **Escape / Ctrl+C**: return to the parent; children continue running.
@@ -120,7 +122,7 @@ Child reports are delegated-agent content, not trusted user instructions. Mailbo
 
 ## Limitations
 
-Children share the workspace unless `cwd` is supplied. Concurrent edits can conflict: coordinate file ownership or use separate worktrees. Session files may contain sensitive local conversation data, just like ordinary Pi sessions; directory/config permissions are restrictive, but this is not a sandbox. Provider costs are incurred by children; delegated usage is not automatically reported as parent tool usage in this background implementation. Child live output is visible in `/multiagents`, not interleaved into the parent timeline. Auto-compaction can shorten the active conversation view; the saved session remains available through normal Pi session tooling.
+The child screen uses Pi's public native message/summary/custom components and built-in tool renderer definitions but cannot inherit the parent TUI's private per-session Markdown transformers, output padding, or thinking-visibility preference through the public Extension API. It uses Pi's default Markdown theme and keeps thinking hidden rather than broadening visibility. User images are represented by `[image]` because the public `UserMessageComponent` accepts text only. Custom extension tool renderers are not exposed over the child RPC history API; those calls use a readable generic argument summary instead of their extension-specific card. The child screen is separate from Pi's transcript; the parent roster is a live widget, while lifecycle history is branch-local custom entries. Children share the workspace unless `cwd` is supplied. Concurrent edits can conflict: coordinate file ownership or use separate worktrees. Session files may contain sensitive local conversation data, just like ordinary Pi sessions; directory/config permissions are restrictive, but this is not a sandbox. Provider costs are incurred by children; delegated usage is not automatically reported as parent tool usage in this background implementation. Child live output is visible in `/multiagents`, not interleaved into the parent timeline. Auto-compaction can shorten the active conversation view; the saved session remains available through normal Pi session tooling.
 
 ## Development
 

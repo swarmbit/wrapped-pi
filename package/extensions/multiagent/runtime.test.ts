@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MultiagentRuntime, lastAssistantText, type ChildRecord, type TransportFactory } from "./runtime.js";
+import { childSessionCost, MultiagentRuntime, lastAssistantText, type ChildRecord, type TransportFactory } from "./runtime.js";
 import type { AgentConfig } from "../subagent/agents.js";
 
 const agent: AgentConfig = { name: "runner", description: "Test", source: "user", filePath: "/agent.md", systemPrompt: "Original instructions", tools: ["read"], model: "test/model" };
@@ -47,6 +47,10 @@ describe("multiagent runtime", () => {
     second.emit({ type: "agent_end" }); expect(b.status).toBe("running");
     second.emit({ type: "agent_settled" }); expect(b.status).toBe("idle"); expect(a.status).toBe("running");
     expect(lastAssistantText(b)).toBe("two complete");
+    expect(childSessionCost(a)).toBeUndefined();
+    b.messages.push({ ...assistant("usage"), usage: { cost: { total: 0.12 } } } as any);
+    b.partial = { ...assistant("streaming"), usage: { cost: { total: 0.005 } } } as any;
+    expect(childSessionCost(b)).toBeCloseTo(0.125);
   });
   it("steers, queues follow-ups, and clears queues before stopping one child", async () => {
     const { runtime, processes } = await setup();

@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { OUTGOING_MAIL, validOutgoing, type OutgoingMail } from "./mailbox.js";
 
-export interface ChildRecord { id: string; agent: string; cwd: string; sessionFile: string }
+export interface ChildRecord { id: string; agent: string; cwd: string; sessionFile: string; model?: string }
 export type ChildStatus = "saved" | "starting" | "running" | "idle" | "stopped" | "failed" | "closed";
 export interface Child extends ChildRecord {
   status: ChildStatus;
@@ -44,14 +44,14 @@ export class MultiagentRuntime {
     if ([...this.children.values()].filter(c => c.transport || c.status === "starting").length >= 8)
       throw new Error("At most 8 live agents; close an idle agent first");
     const id = randomUUID().slice(0, 8);
-    const child: Child = { id, agent: agent.name, cwd, sessionFile: path.join(this.directory, `${id}.jsonl`),
+    const child: Child = { id, agent: agent.name, cwd, sessionFile: path.join(this.directory, `${id}.jsonl`), model: agent.model,
       status: "starting", messages: [], tools: new Map(), queue: { steering: [], followUp: [] } };
     this.children.set(id, child); this.changed();
     try {
       const boot = this.boot(child, agent);
       this.boots.set(id, boot);
       try { await boot; } finally { this.boots.delete(id); }
-      this.persist({ id, agent: agent.name, cwd, sessionFile: child.sessionFile });
+      this.persist({ id, agent: agent.name, cwd, sessionFile: child.sessionFile, model: agent.model });
       await this.send(id, task);
       return child;
     } catch (error) {
@@ -80,6 +80,7 @@ export class MultiagentRuntime {
     const configFile = child.sessionFile + ".config.json";
     if (agent) await fs.writeFile(configFile, JSON.stringify({ model: agent.model, tools: agent.tools, systemPrompt: agent.systemPrompt }), { mode: 0o600 });
     else agent = JSON.parse(await fs.readFile(configFile, "utf8")) as AgentConfig;
+    child.model = agent.model;
     const args = ["--session", child.sessionFile, "--name", `multiagent ${child.agent} ${child.id}`,
       "--extension", path.join(__dirname, "index.ts")];
     let promptFile: string | undefined;
@@ -191,6 +192,17 @@ export class MultiagentRuntime {
     }
     this.changed();
   }
+}
+
+export function childSessionCost(child: Child): number | undefined {
+  let total = 0;
+  let known = false;
+  for (const message of [...child.messages, ...(child.partial ? [child.partial] : [])]) {
+    if (message.role !== "assistant") continue;
+    const cost = (message as AssistantMessage & { usage?: { cost?: { total?: number } } }).usage?.cost?.total;
+    if (typeof cost === "number" && Number.isFinite(cost)) { total += cost; known = true; }
+  }
+  return known ? total : undefined;
 }
 
 export function lastAssistantText(child: Child) {
