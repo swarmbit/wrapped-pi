@@ -212,6 +212,16 @@ be shared carefully, retained only as needed, and manually deleted when finished
 Logging failures warn once and never stop routing or dispatch. Symlink/hardlink and
 non-regular file targets are rejected rather than followed.
 
+### Browser viewer
+
+Open [`package/tools/orchestrator-debug-viewer/index.html`](../../tools/orchestrator-debug-viewer/index.html)
+in a modern browser, then select the current JSONL log and any rotated backups.
+The standalone viewer provides decision history, search/filters, request/response
+views, correlated timelines, errors, and token/TPS summaries. It reads files in
+browser memory without uploads or a server. For Docker logs, copy them to the host
+first. See the [viewer guide](../../tools/orchestrator-debug-viewer/README.md) for
+refresh behavior, limits, and privacy notes.
+
 ## Session switches and handoffs
 
 Both classifier-selected switches and model-requested switches use the same
