@@ -65,6 +65,7 @@ also offers a help entry.
 | `/orchestrator sessions` | Select a named real member |
 | `/orchestrator attach [name-or-id]` | Explicitly attach the current unowned real session after confirmation |
 | `/orchestrator compact [instructions]` | Run Pi's callback-based manual compaction |
+| `/orchestrator debug [on\|off\|status]` | Toggle redacted decision JSONL logs; show state and filesystem path |
 | `/orchestrator drafts` | Recover held, unsent text drafts (process-local, never automatically executed) |
 
 Deletion removes the virtual session's membership, usage, and request metadata,
@@ -167,6 +168,49 @@ Without a configured backend, the picker lists the current session first; explic
 user choices can still switch or create a session. The first request in an empty
 virtual session creates its first member without classification. These scores are
 **not** calibrated certainty or proof of necessity. No physical-model selection is implemented.
+
+## Decision debug logging
+
+Use `/orchestrator debug on` to inspect routing and handoff decisions. `debug off`
+stops logging immediately (including in-flight calls); `debug status` shows state
+and the log path without writing; `debug` alone toggles. These commands also work
+while an orchestrator request is running. Debugging is off by default, stays
+workspace-scoped across real-session replacements, and resets after process exit.
+It changes no prompts, model selection, decision thresholds, or network calls.
+
+Logs are private, append-only JSONL files next to the workspace registry:
+`$PI_CODING_AGENT_DIR/orchestrator/<workspace-hash>.decisions.jsonl`
+(default agent directory: `~/.pi/agent`). The status command prints the exact path.
+Files use mode `0600`, rotate at 10 MiB, and retain three numbered backups. Individual
+records are capped at 128 KiB; oversized records retain an explicitly marked,
+redacted preview. Oversized HTTP responses rejected by the backend omit their body.
+
+Each decision has a unique `callId`, correlated with the orchestrated `requestId`,
+virtual/real session IDs, timestamps, PID, and decision kind. Records include:
+
+- Original request, candidate summaries/metrics, and handoff preservation notes.
+- Actual System One request payload (including questions/instructions and model),
+  HTTP status, response payload, choices, probabilities, and server-reported metrics.
+- Parsed decisions and the controller's final selected/fallback/cancelled outcome.
+- Validation failures, timeouts/network errors, explicit handoff confirmations,
+  model switch proposals, prepared dispatches, and generated handoff text.
+- End-to-end duration, input/output token counts, usage/cost completeness, estimated
+  output/total tokens per second, and `timeToFirstTokenMs: null`.
+
+TPS is **end-to-end throughput including network latency**, not measured decoder
+speed. System One classification may report zero output tokens; missing counts/rates
+remain `null`, not zero. The non-streaming endpoint cannot provide TTFT; any metrics
+reported by the server remain available in its recorded response. Custom backends
+receive an optional trace callback; without implementing it, only structured
+inputs/results and elapsed-time metrics are available. Controller/manual choices
+are also recorded and distinguished from backend calls.
+
+Authentication headers and URL query parameters are never recorded. All log data
+is passed through the shared secret-redaction helper **before** truncation and
+writing. Redaction is best-effort: logs still contain task text/context and should
+be shared carefully, retained only as needed, and manually deleted when finished.
+Logging failures warn once and never stop routing or dispatch. Symlink/hardlink and
+non-regular file targets are rejected rather than followed.
 
 ## Session switches and handoffs
 

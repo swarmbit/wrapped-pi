@@ -58,6 +58,8 @@ export interface Registry {
 export interface RuntimeState {
   activeId?: string;
   enabled: boolean;
+  debugEnabled?: boolean;
+  debugWarningShown?: boolean;
   boundSessionId?: string;
   busy: boolean;
   epoch: number;

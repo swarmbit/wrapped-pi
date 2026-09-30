@@ -3,12 +3,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { CustomEditor, type ExtensionAPI, type ExtensionCommandContext,
   type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { SystemOneBackend, permitsSessionChange, shortlist, type DecisionBackend, type RoutingCandidate, type RoutingDecision } from "./decision";
+import { SystemOneBackend, permitsSessionChange, shortlist, type DecisionBackend, type DecisionResult, type DecisionTrace, type RoutingCandidate, type RoutingDecision } from "./decision";
 import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
 import { installCompaction } from "./compaction";
 import { prepareHandoff } from "./handoff";
+import { beginDecisionDebug, decisionDebugPath, writeDecisionDebug } from "./debug";
 import { installSessionSwitch } from "./session-switch";
 import { historyMessages, savedBranch } from "./history";
 import { bindChatHistory } from "./history-ui";
@@ -35,6 +36,7 @@ const COMMANDS = [
   { name: "sessions", usage: "sessions", description: "Select a real member session" },
   { name: "attach", usage: "attach [name-or-id]", description: "Attach the current real session after confirmation" },
   { name: "compact", usage: "compact [instructions]", description: "Compact the current real session" },
+  { name: "debug", usage: "debug [on|off|status]", description: "Toggle decision debug logs or show their filesystem path" },
   { name: "drafts", usage: "drafts", description: "Restore a held unsent draft" },
 ];
 const HELP = ["Orchestrator commands:", ...COMMANDS.map(command =>
@@ -317,13 +319,33 @@ export class Orchestrator {
 
   private async pickDecision(text: string, candidates: RoutingCandidate[], ctx: ExtensionCommandContext,
     virtualId: string, requestId: string, store: RegistryStore): Promise<RoutingDecision | undefined> {
+    const debug = beginDecisionDebug(ctx, "routing", requestId, virtualId, { text, candidates });
+    let backendResult: DecisionResult | undefined;
+    let backendError: unknown;
+    try {
+      const decision = await this.pickDecisionCore(text, candidates, ctx, virtualId, requestId, store,
+        debug.trace, result => { backendResult = result; }, error => { backendError = error; });
+      debug.finish({ backendResult, effectiveDecision: decision ?? null, backendCalled: !!(backendResult || backendError),
+        outcome: decision?.action === "reuse" && !candidates.some(item => item.id === decision.realId)
+          ? "invalid_target_rejected" : decision ? "selected" : "cancelled" }, backendResult?.usage, backendError);
+      return decision;
+    } catch (error) {
+      debug.finish({ backendResult, outcome: "blocked" }, backendResult?.usage, error);
+      throw error;
+    }
+  }
+
+  private async pickDecisionCore(text: string, candidates: RoutingCandidate[], ctx: ExtensionCommandContext,
+    virtualId: string, requestId: string, store: RegistryStore, trace: DecisionTrace | undefined,
+    onResult: (result: DecisionResult) => void, onError: (error: unknown) => void): Promise<RoutingDecision | undefined> {
     if (!candidates.length) return { action: "new", reason: "No eligible member session exists." };
     if (this.backend) {
       try {
         // Direct classifier calls do not pass through Pi's provider hooks.
         const safeInput = redactForLlm({ text, contexts: candidates.map(item => ({ summary: item.summary || item.goal })) }, ctx);
         const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.contexts[index] }));
-        const result = await this.backend.evaluate(safeInput.text, safeCandidates);
+        const result = await this.backend.evaluate(safeInput.text, safeCandidates, undefined, trace);
+        onResult(result);
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: result.usage ?? normalizeUsage(undefined) });
         if (result.decision.action !== "clarify") {
           if (result.decision.action === "reuse" && !candidates.some(item => item.id === result.decision.realId)) {
@@ -335,7 +357,8 @@ export class Orchestrator {
           if (permitsSessionChange(result.decision)) return result.decision;
           ctx.ui.notify("Changing sessions was not strongly justified; continuing the current session.", "info");
         } else ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
-      } catch {
+      } catch (error) {
+        onError(error);
         store.record({ source: `decision:${requestId}`, virtualId, category: "decision", usage: normalizeUsage(undefined) });
         ctx.ui.notify("Decision backend unavailable or invalid; continuing the current session.", "warning");
       }
@@ -423,6 +446,8 @@ export class Orchestrator {
       if (!state.enabled || state.activeId !== virtualId) throw new Error("Orchestration was disabled before dispatch; no worker request was sent.");
       const destination = decision.action === "reuse" ? candidates.find(item => item.id === decision.realId) : undefined;
       if (decision.action === "reuse" && !destination) throw new Error("Decision selected a session outside the candidate allowlist.");
+      writeDecisionDebug(ctx, { event: "switch_proposal", requestId: token, virtualId,
+        sourceSessionId: sourceId, origin: modelSwitch ? "session_model" : "router", decision });
       const handoffEpoch = state.epoch;
       let deliveryText: string | undefined = text;
       if ((decision.action === "new" || decision.realId !== sourceId) &&
@@ -438,11 +463,14 @@ export class Orchestrator {
       if (deliveryText === undefined) {
         store.update(registry => { registry.requests.find(item => item.id === token)!.state = "interrupted"; });
         ctx.ui.setEditorText(text);
+        writeDecisionDebug(ctx, { event: "dispatch_held", requestId: token, virtualId, reason: "handoff_cancelled" });
         ctx.ui.notify("Switch held; original request restored. No destination request was sent.", "warning");
         return;
       }
       if (!state.enabled || state.activeId !== virtualId || state.epoch !== handoffEpoch ||
           (modelSwitch && !state.pending.has(token))) throw new Error("Orchestration or user input changed during handoff preparation.");
+      writeDecisionDebug(ctx, { event: "dispatch_prepared", requestId: token, virtualId,
+        sourceSessionId: sourceId, decision, handoffApplied: deliveryText !== text });
       // Every route gets an awaited, fresh-context delivery in this first slice.
       // This also replaces the runtime on same-member reuse (documented limitation).
       const deliver = async (fresh: ReplacedSessionContext) => {
@@ -501,6 +529,8 @@ export class Orchestrator {
         if (result.cancelled) throw new Error("Session switch cancelled.");
       }
     } catch (error) {
+      writeDecisionDebug(ctx, { event: "dispatch_error", requestId: token, virtualId,
+        error: error instanceof Error ? error.message : String(error) });
       if (admitted) {
         try {
           store.update(registry => {
@@ -530,6 +560,18 @@ export class Orchestrator {
     const { action, argument } = parseCommand(args);
     if (action === "__dispatch") { await this.dispatch(argument, ctx); return; }
     if (action === "help") { ctx.ui.notify(HELP, "info"); return; }
+    if (action === "debug") {
+      if (argument && !["on", "off", "status"].includes(argument)) throw new Error("Use /orchestrator debug [on|off|status].");
+      if (argument !== "status") {
+        const enabled = argument ? argument === "on" : !state.debugEnabled;
+        if (!enabled) writeDecisionDebug(ctx, { event: "debug_disabled" });
+        state.debugEnabled = enabled;
+        state.debugWarningShown = false;
+        if (enabled) writeDecisionDebug(ctx, { event: "debug_enabled" });
+      }
+      ctx.ui.notify(`Decision debug: ${state.debugEnabled ? "on" : "off"}\nLog: ${decisionDebugPath(ctx.cwd)}\nLogs contain redacted task/context data; share carefully.`, "info");
+      return;
+    }
     if (state.busy && !["status", "list", "off"].includes(action)) {
       throw new Error("An orchestrator request is running. Wait for it to finish before changing sessions.");
     }

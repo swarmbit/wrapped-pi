@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecisionBackend, DecisionResult } from "./decision";
 import { registryPath, RegistryStore } from "./store";
 import { runtimeFor } from "./runtime";
+import { decisionDebugPath } from "./debug";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   VERSION: "0.79.1",
@@ -185,7 +186,7 @@ describe("orchestrator integration", () => {
     const h = harness();
     await h.current.orchestrator.command("help", h.current.ctx);
     const help = h.current.ctx.ui.notify.mock.calls.at(-1)[0];
-    for (const name of ["help", "new", "on", "off", "list", "status", "rename", "delete", "sessions", "attach", "compact", "drafts"]) {
+    for (const name of ["help", "new", "on", "off", "list", "status", "rename", "delete", "sessions", "attach", "compact", "debug", "drafts"]) {
       expect(help).toContain(`/orchestrator ${name}`);
     }
     expect(help).not.toContain("__dispatch");
@@ -317,6 +318,33 @@ describe("orchestrator integration", () => {
     expect(displayedUsers()).toEqual([]);
     await h.current.orchestrator.command("on Atlas", h.current.ctx);
     expect(displayedUsers()).toEqual(["First task", "Different task", "Return to first task"]);
+  });
+
+  it("toggles debug logs and preserves the setting across runtime replacement", async () => {
+    const backend: DecisionBackend = { evaluate: vi.fn(async (_text, candidates): Promise<DecisionResult> => ({ decision: { action: "reuse", realId: candidates[0].id, reason: "stay" } })) };
+    const h = harness(backend);
+    await h.current.orchestrator.command("debug on", h.current.ctx);
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    await h.submit("Implement OAuth");
+    await h.submit("Add tests");
+    const path = decisionDebugPath(workspace);
+    const lines = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const decisions = lines.filter(entry => entry.event === "decision_end");
+    expect(decisions).toHaveLength(2);
+    expect(decisions[1].effectiveDecision).toMatchObject({ action: "reuse", realId: h.current.id });
+    const before = readFileSync(path, "utf8");
+    await h.current.orchestrator.command("debug status", h.current.ctx);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(h.current.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining(path), "info");
+    runtimeFor(workspace).busy = true;
+    await h.current.orchestrator.command("debug off", h.current.ctx);
+    runtimeFor(workspace).busy = false;
+    const disabled = readFileSync(path, "utf8");
+    await h.submit("More tests");
+    expect(readFileSync(path, "utf8")).toBe(disabled);
+    await h.current.orchestrator.command("debug", h.current.ctx);
+    expect(runtimeFor(workspace).debugEnabled).toBe(true);
+    await expect(h.current.orchestrator.command("debug nonsense", h.current.ctx)).rejects.toThrow("debug [on|off|status]");
   });
 
   it("shares the handoff decision for classifier and model-requested switches", async () => {

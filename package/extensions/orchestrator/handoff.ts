@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { DecisionBackend, HandoffInput } from "./decision";
 import type { RegistryStore } from "./store";
 import { normalizeUsage } from "./usage";
+import { beginDecisionDebug, writeDecisionDebug } from "./debug";
 import { redactForLlm } from "../secret-redaction/state";
 
 function messageText(message: unknown): string {
@@ -52,23 +53,32 @@ export function withHandoff(request: string, handoff: string): string {
 /** Shared by classifier routes and explicit model-proposed routes. */
 export async function prepareHandoff(input: HandoffInput, ctx: ExtensionCommandContext,
   backend: DecisionBackend | undefined, store: RegistryStore, virtualId: string, requestId: string): Promise<string | undefined> {
+  const debug = beginDecisionDebug(ctx, "handoff", requestId, virtualId, input);
   let attempted = false;
   let recorded = false;
   try {
     if (!backend?.evaluateHandoff) throw new Error("No handoff decision backend configured.");
     attempted = true;
-    const decision = await backend.evaluateHandoff(redactForLlm(input, ctx), AbortSignal.timeout(10_000));
+    const decision = await backend.evaluateHandoff(redactForLlm(input, ctx), AbortSignal.timeout(10_000), debug.trace);
     store.record({ source: `handoff-decision:${requestId}`, virtualId, category: "decision", usage: decision.usage ?? normalizeUsage(undefined) });
     recorded = true;
     if (typeof decision.needed !== "boolean") throw new Error("Invalid handoff decision.");
+    debug.finish({ result: decision, outcome: decision.needed ? "generate_handoff" : "no_handoff" }, decision.usage);
     if (!decision.needed) return input.request;
-    return withHandoff(input.request, await generateHandoff(input, ctx, store, virtualId, requestId));
-  } catch {
+    const handoff = await generateHandoff(input, ctx, store, virtualId, requestId);
+    writeDecisionDebug(ctx, { event: "handoff_generated", requestId, virtualId, handoff,
+      sourceModel: { id: ctx.model?.id, provider: ctx.model?.provider } });
+    return withHandoff(input.request, handoff);
+  } catch (error) {
+    debug.finish({ outcome: "confirmation_required", backendCalled: attempted }, undefined, error);
+    writeDecisionDebug(ctx, { event: "handoff_confirmation_required", requestId, virtualId,
+      error: error instanceof Error ? error.message : String(error) });
     // A failed attempted call has unknown usage, not a zero-cost decision.
     if (attempted && !recorded) store.record({ source: `handoff-decision:${requestId}`, virtualId, category: "decision", usage: normalizeUsage(undefined) });
     if (!ctx.hasUI) return undefined;
     const choice = await ctx.ui.select("Handoff decision/generation unavailable. Hold the switch unless you explicitly approve.",
       ["Cancel switch", "Provide handoff", "Proceed without handoff"]);
+    writeDecisionDebug(ctx, { event: "handoff_confirmation", requestId, virtualId, choice: choice ?? "cancelled" });
     if (choice === "Proceed without handoff") return input.request;
     if (choice === "Provide handoff") {
       const text = await ctx.ui.input("Source context to preserve (maximum 8000 characters)");

@@ -19,7 +19,7 @@ describe("shared handoff pipeline", () => {
   it("lets the decision backend skip handoff without modifying the original request", async () => {
     const f = fixture();
     expect(await f.prepare()).toBe(input.request);
-    expect(f.backend.evaluateHandoff).toHaveBeenCalledWith(input, expect.any(AbortSignal));
+    expect(f.backend.evaluateHandoff).toHaveBeenCalledWith(input, expect.any(AbortSignal), undefined);
     expect(f.complete).not.toHaveBeenCalled();
     expect(f.store.record).toHaveBeenCalledWith(expect.objectContaining({ source: "handoff-decision:request", category: "decision" }));
   });
