@@ -88,6 +88,8 @@ describe("deferred session-switch tool", () => {
     const result = f.emit("context", { messages: [] });
     expect(result.messages[0].role).toBe("user");
     expect(result.messages[0].content).toContain('"id":"target"');
+    expect(result.messages[0].content).toContain('"messages":"PKCE tests"');
+    expect(result.messages[0].content).not.toContain('"name":');
   });
   it("does not dispatch while input is queued", async () => {
     vi.useFakeTimers();

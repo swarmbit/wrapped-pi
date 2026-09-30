@@ -3,8 +3,8 @@ import { SystemOneBackend, permitsSessionChange, shortlist, type RoutingCandidat
 import { normalizeUsage } from "./usage";
 import type { MemberSession } from "./types";
 const members: MemberSession[] = [
-  { id: "auth", virtualId: "v", file: "a", name: "OAuth", goal: "Implement OAuth callback", summary: "PKCE tests", lastActivityAt: "2026-01-01", origin: "created", baselineSources: [] },
-  { id: "docker", virtualId: "v", file: "b", name: "Docker", goal: "Docker networking", summary: "Ports", lastActivityAt: "2026-01-02", origin: "created", baselineSources: [] },
+  { id: "auth", virtualId: "v", file: "a", name: "OAuth", summary: "PKCE tests", lastActivityAt: "2026-01-01", origin: "created", baselineSources: [] },
+  { id: "docker", virtualId: "v", file: "b", name: "Docker", summary: "Ports", lastActivityAt: "2026-01-02", origin: "created", baselineSources: [] },
 ];
 afterEach(() => vi.unstubAllGlobals());
 function response(choice: string, probabilities: Record<string, number>) {
@@ -22,6 +22,20 @@ describe("handoff decision adapter", () => {
     expect(body.model).toBe("decision-model");
     expect(body.state).toEqual(input);
     expect(body.questions.handoff.type).toBe("choice");
+    expect(body.questions.handoff.instructions).toContain("handoff-generation cost");
+    expect(body.questions.handoff.instructions).toContain("Cost never justifies omitting necessary context");
+  });
+  it("passes source and destination context sizes to the cost-aware handoff decision", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: { handoff: {
+      choice: "NOT_NEEDED", probabilities: { NEEDED: 0.1, NOT_NEEDED: 0.9 },
+    } } }))));
+    const contexts = { ...input,
+      sourceContext: { tokens: 100000, contextWindow: 128000, estimated: false },
+      destinationContext: { tokens: 2000, contextWindow: null, estimated: true },
+    };
+    await new SystemOneBackend("http://localhost", "m").evaluateHandoff(contexts);
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.state).toEqual(contexts);
   });
   it.each([
     { choice: "NEEDED", probabilities: { NEEDED: 0.6, NOT_NEEDED: 0.4 } },
@@ -37,18 +51,28 @@ describe("handoff decision adapter", () => {
 describe("decision adapter", () => {
   it("selects an allowlisted continuation and keeps classification costs unknown", async () => {
     response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
-    const result = await new SystemOneBackend("http://localhost:8000/v1/systemone", "multilingual").evaluate("Add tests", members);
+    const result = await new SystemOneBackend("http://localhost:8000/v1/systemone", "english").evaluate("Add tests", members);
     expect(result.decision).toMatchObject({ action: "reuse", realId: "auth" });
     expect(result.usage?.input).toBe(42);
     expect(result.usage?.incompleteCost).toBe(true);
     const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
     expect(request.questions.route.type).toBe("choice");
-    expect(request.model).toBe("multilingual");
+    expect(request.model).toBe("english");
     expect(request.state.sessions).toHaveLength(2);
-    expect(request.state.sessions[0].summary).toBe("PKCE tests");
+    expect(request.state.sessions[0].messages).toBe("PKCE tests");
     expect(request.questions.route.criteria.S0).not.toContain("Implement OAuth callback");
   });
-  it("sends usage and context metrics with continuity-first routing instructions", async () => {
+  it("sends full recent context without silently truncating it", async () => {
+    response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
+    const summary = `tool call: read {\"path\":\"file.ts\"}\n${"context".repeat(2000)}`;
+    await new SystemOneBackend("http://localhost", "m").evaluate("Continue", [{ ...members[0], summary, isCurrent: true }, members[1]]);
+    const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(request.state.sessions[0].messages).toBe(summary);
+    expect(request.questions.route.criteria.NEW).toContain("self-contained work");
+    expect(request.questions.route.criteria.S1).toContain("clearly better fit");
+    expect(request.questions.route.instructions).toContain("not verified success");
+  });
+  it("omits names and lifetime spending but includes context size for cost-aware routing", async () => {
     response("S0", { NEW: 0.02, S0: 0.95, S1: 0.03 });
     const candidates: RoutingCandidate[] = members.map((member, index) => ({
       ...member,
@@ -61,11 +85,10 @@ describe("decision adapter", () => {
     }));
     await new SystemOneBackend("http://localhost", "m").evaluate("Add tests", candidates);
     const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
-    expect(request.state.sessions[0].metrics).toEqual(candidates[0].metrics);
-    expect(request.state.sessions[1].metrics.lifetimeUsage.incompleteCost).toBe(true);
-    expect(request.state.sessions[1].metrics.context.tokens).toBeNull();
-    expect(request.questions.route.instructions).toContain("Prioritize required task context over savings");
-    expect(request.questions.route.instructions).toContain("not the price of the next request");
+    expect(request.state.sessions[0]).toEqual({ key: "S0", isCurrent: false, messages: "PKCE tests", context: candidates[0].metrics?.context });
+    expect(request.state.sessions[1]).toEqual({ key: "S1", isCurrent: false, messages: "Ports", context: candidates[1].metrics?.context });
+    expect(request.questions.route.instructions).toContain("Actively avoid growing very long sessions");
+    expect(request.questions.route.instructions).toContain("Historical lifetime spending is sunk cost");
   });
   it.each([0.8, 0.85, 0.99])("automatically selects required context only at a strong score (score %s)", async score => {
     response("S0", { NEW: 1 - score, S0: score, S1: 0 });
@@ -93,8 +116,8 @@ describe("decision adapter", () => {
     const request = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
     expect(request.state.sessions[0].isCurrent).toBe(true);
     expect(request.state.sessions[1].isCurrent).toBe(false);
-    expect(request.questions.route.instructions).toContain("Topic drift or a different keyword does not require isolation");
-    expect(request.questions.route.instructions).toContain("never justify changing sessions");
+    expect(request.questions.route.instructions).toContain("Switching can be preferable without being strictly necessary");
+    expect(request.questions.route.instructions).toContain("Never discard necessary context for savings");
   });
   it("retains the current session on a moderately confident alternative and ambiguous follow-ups", async () => {
     const candidates = members.map(member => ({ ...member, isCurrent: member.id === "auth" }));
@@ -143,7 +166,7 @@ describe("decision adapter", () => {
   it.each(["file:///tmp/decisions", "https://user:password@example.com"])("rejects unsafe endpoint %s", url => {
     expect(() => new SystemOneBackend(url, "m")).toThrow("HTTP");
   });
-  it("shortlists by current session context rather than the original goal", () => {
+  it("shortlists by recent messages rather than the session name", () => {
     const evolved = members.map(member => ({ ...member, summary: member.id === "auth" ? "Laya multilingual setup" : "OAuth callback tests" }));
     expect(shortlist("OAuth callback", evolved).map(item => item.id)).toEqual(["docker", "auth"]);
   });

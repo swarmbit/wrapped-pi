@@ -12,7 +12,7 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "orchestrator-store-")); sto
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 function member(virtualId: string, id = "real-1"): MemberSession {
-  return { id, virtualId, file: join(dir, `${id}.jsonl`), name: "A task", goal: "Implement OAuth", summary: "",
+  return { id, virtualId, file: join(dir, `${id}.jsonl`), name: "A task", summary: "",
     lastActivityAt: "2026-01-01", origin: "attached", baselineSources: [] };
 }
 const usage = normalizeUsage({ input: 10, output: 2, cacheRead: 100, cacheWrite: 0, cost: { total: 0.1 } });
@@ -26,6 +26,19 @@ describe("persistent virtual registry", () => {
     expect(store.find("Renamed").id).toBe(created.id);
     expect(store.read().virtualSessions).toHaveLength(1);
     expect(store.read().lastSelectedVirtualId).toBe(created.id);
+  });
+
+  it("loads legacy goals without retaining them and removes them on the next save", () => {
+    const virtual = store.create("Legacy");
+    store.attach(member(virtual.id), []);
+    const legacy = JSON.parse(readFileSync(store.file, "utf8"));
+    legacy.members[0].goal = "Obsolete initial task";
+    writeFileSync(store.file, JSON.stringify(legacy));
+    expect(store.read().members[0]).not.toHaveProperty("goal");
+    store.reconcile("real-1", [], { name: "A task", summary: "Latest messages" });
+    const saved = JSON.parse(readFileSync(store.file, "utf8"));
+    expect(saved.members[0]).not.toHaveProperty("goal");
+    expect(saved.members[0].summary).toBe("Latest messages");
   });
 
   it.each(["", "  ", "a\nb", "a".repeat(101)])("rejects invalid name %j", name => {

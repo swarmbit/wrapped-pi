@@ -21,7 +21,6 @@ export interface MemberSession {
   virtualId: string;
   file: string;
   name: string;
-  goal: string;
   summary: string;
   lastActivityAt: string;
   origin: "created" | "attached";

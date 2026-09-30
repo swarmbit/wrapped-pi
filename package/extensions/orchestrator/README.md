@@ -115,43 +115,52 @@ Set these variables in the environment **of the Pi process**:
 
 ```bash
 export WPI_ORCHESTRATOR_DECISION_URL=http://127.0.0.1:8000/v1/systemone
-export WPI_ORCHESTRATOR_DECISION_MODEL=multilingual
+export WPI_ORCHESTRATOR_DECISION_MODEL=english
 ```
 
 The endpoint must implement the Jev/System One `state` + typed `questions` protocol,
 for example a local Laya server. Authentication, if needed, uses
 `WPI_ORCHESTRATOR_DECISION_API_KEY`; never embed credentials in the URL. For Docker,
 use the appropriate reachable host/service address and pass the environment
-variables into the container. See the [Laya multilingual Docker Compose example](../../../example/laya/README.md)
+variables into the container. See the [Laya English Docker Compose example](../../../example/laya/README.md)
 for a CPU-only Jev-compatible server, test request, and wpi configuration.
 
-Up to three candidates are submitted with session context summaries and usage
-metrics. Metrics include lifetime input/output/cache tokens, estimated USD cost,
-and completeness flags, including usage before attachment. The active session
-uses Pi's live context size/window. Inactive sessions use a last-response token
-estimate from the saved leaf branch; their context window is unknown. Missing
-usage and post-compaction context estimates remain partial/unknown, not zero.
-These metrics are constructed for routing and do not change registry membership.
+Up to three candidates are submitted using only their last ten user/assistant
+messages, an opaque routing key, a current-session flag, and context-token/window
+counts, alongside the incoming request. Session names, original goals, and lifetime
+usage/spending are not sent to the routing classifier. Token counts are prompt-cost
+proxies, not exact next-request dollar prices; missing counts remain unknown.
+Usage accounting remains available locally.
 
-The classifier is instructed to stay in the current session by default. Follow-ups,
-corrections, tests, refinements, related work, and topic drift do not justify switching.
-Another member must supply unique prior context necessary for the request; NEW
-requires explicitly independent work needing isolation that no existing session
-can serve. Context size, token savings, and historical cost never justify a switch.
+The classifier balances continuity with useful task separation. Dependent follow-ups,
+corrections, tests, and refinements normally stay in the current session. Another
+member may be chosen when its prior work, decisions, or task focus make it a clearly
+better fit, even if the current session could handle the request. NEW is appropriate
+for a distinct task that benefits from focused context when no member fits well.
+Avoiding long, expensive prompts is an explicit routing priority. For self-contained
+work, prefer a suitable shorter member or a new focused session over continuing to
+grow a long current session. Among sufficient contexts, favor substantially smaller
+prompts, while weighing handoff overhead and cache loss. Topic keywords and sunk
+historical spending do not justify switching; dependent work stays or carries its
+needed source context through the handoff stage. Tiny savings should not cause churn.
 Routing itself does not trigger compaction; model-requested compaction is described below.
 
 Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
-extractive view of the active branch's latest three user/assistant turns, newest
-first; empty assistant messages and tool results are excluded. This adds no model
-calls. Routing uses this evolving context rather than the original request;
-existing registry `summary` fields remain compatible (the initial goal is only
-an empty-summary fallback).
+extractive view of the active branch's latest ten nonempty user/assistant messages,
+newest first. Full text and tool call names/arguments are retained without character
+truncation; tool results, thinking, and image payloads are excluded. Call-only
+assistant messages count toward the ten-message limit. Calls indicate attempted
+actions, not verified success. This adds no model calls, but full messages can
+increase classifier input substantially. Routing uses this evolving context rather
+than the original request; existing registry `summary` fields remain compatible.
+There is no separate `goal` field or name-based routing fallback. Legacy registry
+goals are discarded on read and removed from disk on the next save. These summaries
+are separate from Pi compaction summaries and model-generated switch handoffs.
 
 Direct classifier inputs are processed by the bundled shared secret-redaction
 helper before being sent. Endpoint configuration is an explicit authorization to
-send these session context summaries, usage/context metrics, and the
-incoming request to that endpoint; review privacy and retention first.
+send these recent messages and the incoming request to that endpoint; review privacy and retention first.
 
 Automatic changes require strong scores **and** a wide margin over the runner-up:
 
@@ -167,7 +176,7 @@ and no strongly supported route is available, dispatch stops and preserves the d
 Without a configured backend, the picker lists the current session first; explicit
 user choices can still switch or create a session. The first request in an empty
 virtual session creates its first member without classification. These scores are
-**not** calibrated certainty or proof of necessity. No physical-model selection is implemented.
+**not** calibrated certainty or proof of task fit. No physical-model selection is implemented.
 
 ## Decision debug logging
 
@@ -188,7 +197,8 @@ redacted preview. Oversized HTTP responses rejected by the backend omit their bo
 Each decision has a unique `callId`, correlated with the orchestrated `requestId`,
 virtual/real session IDs, timestamps, PID, and decision kind. Records include:
 
-- Original request, candidate summaries/metrics, and handoff preservation notes.
+- Original request, local candidate summaries/metrics, and handoff preservation notes
+  (local debug metadata is distinct from the classifier payload).
 - Actual System One request payload (including questions/instructions and model),
   HTTP status, response payload, choices, probabilities, and server-reported metrics.
 - Parsed decisions and the controller's final selected/fallback/cancelled outcome.
@@ -227,7 +237,12 @@ refresh behavior, limits, and privacy notes.
 Both classifier-selected switches and model-requested switches use the same
 handoff stage **before replacing the source runtime**. The configured System One
 decision model receives the original request, bounded source/destination context
-summaries, switch reason, and any model-supplied preservation notes. It answers a
+summaries, source/destination context-token counts, switch reason, and any
+model-supplied preservation notes. It weighs handoff generation, added destination
+tokens, and future prompt cost: self-contained or redundant context gets no handoff;
+necessary source-only facts get the smallest useful handoff, not the entire history.
+A long destination calls for minimizing context, never dropping indispensable facts.
+It answers a
 separate `handoff` choice question (`NEEDED` or `NOT_NEEDED`); automatic acceptance
 requires at least 80% score and a 60-percentage-point margin. The session model's
 notes never bypass this decision.
@@ -254,8 +269,8 @@ On **Pi 0.99.1+**, `request_session_switch` allows the session model to propose 
 existing real member of the enabled virtual session using `target_session_id`,
 `reason`, and `preservation_notes`. A bounded request-local member list exposes IDs
 and summaries without changing the system prompt. The tool cannot create sessions
-or select members of another virtual session. Switching must require unique prior
-context, not merely save tokens or match keywords.
+or select members of another virtual session. Switching should favor a clearly
+better-fitting task context, not merely save tokens or match keywords.
 
 The tool returns **scheduled** and waits for final settlement and idle state before
 using Pi's supported command-dispatch bridge (`expandPromptTemplates: true`) to

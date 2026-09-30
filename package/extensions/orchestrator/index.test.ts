@@ -412,7 +412,7 @@ describe("orchestrator integration", () => {
     expect(h.current.id).toBe(first);
     const data = h.store().read();
     expect(data.members).toHaveLength(1);
-    expect(data.members[0].summary).toMatch(/^Latest turn:\nuser: Now add tests for that/);
+    expect(data.members[0].summary).toContain("user: Now add tests for that");
     expect(data.members[0].summary).toContain("Implement OAuth");
     expect(vi.mocked(backend.evaluate).mock.calls[0][1][0].summary).toContain("Implement OAuth");
     expect(data.requests).toHaveLength(2);

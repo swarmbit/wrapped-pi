@@ -9,10 +9,10 @@ services:
       LAYA_HOST: "0.0.0.0"
       LAYA_PORT: "8000"
       LAYA_DEVICE: cpu
-      # Preload only multilingual before accepting requests. Clients must also
-      # send model=multilingual; LAYA_MODELS controls preload, not model routing.
+      # Preload only English before accepting requests. Clients must also
+      # send model=english; LAYA_MODELS controls preload, not model routing.
       LAYA_PRELOAD: "1"
-      LAYA_MODELS: multilingual
+      LAYA_MODELS: english
       LAYA_AUTO_TASK: "0"
       LAYA_THREADS: "${LAYA_THREADS:-4}"
       OMP_NUM_THREADS: "${LAYA_THREADS:-4}"

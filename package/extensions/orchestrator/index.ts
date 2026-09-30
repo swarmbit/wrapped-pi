@@ -342,7 +342,7 @@ export class Orchestrator {
     if (this.backend) {
       try {
         // Direct classifier calls do not pass through Pi's provider hooks.
-        const safeInput = redactForLlm({ text, contexts: candidates.map(item => ({ summary: item.summary || item.goal })) }, ctx);
+        const safeInput = redactForLlm({ text, contexts: candidates.map(item => ({ summary: item.summary })) }, ctx);
         const safeCandidates = candidates.map((item, index) => ({ ...item, ...safeInput.contexts[index] }));
         const result = await this.backend.evaluate(safeInput.text, safeCandidates, undefined, trace);
         onResult(result);
@@ -455,9 +455,12 @@ export class Orchestrator {
         deliveryText = await prepareHandoff({
           request: text,
           sourceSummary: sessionContextSummary(ctx.sessionManager.getBranch()),
-          destinationSummary: destination?.summary || destination?.goal || "New session: no prior context.",
+          destinationSummary: destination?.summary || "No prior context available.",
           switchReason: decision.reason,
           preservationNotes: modelSwitch?.preservationNotes,
+          sourceContext: candidates.find(item => item.id === sourceId)?.metrics?.context,
+          destinationContext: destination?.metrics?.context ?? (decision.action === "new"
+            ? { tokens: 0, contextWindow: null, estimated: false } : undefined),
         }, ctx, this.backend, store, virtualId, token);
       }
       if (deliveryText === undefined) {
@@ -514,8 +517,8 @@ export class Orchestrator {
             const file = manager.getSessionFile();
             if (!file) throw new Error("New Pi session is not persistent.");
             manager.appendSessionInfo(name);
-            store.attach({ id: manager.getSessionId(), virtualId, file, name, goal: text.slice(0, 1000),
-              summary: `Latest turn:\nuser: ${text.slice(0, 300)}`, lastActivityAt: new Date().toISOString(), origin: "created", baselineSources: [] }, []);
+            store.attach({ id: manager.getSessionId(), virtualId, file, name,
+              summary: `Latest message:\nuser: ${text}`, lastActivityAt: new Date().toISOString(), origin: "created", baselineSources: [] }, []);
           },
           withSession: deliver,
         });
@@ -621,12 +624,12 @@ export class Orchestrator {
       if (!file) throw new Error("Cannot attach an ephemeral session.");
       const virtual = store.find(argument || state.activeId!);
       const id = ctx.sessionManager.getSessionId();
-      const goal = ctx.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
-      const name = ctx.sessionManager.getSessionName() || realName(virtual.name, goal?.type === "message" ? textOf(goal.message) : "Attached task");
+      const firstRequest = ctx.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
+      const name = ctx.sessionManager.getSessionName() || realName(virtual.name, firstRequest?.type === "message" ? textOf(firstRequest.message) : "Attached task");
       if (store.read().members.some(member => member.id === id)) throw new Error("Real session already belongs to an orchestrator.");
       if (!(await ctx.ui.confirm(`Attach current real session to ${virtual.name}?`, "Its context becomes a routing candidate. Earlier costs are excluded from the virtual total."))) return;
       if (!ctx.sessionManager.getSessionName()) this.pi.setSessionName(name);
-      store.attach({ id, virtualId: virtual.id, file, name, goal: goal?.type === "message" ? textOf(goal.message).slice(0, 1000) : name,
+      store.attach({ id, virtualId: virtual.id, file, name,
         summary: sessionContextSummary(ctx.sessionManager.getBranch()), lastActivityAt: new Date().toISOString(), origin: "attached", baselineSources: [] }, extractUsage(ctx.sessionManager.getEntries(), id));
       await this.enable(virtual.id, ctx);
       return;
@@ -708,7 +711,7 @@ export default function (pi: ExtensionAPI) {
   let backend: DecisionBackend | undefined;
   let invalidBackend = false;
   if (url) {
-    try { backend = new SystemOneBackend(url, process.env.WPI_ORCHESTRATOR_DECISION_MODEL || "multilingual",
+    try { backend = new SystemOneBackend(url, process.env.WPI_ORCHESTRATOR_DECISION_MODEL || "english",
       process.env.WPI_ORCHESTRATOR_DECISION_API_KEY); }
     catch { invalidBackend = true; }
   }

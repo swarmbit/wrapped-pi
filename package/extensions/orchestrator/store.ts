@@ -29,6 +29,8 @@ export class RegistryStore {
         ![data.virtualSessions, data.members, data.usage, data.requests].every(Array.isArray)) {
       throw new Error("Invalid orchestrator registry; restore it from backup rather than overwriting it.");
     }
+    // Legacy registries remain readable; the obsolete task goal is not retained.
+    for (const member of data.members) delete (member as MemberSession & { goal?: unknown }).goal;
     return data;
   }
 

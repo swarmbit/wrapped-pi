@@ -1,9 +1,9 @@
-# Laya multilingual — local Jev-compatible API
+# Laya English — local Jev-compatible API
 
 Run [Laya](https://github.com/NandhaKishorM/laya) on CPU with
 `POST /v1/systemone`, the Jev/System One typed-question protocol. This example
 installs Laya 0.3.21 and CPU-only PyTorch 2.14.0, runs as a non-root user, and
-preloads the multilingual checkpoint. No hosted Jev account or GPU is needed.
+preloads the English checkpoint. No hosted Jev account or GPU is needed.
 
 ## Start and test
 
@@ -18,7 +18,7 @@ curl --fail-with-body http://127.0.0.1:8000/v1/systemone \
   -H 'Content-Type: application/json' --data-binary @request.json
 ```
 
-The bundled request is Portuguese. Inspect `answers.department.choice`,
+The bundled request is English. Inspect `answers.department.choice`,
 `answers.department.probabilities`, and `usage` in the JSON response. Predictions
 are model outputs, not guaranteed classifications.
 
@@ -28,17 +28,37 @@ volume. `docker compose down` keeps them; `docker compose down --volumes` delete
 them. Adjust host port or CPU threads with `LAYA_PORT=9000` or `LAYA_THREADS=2`
 before the Compose command. Keep threads at or below available physical cores.
 
-**Always send `"model": "multilingual"`**, including for English requests.
-`LAYA_MODELS=multilingual` only selects what to preload; omitting the request model
-allows Laya's router to select and download another checkpoint. Multilingual's
-default context is 1,024 tokens and long inputs may be truncated. Standalone API
-clients can set `max_len` explicitly; the current wpi adapter does not set it.
+**Always send `"model": "english"`**.
+`LAYA_MODELS=english` only selects what to preload; omitting the request model
+allows Laya's router to select and download another checkpoint. The English
+checkpoint's default context is 512 tokens, so long routing/handoff inputs may be
+truncated. Validate decisions on your workload; preloading does not increase the
+context budget. Standalone API clients can set `max_len` explicitly; the current
+wpi adapter does not set it. For non-English workloads, explicitly select and
+preload `multilingual` instead.
+
+## Update an existing Compose stack
+
+Change the running stack's Compose configuration to `LAYA_MODELS: english`, then
+recreate the Laya service from that stack's directory (use its existing Compose
+files/project name if they differ from this example):
+
+```bash
+docker compose up -d --force-recreate --wait --wait-timeout 900 laya
+curl --fail-with-body http://127.0.0.1:8000/health
+```
+
+A plain `docker compose restart` does not apply changed environment variables.
+Keep the model-cache volume; English weights download on first startup without
+removing previously cached checkpoints. Also change any explicit
+`WPI_ORCHESTRATOR_DECISION_MODEL` setting to `english` and start a fresh Pi/wpi
+process. Server preload alone does not change an existing client's request model.
 
 ## Connect wpi's orchestrator
 
 Merge [`wpi-laya.yml`](wpi-laya.yml) into `~/.pi/wpi.yml` or your project's
 `.pi/wpi.yml`, then start a new wpi process. The endpoint includes
-`/v1/systemone`, and `WPI_ORCHESTRATOR_DECISION_MODEL` pins `multilingual`.
+`/v1/systemone`, and `WPI_ORCHESTRATOR_DECISION_MODEL` pins `english`.
 Use `/orchestrator on <name>` to enable routing.
 
 wpi runs in a separate container: **localhost there is not the host or Laya**.
