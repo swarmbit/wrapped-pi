@@ -9,7 +9,7 @@ Each child is a long-lived Pi RPC process with its own saved session and context
 Uses the same agent definitions as `subagent`: `~/.pi/agent/agents/*.md` (including `runner` and `expert` when installed). Project agent definitions require explicit approval when started through the tool.
 
 ```text
-/multiagent start runner Investigate the failing tests; do not edit files yet
+/multiagent start runner Execute bash({command: "npm test"}); return exit status, test counts, and diagnostics. Do not run additional calls.
 /multiagents
 ```
 
@@ -42,11 +42,14 @@ Steering is applied after the current assistant turn and its tools, not as an im
 
 ## Expert and runner coordination preset
 
-The sample definitions in `../subagent/agents/` share discovery with this extension.
+The sample definitions in `agents/` share discovery with this extension.
 Install `expert.md` and `runner.md` in `~/.pi/agent/agents/` (copy or symlink).
 Expert only analyzes and sends evidence requests/results to the parent; runner
-executes bounded operations and reports questions, progress, and results through
-its parent mailbox. Neither agent delegates to the other.
+executes explicit tool calls or batches and returns parsed results through its
+parent mailbox. Runner does not investigate, reason about solutions, or implement
+goals; the parent supplies exact arguments, commands, and edit content. Missing
+arguments or failed calls end the transaction rather than triggering autonomous
+follow-up work. Neither agent delegates to the other.
 
 In this repository, select the dynamic parent prompt with:
 
@@ -69,7 +72,7 @@ an existing child deliberately retains its original loadout and instructions.
 `multiagent` accepts `action: start | list | read | send | steer | follow_up | stop | close | inbox | ack`:
 
 ```json
-{"action":"start","agent":"runner","task":"Investigate the tests"}
+{"action":"start","agent":"runner","task":"Execute bash({command: \"npm test\"}); return exit status, test counts, and diagnostics using multiagent_parent. Do not run additional calls."}
 {"action":"list"}
 {"action":"read","id":"<returned id>"}
 {"action":"steer","id":"<returned id>","message":"Do not modify files"}

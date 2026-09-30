@@ -22,9 +22,7 @@ subagent/
 │   ├── scout.md         # Fast recon, returns compressed context
 │   ├── planner.md       # Creates implementation plans
 │   ├── reviewer.md      # Code review
-│   ├── worker.md        # General-purpose (full capabilities)
-│   ├── expert.md        # Reasoning consultant, requests evidence from parent
-│   └── runner.md        # Executes concrete tool operations
+│   └── worker.md        # General-purpose (full capabilities)
 └── prompts/             # Workflow presets (prompt templates)
     ├── implement.md     # scout -> planner -> worker
     ├── scout-and-plan.md    # scout -> planner (no implementation)
@@ -33,9 +31,10 @@ subagent/
 
 ## Installation
 
-The extension is bundled with wpi. To use the sample agents and prompts, copy or
+The extension is bundled with wpi. To use the sample subagent definitions and prompts, copy or
 symlink `package/extensions/subagent/agents/*.md` into `~/.pi/agent/agents/` and
-`package/extensions/subagent/prompts/*.md` into `~/.pi/agent/prompts/`.
+`package/extensions/subagent/prompts/*.md` into `~/.pi/agent/prompts/`. The expert and runner
+multiagent definitions are provided separately in `package/extensions/multiagent/agents/`.
 The extension itself loads from the bundled package; no extra symlink is needed.
 
 ## Security Model
@@ -138,18 +137,19 @@ Project agents override user agents with the same name when `agentScope: "both"`
 | `planner` | Implementation plans | Sonnet | read, grep, find, ls |
 | `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
 | `worker` | General-purpose | Sonnet | (all default) |
-| `expert` | Reasoning; evidence requests through parent | openai-codex/gpt-6-astra | multiagent_parent (managed multiagent child) |
-| `runner` | Concrete tool execution | openai-codex/gpt-6-luna | read, bash, edit, write, grep, find, ls |
 
 ### Expert with runner through multiagent
 
-These two definitions support the parent-mediated workflow in the separate
-[`multiagent` extension](../multiagent/README.md). Expert no longer uses `subagent`
-or contacts runner directly: it requests evidence through `multiagent_parent`,
-and the parent assigns runner and relays results. Runner executes bounded tasks
-and uses its parent mailbox for questions, material updates, and completion reports.
+The expert and runner definitions are maintained under
+[`multiagent/agents/`](../multiagent/agents/) for the parent-mediated workflow
+provided by the separate [`multiagent` extension](../multiagent/README.md).
+Expert requests evidence through `multiagent_parent`, and the parent assigns
+explicit tool calls or batches to runner and relays the parsed results. Runner
+only executes supplied calls, including exact commands or edit content; it does
+not investigate, choose solutions, or implement goals. It uses its parent mailbox
+for blockers and transaction results.
 
-Install both definitions in the user agent directory. In this repository, select
+Install both definitions from `package/extensions/multiagent/agents/` into the user agent directory. In this repository, select
 `/system-prompts multiagent` to use `.pi/system-prompts/multiagent.md`; for other
 projects, copy that prompt into `~/.pi/agent/system-prompts/`. This is the new
 persistent workflow, not the older `expert-runner` subagent preset.

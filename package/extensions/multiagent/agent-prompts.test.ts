@@ -6,7 +6,7 @@ import { loadPrompts } from "../dynamic-system-prompts/prompts.js";
 
 const root = path.resolve(__dirname, "../../..");
 function agent(name: string) {
-  return parseFrontmatter<Record<string, string>>(readFileSync(path.join(root, "package/extensions/subagent/agents", `${name}.md`), "utf8"));
+  return parseFrontmatter<Record<string, string>>(readFileSync(path.join(root, "package/extensions/multiagent/agents", `${name}.md`), "utf8"));
 }
 function examples(text: string) {
   return text.split("\n").filter(line => line.startsWith('{"')).map(line => JSON.parse(line));
@@ -23,12 +23,17 @@ describe("parent-mediated expert and runner prompts", () => {
     expect(examples(body).map(example => example.kind)).toEqual(["question", "result"]);
     for (const example of examples(body)) expect(example.message.length).toBeLessThanOrEqual(4000);
   });
-  it("preserves runner's execution loadout and adds bounded parent communication", () => {
+  it("preserves runner's execution loadout and requires transactional execution", () => {
     const { frontmatter, body } = agent("runner");
     expect(frontmatter.name).toBe("runner");
     expect(frontmatter.tools.split(",").map(tool => tool.trim())).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls"]);
     expect(frontmatter.model).toBe("openai-codex/gpt-6-luna:low");
     expect(body).toContain("multiagent_parent");
+    expect(body).toContain("transactional tool executor");
+    expect(body).toContain("Execute only those calls");
+    expect(body).toContain("exact parent-supplied changes or content");
+    expect(body).toContain("do not invent arguments, retry, or repair");
+    expect(body).toContain("Return concise parsed results for each call");
     expect(body).toContain("normal assistant response instead");
     expect(examples(body).map(example => example.kind)).toEqual(["question", "result"]);
     for (const example of examples(body)) expect(example.message.length).toBeLessThanOrEqual(4000);
@@ -37,6 +42,10 @@ describe("parent-mediated expert and runner prompts", () => {
     const prompt = loadPrompts(root, path.join(root, "nonexistent-agent-dir")).find(prompt => prompt.name === "multiagent");
     expect(prompt?.source).toBe("project");
     expect(prompt?.description).toBeTruthy();
+    expect(prompt?.content).toContain("Runner is a transactional tool executor");
+    expect(prompt?.content).toContain("name each tool, supply its exact arguments");
+    expect(prompt?.content).toContain("You own routine reasoning and implementation decisions");
+    expect(prompt?.content).toContain("then send a new transaction");
     const calls = examples(prompt!.content);
     expect(calls.filter(call => call.action === "start").map(call => call.agent)).toEqual(["runner", "expert"]);
     for (const call of calls) {
