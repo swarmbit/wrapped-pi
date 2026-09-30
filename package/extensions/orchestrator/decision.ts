@@ -13,21 +13,22 @@ export interface ModelSelectionResult {
   model?: string;
   reason: string;
   confidence?: number;
+  /** Legacy diagnostic field; ignored by decision gates. */
   margin?: number;
   usage?: TokenUsage;
 }
 
 export function permitsModelSelection(result: ModelSelectionResult): boolean {
-  return permitsSessionChange({ action: "new", reason: result.reason,
-    confidence: result.confidence, margin: result.margin });
+  return acceptsConfidence(result.confidence);
 }
 
 export interface RoutingDecision {
   action: "new" | "reuse" | "clarify";
   realId?: string;
   reason: string;
-  /** Classifier scores, not calibrated certainty; required for automatic session changes. */
+  /** Confidence of the returned choice, not calibrated certainty. */
   confidence?: number;
+  /** Legacy diagnostic field; ignored by decision gates. */
   margin?: number;
 }
 export interface DecisionResult {
@@ -52,6 +53,8 @@ export interface HandoffInput {
 }
 export interface HandoffDecisionResult {
   needed: boolean;
+  /** Missing or <= 60% confidence skips handoff generation. */
+  confidence?: number;
   usage?: TokenUsage;
 }
 export interface DecisionTraceEvent {
@@ -72,13 +75,12 @@ export interface DecisionBackend {
   evaluate(text: string, candidates: RoutingCandidate[], signal?: AbortSignal, trace?: DecisionTrace): Promise<DecisionResult>;
 }
 
+export function acceptsConfidence(confidence: unknown): boolean {
+  return typeof confidence === "number" && Number.isFinite(confidence) && confidence > 0.6 && confidence <= 1;
+}
+
 export function permitsSessionChange(decision: RoutingDecision): boolean {
-  const { confidence, margin } = decision;
-  if (typeof confidence !== "number" || typeof margin !== "number" ||
-      !Number.isFinite(confidence) || !Number.isFinite(margin) ||
-      confidence > 1 || margin > 1 || margin < 0 || margin > confidence) return false;
-  return (decision.action === "new" || decision.action === "reuse") &&
-    confidence >= 0.8 && margin + Number.EPSILON >= 0.6;
+  return (decision.action === "new" || decision.action === "reuse") && acceptsConfidence(decision.confidence);
 }
 
 /** Explicitly configured Jev/System One compatible server (e.g. local Laya). */
@@ -146,9 +148,7 @@ export class SystemOneBackend implements DecisionBackend {
     const ranked = keys.map(key => ({ key, score: probabilities[key] }));
     if (ranked.some(item => typeof item.score !== "number" || !Number.isFinite(item.score) || item.score < 0 || item.score > 1) ||
         Math.abs(ranked.reduce((sum, item) => sum + item.score, 0) - 1) > 0.01) throw new Error("Invalid model probabilities.");
-    ranked.sort((a, b) => b.score - a.score);
-    if (ranked[0].key !== answer.choice) throw new Error("Model choice disagrees with probabilities.");
-    const evidence = { confidence: ranked[0].score, margin: ranked[0].score - (ranked[1]?.score ?? 0) };
+    const evidence = { confidence: probabilities[answer.choice] };
     const result: ModelSelectionResult = {
       model: input.models[keys.indexOf(answer.choice)].model,
       reason: "Decision model selected the worker for this new session.", ...evidence,
@@ -177,8 +177,7 @@ export class SystemOneBackend implements DecisionBackend {
     if (scores.some(score => typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) ||
       Math.abs(scores[0] + scores[1] - 1) > 0.01) throw new Error("Invalid handoff probabilities.");
     const selected = probabilities[answer.choice];
-    if (selected < 0.8 || selected - Math.min(...scores) + Number.EPSILON < 0.6) throw new Error("Ambiguous handoff decision.");
-    return { needed: answer.choice === "NEEDED", usage: payload.usage
+    return { needed: acceptsConfidence(selected) && answer.choice === "NEEDED", confidence: selected, usage: payload.usage
       ? normalizeUsage({ input: payload.usage.input_tokens, output: payload.usage.output_tokens, cacheRead: 0, cacheWrite: 0 })
       : undefined };
   }
@@ -214,9 +213,7 @@ export class SystemOneBackend implements DecisionBackend {
         Math.abs(ranked.reduce((total, item) => total + item.score, 0) - 1) > 0.01) {
       throw new Error("Invalid decision probabilities.");
     }
-    ranked.sort((a, b) => b.score - a.score);
-    if (ranked[0].key !== choice) throw new Error("Decision choice disagrees with probabilities.");
-    const evidence = { confidence: ranked[0].score, margin: ranked[0].score - (ranked[1]?.score ?? 0) };
+    const evidence = { confidence: probabilities[choice] };
     let usage: TokenUsage | undefined;
     if (payload.usage) {
       // System One bills input only and reports no separate prompt-cache fields.
@@ -224,7 +221,7 @@ export class SystemOneBackend implements DecisionBackend {
         cacheRead: 0, cacheWrite: 0 });
     }
     const proposed: RoutingDecision = choice === "NEW"
-      ? { action: "new", reason: "Strong decision scores favor a new focused task session.", ...evidence }
+      ? { action: "new", reason: "Decision model selected a new focused task session.", ...evidence }
       : { action: "reuse", realId: ids.get(choice), reason: "Decision model selected the best-fitting task context.", ...evidence };
     const current = candidates.find(candidate => candidate.isCurrent);
     const staying = proposed.action === "reuse" && proposed.realId === current?.id;

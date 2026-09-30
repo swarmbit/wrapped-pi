@@ -375,7 +375,7 @@ export class Orchestrator {
           const current = candidates.find(item => item.id === ctx.sessionManager.getSessionId());
           if (result.decision.action === "reuse" && result.decision.realId === current?.id) return result.decision;
           if (permitsSessionChange(result.decision)) return result.decision;
-          ctx.ui.notify("Changing sessions was not strongly justified; continuing the current session.", "info");
+          ctx.ui.notify("Session choice confidence was not above 60%; continuing the current session.", "info");
         } else ctx.ui.notify("Decision scores are ambiguous; continuing the current session.", "info");
       } catch (error) {
         onError(error);

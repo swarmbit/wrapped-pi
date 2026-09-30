@@ -163,17 +163,20 @@ Direct classifier inputs are processed by the bundled shared secret-redaction
 helper before being sent. Endpoint configuration is an explicit authorization to
 send these recent messages and the incoming request to that endpoint; review privacy and retention first.
 
-Automatic changes require strong scores **and** a wide margin over the runner-up:
+All decision gates use the returned **choice's confidence strictly above 60%**.
+There is no runner-up margin requirement and no replacement with the highest-scoring
+option. Exactly 60% does not pass.
 
-- Another existing member: score **at least 80%**, margin **at least 60 percentage points**.
-- New real session: score **at least 80%**, margin **at least 60 percentage points**.
-- Staying in the current member needs no minimum score.
+- Routing: use the chosen member or NEW above 60%; otherwise keep the current member.
+- Handoff: use the chosen NEEDED/NOT_NEEDED above 60%; otherwise do not hand off.
+- Worker model: use the chosen model above 60%; otherwise keep the source model.
 
-The controller also enforces these gates for custom decision backends; proposals
-without valid `confidence` and `margin` evidence cannot automatically change sessions.
+The controller also enforces the confidence gate for custom decision backends;
+missing or invalid confidence cannot automatically change sessions or models,
+and skips handoff generation. Scores are not calibrated certainty.
 Weak or ambiguous proposals, invalid backend responses, over-budget requests,
 timeouts, and backend failures retain the current eligible member. If none exists
-and no strongly supported route is available, dispatch stops and preserves the draft.
+and no route above the confidence threshold is available, dispatch stops and preserves the draft.
 Without a configured backend, the picker lists the current session first; explicit
 user choices can still switch or create a session. The first request in an empty
 virtual session creates its first member without routing classification. These scores are
@@ -210,8 +213,8 @@ up to 12,000 characters of recent source context, current model ID, and model
 summaries pass through secret redaction before being sent to the backend.
 Requests over 4,000 characters fall back rather than being silently truncated.
 
-The controller requires a score of at least 80% and a margin of at least 60
-percentage points. Missing configuration/backend support, invalid configuration,
+The controller requires the selected choice's confidence strictly above 60%, with
+no margin requirement. Missing configuration/backend support, invalid configuration,
 unknown or unavailable models, ambiguous responses, and network failures retain
 the **source session's current model**. The fresh extension runtime applies and
 persists the selected or fallback model before the first worker request. If neither
@@ -289,8 +292,9 @@ necessary source-only facts get the smallest useful handoff, not the entire hist
 A long destination calls for minimizing context, never dropping indispensable facts.
 It answers a
 separate `handoff` choice question (`NEEDED` or `NOT_NEEDED`); automatic acceptance
-requires at least 80% score and a 60-percentage-point margin. The session model's
-notes never bypass this decision.
+uses the returned choice when its confidence is strictly above 60%. At or below
+60%, handoff is skipped without confirmation, and the original request is sent
+unchanged. The session model's notes never bypass this decision.
 
 When needed, the **source session's configured model** writes a bounded handoff
 through a separate tool-free registry call. Its recent transcript text and latest
@@ -300,7 +304,7 @@ labelled supporting context. When no handoff is needed, the original request is
 sent unchanged. Staying in the same real session and the first request from an
 empty source skip this stage.
 
-No backend, unsupported custom backends, ambiguous/invalid responses, timeouts,
+No backend, unsupported custom backends, malformed responses, timeouts,
 or failed/empty/truncated handoff generation hold the switch for explicit user
 confirmation. You may cancel (restoring the original draft), provide bounded
 handoff text, or explicitly proceed without a handoff. No silent context-dropping

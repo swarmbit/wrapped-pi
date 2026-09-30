@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { DecisionBackend, HandoffInput } from "./decision";
+import { acceptsConfidence, type DecisionBackend, type HandoffInput } from "./decision";
 import type { RegistryStore } from "./store";
 import { normalizeUsage } from "./usage";
 import { beginDecisionDebug, writeDecisionDebug } from "./debug";
@@ -63,8 +63,9 @@ export async function prepareHandoff(input: HandoffInput, ctx: ExtensionCommandC
     store.record({ source: `handoff-decision:${requestId}`, virtualId, category: "decision", usage: decision.usage ?? normalizeUsage(undefined) });
     recorded = true;
     if (typeof decision.needed !== "boolean") throw new Error("Invalid handoff decision.");
-    debug.finish({ result: decision, outcome: decision.needed ? "generate_handoff" : "no_handoff" }, decision.usage);
-    if (!decision.needed) return input.request;
+    const needed = decision.needed && acceptsConfidence(decision.confidence);
+    debug.finish({ result: decision, outcome: needed ? "generate_handoff" : "no_handoff" }, decision.usage);
+    if (!needed) return input.request;
     const handoff = await generateHandoff(input, ctx, store, virtualId, requestId);
     writeDecisionDebug(ctx, { event: "handoff_generated", requestId, virtualId, handoff,
       sourceModel: { id: ctx.model?.id, provider: ctx.model?.provider } });

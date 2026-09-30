@@ -348,7 +348,7 @@ Candidate limits and input budgets must be configurable. A local classifier with
 
 ### 7.2 Reuse
 
-Reuse when a candidate is a sufficiently strong continuation match and no isolation rule blocks it. Require a configurable margin between the best candidate and alternatives to avoid arbitrary selection.
+Use the returned routing choice when its confidence is strictly above 60% and no isolation rule blocks it. Do not require a runner-up margin or substitute a different choice. At or below 60%, retain the current eligible session.
 
 The policy should be conservative about losing necessary context. Recency alone cannot justify reuse, but recent referential follow-ups should favor continuity when unambiguous.
 
@@ -373,7 +373,7 @@ If the classifier times out, fails validation, or is unavailable:
 - An explicitly independent task may start a new session.
 - Otherwise clarify; never silently drop required context to save cost.
 
-Thresholds and score margins are tuned against labeled routing examples, not selected as universal constants.
+Routing, handoff, and worker-model selection share a choice-confidence gate strictly above 60%, with no score-margin requirement. Lower-confidence choices retain the current session, skip handoff, or retain the current model, respectively. These scores are not calibrated certainty; evaluate this policy against labeled examples.
 
 ## 8. Compaction policy
 

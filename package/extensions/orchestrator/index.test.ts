@@ -218,7 +218,7 @@ describe("orchestrator integration", () => {
       evaluate: vi.fn().mockImplementation(async (_text, candidates) => ({ decision: {
         action: "reuse", realId: candidates[0].id, reason: "Continue",
       } })),
-      evaluateModel: vi.fn().mockResolvedValue({ model: "test/strong", reason: "Complex", confidence: 0.9, margin: 0.8,
+      evaluateModel: vi.fn().mockResolvedValue({ model: "test/strong", reason: "Complex", confidence: 0.61,
         usage: { input: 15, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: 0, incompleteTokens: false, incompleteCost: true } }),
     };
     const h = harness(backend);
@@ -497,7 +497,7 @@ describe("orchestrator integration", () => {
   it("generates a source-model handoff before replacing the runtime", async () => {
     const backend: DecisionBackend = {
       evaluate: vi.fn(async (): Promise<DecisionResult> => ({ decision: { action: "new", reason: "Independent work", confidence: 0.99, margin: 0.98 } })),
-      evaluateHandoff: vi.fn(async () => ({ needed: true })),
+      evaluateHandoff: vi.fn(async () => ({ needed: true, confidence: 0.61 })),
     };
     const h = harness(backend);
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
@@ -593,9 +593,9 @@ describe("orchestrator integration", () => {
 
   it.each([
     { action: "new", reason: "Different keywords" },
-    { action: "new", reason: "Moderately confident", confidence: 0.75, margin: 0.7 },
-    { action: "new", reason: "Not quite strong enough", confidence: 0.7999, margin: 0.6 },
-    { action: "new", reason: "Insufficient margin", confidence: 0.99, margin: 0.59 },
+    { action: "new", reason: "Low confidence", confidence: 0.59 },
+    { action: "new", reason: "At the boundary", confidence: 0.6 },
+    { action: "new", reason: "Invalid confidence", confidence: 1.1 },
   ] as const)("keeps the current member when changing sessions is not strongly justified: $reason", async decision => {
     const backend: DecisionBackend = { evaluate: vi.fn(async () => ({ decision })) };
     const h = harness(backend);
@@ -616,10 +616,10 @@ describe("orchestrator integration", () => {
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
     await h.submit("First task");
     const firstId = h.current.id;
-    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Requires isolation", confidence: 0.8, margin: 0.6 } });
+    evaluate.mockResolvedValueOnce({ decision: { action: "new", reason: "Requires isolation", confidence: 0.61 } });
     await h.submit("Independent task");
     const secondId = h.current.id;
-    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "Similar keywords", confidence: 0.79, margin: 0.7 } });
+    evaluate.mockResolvedValueOnce({ decision: { action: "reuse", realId: firstId, reason: "Similar keywords", confidence: 0.6, margin: 0.7 } });
     await h.submit("Add tests");
     expect(h.current.id).toBe(secondId);
     expect(h.store().read().members).toHaveLength(2);

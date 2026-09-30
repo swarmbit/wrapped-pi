@@ -23,9 +23,17 @@ describe("shared handoff pipeline", () => {
     expect(f.complete).not.toHaveBeenCalled();
     expect(f.store.record).toHaveBeenCalledWith(expect.objectContaining({ source: "handoff-decision:request", category: "decision" }));
   });
+  it.each([undefined, 0.5, 0.5999, 0.6, NaN, Infinity, 1.1])("skips low or missing confidence without confirmation (score %s)", async confidence => {
+    const f = fixture();
+    f.backend.evaluateHandoff.mockResolvedValue({ needed: true, confidence, usage: { input: 10 } });
+    expect(await f.prepare()).toBe(input.request);
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.ctx.ui.select).not.toHaveBeenCalled();
+    expect(f.store.record).toHaveBeenCalledWith(expect.objectContaining({ category: "decision", usage: { input: 10 } }));
+  });
   it("uses the source model without tools and appends labelled supporting context", async () => {
     const f = fixture();
-    f.backend.evaluateHandoff.mockResolvedValue({ needed: true });
+    f.backend.evaluateHandoff.mockResolvedValue({ needed: true, confidence: 0.61 });
     const result = await f.prepare();
     expect(result?.startsWith(input.request + "\n\n")).toBe(true);
     expect(result).toContain("supporting context");
@@ -38,7 +46,7 @@ describe("shared handoff pipeline", () => {
   });
   it.each(["backend", "invalid", "empty", "truncated", "api"])("holds the switch on %s failure", async mode => {
     const f = fixture();
-    f.backend.evaluateHandoff.mockResolvedValue({ needed: true });
+    f.backend.evaluateHandoff.mockResolvedValue({ needed: true, confidence: 0.9 });
     if (mode === "backend") f.backend.evaluateHandoff.mockRejectedValue(new Error("offline"));
     if (mode === "invalid") f.backend.evaluateHandoff.mockResolvedValue({ needed: "no" });
     if (mode === "empty") f.complete.mockResolvedValue({ content: [], stopReason: "stop" });
