@@ -7,6 +7,7 @@ import { SystemOneBackend, permitsSessionChange, shortlist, type DecisionBackend
 import { decorateEditor, isOrdinarySubmission } from "./editor";
 import { sessionContextSummary } from "./context-summary";
 import { runtimeFor } from "./runtime";
+import { installCompaction } from "./compaction";
 import { historyMessages, savedBranch } from "./history";
 import { bindChatHistory } from "./history-ui";
 import { canonicalWorkspace, registryPath, RegistryStore } from "./store";
@@ -75,6 +76,13 @@ export class Orchestrator {
   private chatHistory?: ReturnType<typeof bindChatHistory>;
 
   constructor(private readonly pi: ExtensionAPI, private readonly backend?: DecisionBackend) {}
+
+  compactionEnabled(ctx: ExtensionContext): boolean {
+    if (ctx.mode !== "tui") return false;
+    const { store, state } = this.initialize(ctx);
+    return state.enabled && !!state.activeId &&
+      store.read().members.some(member => member.id === ctx.sessionManager.getSessionId() && member.virtualId === state.activeId);
+  }
 
   private initialize(ctx: ExtensionContext): { store: RegistryStore; state: RuntimeState } {
     const workspace = canonicalWorkspace(ctx.cwd);
@@ -582,6 +590,7 @@ export default function (pi: ExtensionAPI) {
     catch { invalidBackend = true; }
   }
   const orchestrator = new Orchestrator(pi, backend);
+  installCompaction(pi, ctx => orchestrator.compactionEnabled(ctx));
   const safe = (ctx: ExtensionContext, operation: () => void) => {
     try { operation(); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Orchestrator state error.", "error"); }
   };

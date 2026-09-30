@@ -8,6 +8,7 @@ import { registryPath, RegistryStore } from "./store";
 import { runtimeFor } from "./runtime";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
+  VERSION: "0.79.1",
   InteractiveMode: class {
     ui: any;
     sessionManager: any;
@@ -684,7 +685,7 @@ it("parses quoted names and multiline arguments without shell execution", () => 
 });
 
 it("loads the extension without network requests or creating persistent state", () => {
-  const pi: any = { registerCommand: vi.fn(), on: vi.fn() };
+  const pi: any = { registerCommand: vi.fn(), registerTool: vi.fn(), on: vi.fn() };
   vi.stubEnv("WPI_ORCHESTRATOR_DECISION_URL", "file:///invalid");
   expect(() => extension(pi)).not.toThrow();
   expect(pi.registerCommand).toHaveBeenCalledWith("orchestrator", expect.any(Object));

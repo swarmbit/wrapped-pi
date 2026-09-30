@@ -137,7 +137,7 @@ corrections, tests, refinements, related work, and topic drift do not justify sw
 Another member must supply unique prior context necessary for the request; NEW
 requires explicitly independent work needing isolation that no existing session
 can serve. Context size, token savings, and historical cost never justify a switch.
-This does not add automatic compaction.
+Routing itself does not trigger compaction; model-requested compaction is described below.
 
 Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
@@ -166,8 +166,46 @@ and no strongly supported route is available, dispatch stops and preserves the d
 Without a configured backend, the picker lists the current session first; explicit
 user choices can still switch or create a session. The first request in an empty
 virtual session creates its first member without classification. These scores are
-**not** calibrated certainty or proof of necessity. No physical-model selection or
-proactive economic compaction is implemented yet.
+**not** calibrated certainty or proof of necessity. No physical-model selection is implemented.
+
+## Model-requested compaction
+
+With routing enabled for the current member session on **Pi 0.99.1+**, the
+`request_compaction` tool lets the session's own model request compaction at a
+safe milestone. It supplies a reason and preservation notes. There is no separate
+classifier/model call and no forced extra turn for the decision.
+
+The extension adds a request-local review reminder every **10 completed model
+turns** (an assistant response plus its tool results, not necessarily 10 user
+messages), once the known context estimate reaches **30,000 tokens**. Configure
+these positive-integer limits in the Pi process environment:
+
+```bash
+export WPI_ORCHESTRATOR_COMPACT_TURNS=10
+export WPI_ORCHESTRATOR_COMPACT_MIN_TOKENS=30000
+```
+
+The model should consider completed milestones, information loss, remaining work,
+summarization cost, and cache invalidation. Savings are not guaranteed. Reviews
+are opportunities to decline compaction, not mandatory compaction intervals.
+Unknown context size, small context, and too few turns since the last compaction
+block requests. The turn interval also provides a post-compaction cooldown.
+
+The tool returns **scheduled**, not **completed**. It never compacts inside tool
+execution, where Pi's abort-and-wait behavior could deadlock the running tool.
+After `agent_settled`, the extension yields out of the notification handler and
+rechecks idle state, session identity, membership, and queued input before calling
+Pi's native compaction. Tool calls/results and the final assistant response are
+recorded first. It does not automatically resume or generate another response.
+New user input, shutdown, session changes, tree navigation, or another compaction
+cancel pending requests. Success/failure is reported separately through UI
+notifications; failed requests are not automatically retried. Pending requests
+are process-local and are not restored after reload.
+
+Pi 0.79.1 lacks a safe final-settlement event: reviews/model-requested compaction
+are disabled there rather than treating `agent_end` as final. The existing
+`/orchestrator compact [instructions]` command remains available. Native Pi
+context-overflow/automatic compaction settings remain independent of this feature.
 
 ## Editor compatibility
 
