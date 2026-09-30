@@ -320,6 +320,91 @@ describe("orchestrator integration", () => {
     expect(h.store().read().virtualSessions).toHaveLength(0);
   });
 
+  it("selects a virtual session for on without requiring its name", async () => {
+    const h = harness();
+    const target = h.store().create("Project with spaces");
+    h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels[0]);
+    await h.current.orchestrator.command("on", h.current.ctx);
+    expect(h.current.ctx.ui.select).toHaveBeenCalledWith("Enable orchestrator", [expect.stringContaining(target.id)]);
+    expect(runtimeFor(workspace).activeId).toBe(target.id);
+    expect(runtimeFor(workspace).enabled).toBe(true);
+  });
+
+  it.each(["on", "delete", "attach", "rename"])("cancels %s selection without side effects", async action => {
+    const h = harness();
+    h.store().create("Atlas");
+    const before = h.store().read();
+    h.current.ctx.ui.select.mockResolvedValueOnce(undefined);
+    await h.current.orchestrator.command(action, h.current.ctx);
+    expect(h.store().read()).toEqual(before);
+    expect(h.current.ctx.ui.confirm).not.toHaveBeenCalled();
+    expect(h.current.ctx.ui.input).not.toHaveBeenCalled();
+    expect(runtimeFor(workspace).enabled).toBe(false);
+  });
+
+  it("selects an inactive group for deletion instead of assuming the active one", async () => {
+    const h = harness();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    const activeId = runtimeFor(workspace).activeId;
+    const other = h.store().create("Other");
+    h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels.find(label => label.includes(other.id)));
+    await h.current.orchestrator.command("delete", h.current.ctx);
+    expect(h.current.ctx.ui.confirm).toHaveBeenCalledWith("Delete orchestrator Other?", expect.any(String));
+    expect(h.store().read().virtualSessions.map(item => item.id)).toEqual([activeId]);
+    expect(runtimeFor(workspace).enabled).toBe(true);
+  });
+
+  it("prompts for new and rename names and preserves explicit arguments", async () => {
+    const h = harness();
+    h.current.ctx.ui.input.mockResolvedValueOnce("Atlas");
+    await h.current.orchestrator.command("new", h.current.ctx);
+    h.current.ctx.ui.input.mockResolvedValueOnce("Renamed Atlas");
+    await h.current.orchestrator.command("rename", h.current.ctx);
+    expect(h.current.ctx.ui.input).toHaveBeenLastCalledWith("New virtual session name", "Atlas");
+    expect(h.store().read().virtualSessions[0].name).toBe("Renamed Atlas");
+    const calls = h.current.ctx.ui.input.mock.calls.length;
+    await h.current.orchestrator.command('rename "Explicit name"', h.current.ctx);
+    expect(h.current.ctx.ui.input).toHaveBeenCalledTimes(calls);
+    expect(h.store().read().virtualSessions[0].name).toBe("Explicit name");
+  });
+
+  it.each(["new", "rename"])("cancels %s name input without mutations", async action => {
+    const h = harness();
+    await h.current.orchestrator.command("new Atlas", h.current.ctx);
+    const before = h.store().read();
+    h.current.ctx.ui.input.mockResolvedValueOnce(undefined);
+    await h.current.orchestrator.command(action, h.current.ctx);
+    expect(h.store().read()).toEqual(before);
+  });
+
+  it("selects a target for attach and confirms it", async () => {
+    const h = harness();
+    const target = h.store().create("Atlas");
+    h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels[0]);
+    await h.current.orchestrator.command("attach", h.current.ctx);
+    expect(h.store().read().members[0]).toMatchObject({ virtualId: target.id, origin: "attached" });
+    expect(runtimeFor(workspace).activeId).toBe(target.id);
+    expect(h.current.ctx.ui.confirm).toHaveBeenCalledWith("Attach current real session to Atlas?", expect.any(String));
+  });
+
+  it("selects a rename target when no orchestrator is active", async () => {
+    const h = harness();
+    h.store().create("Atlas");
+    h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels[0]);
+    h.current.ctx.ui.input.mockResolvedValueOnce("New Atlas");
+    await h.current.orchestrator.command("rename", h.current.ctx);
+    expect(h.store().read().virtualSessions[0].name).toBe("New Atlas");
+    expect(runtimeFor(workspace).enabled).toBe(false);
+  });
+
+  it("cancels debug mode selection without toggling logging", async () => {
+    const h = harness();
+    h.current.ctx.ui.select.mockResolvedValueOnce(undefined);
+    await h.current.orchestrator.command("debug", h.current.ctx);
+    expect(runtimeFor(workspace).debugEnabled).toBeFalsy();
+    expect(h.current.ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining("currently off"), ["on", "off", "status"]);
+  });
+
   it("deletes the selected group, restores the editor, and keeps transcripts and drafts", async () => {
     const h = harness();
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
@@ -328,6 +413,7 @@ describe("orchestrator integration", () => {
     const before = readFileSync(file, "utf8");
     const state = runtimeFor(workspace);
     state.pending.set("unsent", { text: "Retained draft", virtualId: state.activeId! });
+    h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels[0]);
     await h.current.orchestrator.command("delete", h.current.ctx);
     expect(h.current.ctx.ui.confirm).toHaveBeenCalledWith("Delete orchestrator Atlas?", expect.stringContaining("transcripts are kept"));
     expect(h.store().read().virtualSessions).toEqual([]);
@@ -360,9 +446,11 @@ describe("orchestrator integration", () => {
     expect(h.current.ctx.ui.getEditorComponent()).toBe(factory);
   });
 
-  it("rejects deletion without a target, while busy, or during another process's execution", async () => {
+  it("handles no deletion targets and rejects deletion while busy or during another process's execution", async () => {
     const h = harness();
-    await expect(h.current.orchestrator.command("delete", h.current.ctx)).rejects.toThrow("Select an orchestrator");
+    await h.current.orchestrator.command("delete", h.current.ctx);
+    expect(h.current.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("No virtual sessions"), "info");
+    expect(h.current.ctx.ui.select).not.toHaveBeenCalled();
     await h.current.orchestrator.command("new Atlas", h.current.ctx);
     const state = runtimeFor(workspace);
     state.busy = true;
@@ -370,6 +458,7 @@ describe("orchestrator integration", () => {
     state.busy = false;
     const release = h.store().lease();
     try {
+      h.current.ctx.ui.select.mockImplementationOnce(async (_title: string, labels: string[]) => labels[0]);
       await expect(h.current.orchestrator.command("delete", h.current.ctx)).rejects.toThrow("Another orchestrator");
       expect(h.store().read().virtualSessions).toHaveLength(1);
       expect(state.enabled).toBe(true);
@@ -465,6 +554,7 @@ describe("orchestrator integration", () => {
     const disabled = readFileSync(path, "utf8");
     await h.submit("More tests");
     expect(readFileSync(path, "utf8")).toBe(disabled);
+    h.current.ctx.ui.select.mockResolvedValueOnce("on");
     await h.current.orchestrator.command("debug", h.current.ctx);
     expect(runtimeFor(workspace).debugEnabled).toBe(true);
     await expect(h.current.orchestrator.command("debug nonsense", h.current.ctx)).rejects.toThrow("debug [on|off|status]");

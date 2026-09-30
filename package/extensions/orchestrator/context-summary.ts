@@ -6,15 +6,14 @@ function messageContext(message: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.flatMap(item => {
     if (item.type === "text" && typeof item.text === "string") return [item.text];
-    if (item.type === "toolCall") return [`tool call: ${item.name} ${JSON.stringify(item.arguments ?? {})}`];
-    // Thinking, images, and tool outputs are not routing context.
+    // Tool calls/results, reasoning, and images are not routing context.
     return [];
   }).join("\n");
 }
 
-/** Extractive routing context: ten full user/assistant messages, newest first.
- * No model calls, text truncation, thinking, or tool results. Tool names and
- * arguments are retained, including assistant messages containing only calls.
+/** Extractive routing context: 50 full user/assistant text messages, newest first.
+ * No model calls, text truncation, reasoning, tool calls, or tool results.
+ * Non-text and whitespace-only messages do not count toward the limit.
  * Callers supply only the active branch.
  */
 export function sessionContextSummary(entries: SessionEntry[]): string {
@@ -22,8 +21,8 @@ export function sessionContextSummary(entries: SessionEntry[]): string {
   for (const entry of entries) {
     if (entry.type !== "message" || !["user", "assistant"].includes(entry.message.role)) continue;
     const text = messageContext(entry.message);
-    if (text) messages.push(`${entry.message.role}: ${text}`);
+    if (text.trim()) messages.push(`${entry.message.role}: ${text}`);
   }
-  return messages.slice(-10).reverse().map((message, index) =>
+  return messages.slice(-50).reverse().map((message, index) =>
     `${index === 0 ? "Latest message" : "Earlier message"}:\n${message}`).join("\n\n");
 }

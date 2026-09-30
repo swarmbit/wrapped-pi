@@ -27,17 +27,17 @@ const UI_KEY = "wpi-orchestrator";
 const INTERNAL_PREFIX = "/orchestrator __dispatch ";
 const COMMANDS = [
   { name: "help", usage: "help", description: "Show all orchestrator commands" },
-  { name: "new", usage: "new <name>", description: "Create and enable a named virtual session" },
-  { name: "on", usage: "on <name-or-id>", description: "Resume and enable a virtual session" },
+  { name: "new", usage: "new [name]", description: "Create and enable a named virtual session" },
+  { name: "on", usage: "on [name-or-id]", description: "Resume and enable a virtual session" },
   { name: "off", usage: "off", description: "Disable routing and hide status" },
   { name: "list", usage: "list", description: "List virtual sessions and usage" },
   { name: "status", usage: "status", description: "Show detailed status and usage" },
-  { name: "rename", usage: "rename <name>", description: "Rename the selected virtual session" },
+  { name: "rename", usage: "rename [name]", description: "Rename the selected virtual session" },
   { name: "delete", usage: "delete [name-or-id]", description: "Delete a virtual session after confirmation; keep real transcripts" },
   { name: "sessions", usage: "sessions", description: "Select a real member session" },
   { name: "attach", usage: "attach [name-or-id]", description: "Attach the current real session after confirmation" },
   { name: "compact", usage: "compact [instructions]", description: "Compact the current real session" },
-  { name: "debug", usage: "debug [on|off|status]", description: "Toggle decision debug logs or show their filesystem path" },
+  { name: "debug", usage: "debug [on|off|status]", description: "Select debug logging mode or show its filesystem path" },
   { name: "drafts", usage: "drafts", description: "Restore a held unsent draft" },
 ];
 const HELP = ["Orchestrator commands:", ...COMMANDS.map(command =>
@@ -651,6 +651,19 @@ export class Orchestrator {
     }
   }
 
+  private async selectVirtual(store: RegistryStore, state: RuntimeState, ctx: ExtensionCommandContext, title: string) {
+    const sessions = store.read().virtualSessions;
+    sessions.sort((a, b) => Number(b.id === state.activeId) - Number(a.id === state.activeId));
+    if (!sessions.length) {
+      ctx.ui.notify("No virtual sessions. Use /orchestrator new to create one.", "info");
+      return undefined;
+    }
+    const labels = sessions.map(item => `${item.name} [${item.id}]${item.id === state.activeId ? " (selected)" : ""}`);
+    const choice = await ctx.ui.select(title, labels);
+    const index = choice === undefined ? -1 : labels.indexOf(choice);
+    return index >= 0 ? store.find(sessions[index].id) : undefined;
+  }
+
   async command(args: string, ctx: ExtensionCommandContext): Promise<void> {
     if (ctx.mode !== "tui") throw new Error("/orchestrator currently requires the Pi terminal editor.");
     const { store, state } = this.initialize(ctx);
@@ -659,8 +672,10 @@ export class Orchestrator {
     if (action === "help") { ctx.ui.notify(HELP, "info"); return; }
     if (action === "debug") {
       if (argument && !["on", "off", "status"].includes(argument)) throw new Error("Use /orchestrator debug [on|off|status].");
-      if (argument !== "status") {
-        const enabled = argument ? argument === "on" : !state.debugEnabled;
+      const mode = argument || await ctx.ui.select(`Decision debug (currently ${state.debugEnabled ? "on" : "off"})`, ["on", "off", "status"]);
+      if (!mode) return;
+      if (mode !== "status") {
+        const enabled = mode === "on";
         if (!enabled) writeDecisionDebug(ctx, { event: "debug_disabled" });
         state.debugEnabled = enabled;
         state.debugWarningShown = false;
@@ -679,17 +694,29 @@ export class Orchestrator {
       this.showStatus(ctx, store, state);
       return;
     }
-    if (action === "new") { await this.enable(store.create(argument).id, ctx); return; }
-    if (action === "on") { await this.enable(store.find(argument).id, ctx); return; }
+    if (action === "new") {
+      const name = argument || await ctx.ui.input("Virtual session name");
+      if (name === undefined) return;
+      await this.enable(store.create(name).id, ctx);
+      return;
+    }
+    if (action === "on") {
+      const virtual = argument ? store.find(argument) : await this.selectVirtual(store, state, ctx, "Enable orchestrator");
+      if (virtual) await this.enable(virtual.id, ctx);
+      return;
+    }
     if (action === "rename") {
-      if (!state.activeId) throw new Error("Select an orchestrator first.");
-      store.rename(state.activeId, argument);
+      const virtual = state.activeId ? store.find(state.activeId) : await this.selectVirtual(store, state, ctx, "Orchestrator to rename");
+      if (!virtual) return;
+      const name = argument || await ctx.ui.input("New virtual session name", virtual.name);
+      if (name === undefined) return;
+      store.rename(virtual.id, name);
       this.showStatus(ctx, store, state);
       return;
     }
     if (action === "delete") {
-      if (!argument && !state.activeId) throw new Error("Select an orchestrator or use /orchestrator delete <name-or-id>.");
-      const virtual = store.find(argument || state.activeId!);
+      const virtual = argument ? store.find(argument) : await this.selectVirtual(store, state, ctx, "Orchestrator to delete");
+      if (!virtual) return;
       state.busy = true;
       try {
         if (!(await ctx.ui.confirm(`Delete orchestrator ${virtual.name}?`,
@@ -712,11 +739,11 @@ export class Orchestrator {
       return;
     }
     if (action === "attach") {
-      if (!state.activeId && !argument) throw new Error("Select an orchestrator or use /orchestrator attach <name-or-id>.");
+      const virtual = argument ? store.find(argument) : await this.selectVirtual(store, state, ctx, "Attach current real session to orchestrator");
+      if (!virtual) return;
       await ctx.waitForIdle();
       const file = ctx.sessionManager.getSessionFile();
       if (!file) throw new Error("Cannot attach an ephemeral session.");
-      const virtual = store.find(argument || state.activeId!);
       const id = ctx.sessionManager.getSessionId();
       const firstRequest = ctx.sessionManager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
       const name = ctx.sessionManager.getSessionName() || realName(virtual.name, firstRequest?.type === "message" ? textOf(firstRequest.message) : "Attached task");
@@ -771,6 +798,7 @@ export class Orchestrator {
     if (action === "sessions") {
       const data = store.read();
       const members = data.members.filter(item => item.virtualId === state.activeId);
+      if (!members.length) { ctx.ui.notify("No real member sessions in the selected orchestrator.", "info"); return; }
       const labels = members.map(item => `${item.name} [${item.id.slice(0, 8)}]`);
       const selected = await ctx.ui.select("Real member sessions", labels);
       const index = selected ? labels.indexOf(selected) : -1;
