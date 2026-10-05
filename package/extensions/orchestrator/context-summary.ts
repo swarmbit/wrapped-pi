@@ -36,5 +36,5 @@ export function decodeSessionContextSummary(summary: string): ContextMessage[] {
 /** Human-readable projection for UI and text-only consumers. */
 export function readableSessionContextSummary(summary: string): string {
   return decodeSessionContextSummary(summary).map((message, index) =>
-    `${index === 0 ? "Latest message" : "Earlier message"}:\\n${message.role}: ${message.content}`).join("\\n\\n");
+    `${index === 0 ? "Latest message" : "Earlier message"}:\n${message.role}: ${message.content}`).join("\n\n");
 }

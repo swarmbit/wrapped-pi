@@ -1,0 +1,14 @@
+{
+  "name": "wpi-questionnaire",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tool for asking the user single or multiple questions",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

@@ -5,6 +5,13 @@ const placeholderPattern = () => new RegExp(PLACEHOLDER_SOURCE, "g");
 const MAX_SECRET_LENGTH = 64 * 1024;
 const COMMON_VALUES = new Set(["password", "changeme", "redacted", "example", "undefined", "localhost", "development"]);
 
+// Placeholders whose ID starts with this mark stand for values that are masked
+// only where they are assigned, never searched for elsewhere. Keeping the flag
+// in the placeholder itself means reloads, forks, and child agents agree on it
+// without any change to the stored records.
+const CONTEXT_ONLY_MARK = "00c0de00";
+const isContextOnly = (token: string) => token.slice(-26, -2).startsWith(CONTEXT_ONLY_MARK);
+
 export interface SecretStorage {
   scope: string;
   load(): Iterable<[string, string]>;
@@ -12,7 +19,36 @@ export interface SecretStorage {
   write(token: string, value: string): void;
 }
 
-interface Span { start: number; end: number; value: string }
+interface Span { start: number; end: number; value: string; contextOnly?: boolean }
+
+// Words that follow `name =` or `name:` in source code and are never credentials.
+const CODE_WORDS = new Set(["null", "nil", "none", "undefined", "true", "false", "await", "async", "new", "this", "self",
+  "typeof", "void", "function", "return", "yield", "string", "str", "number", "boolean", "bool", "int", "float", "any",
+  "unknown", "object", "never", "required", "optional"]);
+// An identifier, optionally a member chain: `accessToken`, `req.headers.authorization`, `self._token`, `Auth::Token`.
+const IDENTIFIER_CHAIN = /^\$?[A-Za-z_]+(?:(?:\?\.|!\.|\.|::|->)[A-Za-z_]+)*/;
+
+/**
+ * Judge the unquoted right-hand side of `name = value` found in free text.
+ * Source code puts expressions there far more often than literals, and masking
+ * those leaves the model reading auth code with holes in it.
+ *
+ *   "none"    — unmistakably code (`generatePassword()`, `await`, `string`): left as is.
+ *   "context" — shaped like an identifier (`accessToken`, `config.auth.token`). It could
+ *               still be a literal (`password: hunter`), so it is masked where assigned
+ *               but not hunted for elsewhere.
+ *   "secret"  — anything else (digits, punctuation): a credential, masked everywhere.
+ *
+ * Structured fields, environment variables, dotenv files, and quoted strings never
+ * pass through here: a literal learned from those is always a full secret.
+ */
+function unquotedConfidence(value: string): "secret" | "context" | "none" {
+  if (!/[A-Za-z0-9]/.test(value) || CODE_WORDS.has(value.toLowerCase())) return "none";
+  if (/\d/.test(value)) return "secret";
+  const chain = IDENTIFIER_CHAIN.exec(value)?.[0] ?? "";
+  if (chain && value[chain.length] === "(") return "none";
+  return chain && /^[)!?]*$/.test(value.slice(chain.length)) ? "context" : "secret";
+}
 
 /** Deliberately excludes KEY, TOKEN_COUNT, PASSWORD_FILE, API_KEY_NAME, etc. */
 function normalizeName(name: string): string {
@@ -36,8 +72,8 @@ function isCandidate(value: string): boolean {
 /** Find credential values, preserving their surrounding syntax byte-for-byte. */
 function credentialSpans(text: string, key: string, matchesName: (name: string) => boolean): Span[] {
   const spans: Span[] = [];
-  const add = (start: number, value: string) => {
-    if (isCandidate(value)) spans.push({ start, end: start + value.length, value });
+  const add = (start: number, value: string, contextOnly = false) => {
+    if (isCandidate(value)) spans.push({ start, end: start + value.length, value, contextOnly });
   };
 
   if (matchesName(key)) {
@@ -48,7 +84,8 @@ function credentialSpans(text: string, key: string, matchesName: (name: string) 
 
   // Dotenv, YAML, JSON, query parameters, and common log key=value formats.
   // Quoted values may contain whitespace, escaped quotes, or PEM newlines.
-  const assignments = /(?<![\w.-])["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*[:=][ \t]*/g;
+  // `:=` assigns (Go, Make); `==`, `=>`, and `::` are operators, not assignments.
+  const assignments = /(?<![\w.-])["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*(?::=|[:=](?![=>:]))[ \t]*/g;
   for (const match of text.matchAll(assignments)) {
     if (!matchesName(match[1])) continue;
     const offset = match.index! + match[0].length;
@@ -59,7 +96,10 @@ function credentialSpans(text: string, key: string, matchesName: (name: string) 
     const start = offset + (quoted ? 1 : 0);
     const authorization = /^(?:Bearer|Basic)\s+(\S+)$/i.exec(value);
     if (authorization) add(start + value.length - authorization[1].length, authorization[1]);
-    else if (!/^(?:Bearer|Basic)$/i.test(value)) add(start, value);
+    else if (!/^(?:Bearer|Basic)\s*$/i.test(value)) {
+      const confidence = quoted ? "secret" : unquotedConfidence(value);
+      if (confidence !== "none") add(start, value, confidence === "context");
+    }
   }
 
   for (const match of text.matchAll(/\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+\/=\-]+)/gi)) {
@@ -140,15 +180,24 @@ export class SecretRedactor {
 
   private remember(token: string, value: string): void {
     this.byToken.set(token, value);
-    if (!this.byValue.has(value)) this.byValue.set(value, token);
+    // One canonical placeholder per value; a full secret outranks a context-only one.
+    const current = this.byValue.get(value);
+    if (current === undefined || (isContextOnly(current) && !isContextOnly(token))) this.byValue.set(value, token);
     this.knownPattern = undefined;
   }
 
-  registerSecret(value: string): string {
+  /**
+   * Learn a credential and return its placeholder. A `contextOnly` value is masked
+   * where it was found but not searched for in other text; registering the same
+   * value again as a full secret upgrades it.
+   */
+  registerSecret(value: string, contextOnly = false): string {
     if (!isCandidate(value)) return value;
     const existing = this.byValue.get(value);
-    if (existing) return existing;
-    const token = `__WPI_SECRET_${this.scope}_${randomBytes(12).toString("hex")}__`;
+    if (existing && (contextOnly || !isContextOnly(existing))) return existing;
+    let id = contextOnly ? CONTEXT_ONLY_MARK + randomBytes(8).toString("hex") : randomBytes(12).toString("hex");
+    while (!contextOnly && id.startsWith(CONTEXT_ONLY_MARK)) id = randomBytes(12).toString("hex");
+    const token = `__WPI_SECRET_${this.scope}_${id}__`;
     // Persist before exposing a token so reloads and subprocesses can resolve it.
     this.storage?.write(token, value);
     this.remember(token, value);
@@ -168,17 +217,20 @@ export class SecretRedactor {
   discover<T>(value: T): void {
     mapStrings(value, (text, key) => {
       for (const match of text.matchAll(placeholderPattern())) this.resolve(match[0]);
-      for (const span of credentialSpans(text, key, name => this.isCredentialName(name))) this.registerSecret(span.value);
+      for (const span of credentialSpans(text, key, name => this.isCredentialName(name))) {
+        this.registerSecret(span.value, span.contextOnly);
+      }
       return text;
     });
   }
 
   private redactString(text: string, key: string): string {
     const spans = credentialSpans(text, key, name => this.isCredentialName(name));
-    // Short/common values are masked only in credential fields, never throughout code.
+    // Short, common, and context-only values are masked only in credential fields, never throughout code.
     if (!this.knownPattern) {
-      const values = [...this.byValue.keys()].filter(value => value.length >= 8 && !COMMON_VALUES.has(value.toLowerCase()))
-        .sort((a, b) => b.length - a.length);
+      const values = [...this.byValue].filter(([value, token]) =>
+        value.length >= 8 && !COMMON_VALUES.has(value.toLowerCase()) && !isContextOnly(token))
+        .map(([value]) => value).sort((a, b) => b.length - a.length);
       this.knownPattern = new RegExp(values.length
         ? values.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")
         : "(?!)", "g");
@@ -194,7 +246,7 @@ export class SecretRedactor {
     let result = "";
     for (const span of spans) {
       if (span.start < end || placeholders.some(p => span.start < p.end && span.end > p.start)) continue;
-      result += text.slice(end, span.start) + this.registerSecret(span.value);
+      result += text.slice(end, span.start) + this.registerSecret(span.value, span.contextOnly);
       end = span.end;
     }
     return result + text.slice(end);

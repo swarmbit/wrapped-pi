@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -42,7 +42,8 @@ import { CustomEditor, InteractiveMode } from "@earendil-works/pi-coding-agent";
 let dir: string;
 let workspace: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "orchestrator-integration-"));
+  // The runtime keys state by canonical workspace; macOS temp directories are symlinks.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "orchestrator-integration-")));
   workspace = dir;
   vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
 });

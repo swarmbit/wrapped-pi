@@ -18,11 +18,6 @@ subagent/
 ├── README.md            # This file
 ├── index.ts             # The extension (entry point)
 ├── agents.ts            # Agent discovery logic
-├── agents/              # Sample agent definitions
-│   ├── scout.md         # Fast recon, returns compressed context
-│   ├── planner.md       # Creates implementation plans
-│   ├── reviewer.md      # Code review
-│   └── worker.md        # General-purpose (full capabilities)
 └── prompts/             # Workflow presets (prompt templates)
     ├── implement.md     # scout -> planner -> worker
     ├── scout-and-plan.md    # scout -> planner (no implementation)
@@ -31,11 +26,15 @@ subagent/
 
 ## Installation
 
-The extension is bundled with wpi. To use the sample subagent definitions and prompts, copy or
-symlink `package/extensions/subagent/agents/*.md` into `~/.pi/agent/agents/` and
-`package/extensions/subagent/prompts/*.md` into `~/.pi/agent/prompts/`. The expert and runner
-multiagent definitions are provided separately in `package/extensions/multiagent/agents/`.
-The extension itself loads from the bundled package; no extra symlink is needed.
+The extension is bundled with wpi and loads from the bundled package; no extra symlink is needed.
+
+No agent definitions ship with it. Write your own as Markdown files in `~/.pi/agent/agents/`
+(see [Agent Definitions](#agent-definitions)). The expert and runner definitions for the
+persistent workflow are provided separately in `package/extensions/multiagent/agents/`.
+
+The workflow prompts are optional: to use them, copy or symlink
+`package/extensions/subagent/prompts/*.md` into `~/.pi/agent/prompts/` and define the
+agents they call (see [Workflow Prompts](#workflow-prompts)).
 
 ## Security Model
 
@@ -129,14 +128,17 @@ System prompt for the agent goes here.
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 
-## Sample Agents
+## Example Agent Roles
+
+These roles are the ones the examples and workflow prompts in this document refer to.
+They are not bundled; a typical setup looks like this:
 
 | Agent | Purpose | Model | Tools |
 |-------|---------|-------|-------|
-| `scout` | Fast codebase recon | Haiku | read, grep, find, ls, bash |
-| `planner` | Implementation plans | Sonnet | read, grep, find, ls |
-| `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
-| `worker` | General-purpose | Sonnet | (all default) |
+| `scout` | Fast codebase recon | A small, fast model | read, grep, find, ls, bash |
+| `planner` | Implementation plans | A stronger model | read, grep, find, ls |
+| `reviewer` | Code review | A stronger model | read, grep, find, ls, bash |
+| `worker` | General-purpose | A stronger model | (all default) |
 
 ### Expert with runner through multiagent
 
@@ -171,6 +173,10 @@ These tool lists select model-visible tools; they are not an OS security sandbox
 | `/implement <query>` | scout → planner → worker |
 | `/scout-and-plan <query>` | scout → planner |
 | `/implement-and-review <query>` | worker → reviewer → worker |
+
+Each prompt names its agents literally, so it only works once agents called `scout`,
+`planner`, `worker`, and `reviewer` exist in `~/.pi/agent/agents/`. Without them the
+`subagent` tool reports the unknown agent and lists the ones it found.
 
 ## Error Handling
 

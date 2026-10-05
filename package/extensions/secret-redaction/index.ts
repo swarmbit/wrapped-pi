@@ -93,8 +93,11 @@ export default function secretRedaction(pi: ExtensionAPI): void {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
       if (!auth.ok) return { cancel: true };
       if (auth.apiKey) redactor.registerSecret(auth.apiKey);
+      // A null provider header means "omit this default"; compact() only accepts values.
+      const headers = auth.headers && Object.fromEntries(
+        Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
       const result = await compact(
-        safe.preparation, ctx.model, auth.apiKey, auth.headers,
+        safe.preparation, ctx.model, auth.apiKey, headers,
         safe.instructions, event.signal, pi.getThinkingLevel(),
       );
       return { compaction: redactor.redact(result) };

@@ -134,6 +134,15 @@ export class SessionSecrets {
         this.redactor.registerSecret(match[2].replace(/\\n/g, "\n").replace(/\\r/g, "\r"));
       }
     }
+    // Dotenv-style files hold literals, never expressions. Learn each unquoted value
+    // whole, whatever it looks like: the free-text scan above stops at punctuation
+    // and treats identifier-shaped values (`SMTP_PASSWORD=abcdefghijklmnop`) as code.
+    const basename = path.basename(filename);
+    if (/^\.env(?:\.|$)/.test(basename) || basename.endsWith(".env") || basename === ".npmrc") {
+      for (const match of text.matchAll(/^[ \t]*(?:export[ \t]+)?([^\s=#]+)[ \t]*=[ \t]*([^\s"'#][^\r\n]*?)[ \t]*(?:[ \t]#[^\r\n]*)?\r?$/gm)) {
+        if (this.redactor.isCredentialName(match[1])) this.redactor.registerSecret(match[2]);
+      }
+    }
     this.scanned.set(filename, stamp);
   }
 

@@ -459,7 +459,7 @@ factory creation. It does not globally capture Enter or replace modal editing.
   `/orchestrator drafts` can recover the others. These drafts are process-local, not
   durable across process exits. A full cross-session execution queue is deferred.
 
-The checked development API version is Pi **0.99.1**. The history adapter
+The checked development API version is Pi **1.0.0** (the version pinned in `src/version.ts`). The history adapter
 supports the Pi **0.79.1** context renderer and Pi **0.99.1** renderer API.
 Other versions/editors need compatibility testing. The extension remains
 opt-in until `/orchestrator` enables routing.

@@ -6,7 +6,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { loadConfig, getUserConfigPath, parsePortMapping, parsePortsString, parseMountMapping, PI_VERSION, PI_IMAGE } from "./config";
+import { loadConfig, getUserConfigPath, parsePortMapping, parsePortsString, parseMountMapping, PI_VERSION } from "./config";
+import { imageTag } from "./image";
 
 let tmpDir: string;
 let origCwd: string;
@@ -21,13 +22,18 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("PI_VERSION and PI_IMAGE constants", () => {
+describe("PI_VERSION and the default image", () => {
   it("PI_VERSION is a valid version string", () => {
     expect(PI_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("PI_IMAGE is derived from PI_VERSION", () => {
-    expect(PI_IMAGE).toBe(`pi-agent:${PI_VERSION}`);
+  it("the extensions are typechecked and tested against the pi version that ships", () => {
+    // The image installs pi@PI_VERSION; the bundled extensions run inside it.
+    // A range here (or a stale pin) lets them drift apart unnoticed.
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf-8"));
+    for (const name of ["pi-coding-agent", "pi-ai", "pi-tui", "pi-agent-core"]) {
+      expect(pkg.devDependencies[`@earendil-works/${name}`], name).toBe(PI_VERSION);
+    }
   });
 
   it("loadConfig uses these constants as defaults", () => {
@@ -35,7 +41,7 @@ describe("PI_VERSION and PI_IMAGE constants", () => {
     const config = loadConfig({ homeDir: tmpDir });
     // No pi.version set in config — should fall back to the baked-in constant
     expect(config.piVersion).toBe(PI_VERSION);
-    expect(config.piImage).toBe(PI_IMAGE);
+    expect(config.piImage).toBe(imageTag(PI_VERSION));
     expect(config.ports).toEqual([]);
     expect(config.mounts).toEqual([]);
   });
@@ -326,7 +332,7 @@ describe("loadConfig", () => {
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
       expect(config.piVersion).toBe(PI_VERSION);
-      expect(config.piImage).toBe(PI_IMAGE);
+      expect(config.piImage).toMatch(new RegExp(`^pi-agent:${PI_VERSION.replace(/\./g, "\\.")}-[a-f0-9]{12}$`));
     });
 
     it("reads pi.version from project config", () => {
@@ -339,7 +345,8 @@ describe("loadConfig", () => {
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir: tmpDir });
       expect(config.piVersion).toBe("0.50.0");
-      expect(config.piImage).toBe("pi-agent:0.50.0");
+      expect(config.piImage).toBe(imageTag("0.50.0"));
+      expect(config.piImage.startsWith("pi-agent:0.50.0-")).toBe(true);
     });
 
     it("reads pi.version from user config", () => {
@@ -352,7 +359,7 @@ describe("loadConfig", () => {
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir });
       expect(config.piVersion).toBe("0.60.0");
-      expect(config.piImage).toBe("pi-agent:0.60.0");
+      expect(config.piImage).toBe(imageTag("0.60.0"));
       fs.rmSync(homeDir, { recursive: true, force: true });
     });
 
@@ -374,8 +381,37 @@ describe("loadConfig", () => {
       process.chdir(tmpDir);
       const config = loadConfig({ homeDir });
       expect(config.piVersion).toBe("0.50.0");
-      expect(config.piImage).toBe("pi-agent:0.50.0");
+      expect(config.piImage).toBe(imageTag("0.50.0"));
+      expect(config.piImage.startsWith("pi-agent:0.50.0-")).toBe(true);
       fs.rmSync(homeDir, { recursive: true, force: true });
+    });
+
+    // ── image tag ─────────────────────────────────────────
+
+    it("gives projects with different docker.extension blocks different images", () => {
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      process.chdir(tmpDir);
+      const plain = loadConfig({ homeDir: tmpDir }).piImage;
+
+      fs.writeFileSync(path.join(containerDir, "wpi.yml"), "docker:\n  extension: |\n    RUN apt-get install -y python3\n");
+      const python = loadConfig({ homeDir: tmpDir }).piImage;
+      fs.writeFileSync(path.join(containerDir, "wpi.yml"), "docker:\n  extension: |\n    RUN apt-get install -y openjdk-17-jdk\n");
+      const java = loadConfig({ homeDir: tmpDir }).piImage;
+
+      expect(new Set([plain, python, java]).size).toBe(3);
+      // Same inputs, same image: nothing but the build inputs feeds the tag.
+      expect(loadConfig({ homeDir: tmpDir }).piImage).toBe(java);
+    });
+
+    it("does not let runtime-only settings change the image", () => {
+      const containerDir = path.join(tmpDir, ".pi");
+      fs.mkdirSync(containerDir, { recursive: true });
+      process.chdir(tmpDir);
+      const before = loadConfig({ homeDir: tmpDir }).piImage;
+      fs.writeFileSync(path.join(containerDir, "wpi.yml"),
+        "docker:\n  ports:\n    - 3000\n  env:\n    TOKEN: abc\n  memory: 4g\n  mounts:\n    - /a:/b\n");
+      expect(loadConfig({ homeDir: tmpDir }).piImage).toBe(before);
     });
 
     // ── git.user ──────────────────────────────────────────

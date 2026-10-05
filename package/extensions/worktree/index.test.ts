@@ -16,7 +16,7 @@ const {
   mockFsUnlinkSync,
   mockFsRmdirSync,
   mockFsReaddirSync,
-  mockExecSync,
+  mockExecFileSync,
 } = vi.hoisted(() => ({
   mockFsExistsSync: vi.fn(),
   mockFsReadFileSync: vi.fn(),
@@ -25,7 +25,7 @@ const {
   mockFsUnlinkSync: vi.fn(),
   mockFsRmdirSync: vi.fn(),
   mockFsReaddirSync: vi.fn(),
-  mockExecSync: vi.fn(),
+  mockExecFileSync: vi.fn(),
 }));
 
 vi.mock("node:fs", () => ({
@@ -39,7 +39,7 @@ vi.mock("node:fs", () => ({
 }));
 
 vi.mock("node:child_process", () => ({
-  execSync: mockExecSync,
+  execFileSync: mockExecFileSync,
 }));
 
 const {
@@ -119,7 +119,7 @@ function resetAllMocks() {
   });
   mockFsWriteFileSync.mockImplementation(() => {});
   mockFsMkdirSync.mockImplementation(() => {});
-  mockExecSync.mockReturnValue("main");
+  mockExecFileSync.mockReturnValue("main");
 }
 
 // ── Path helpers ────────────────────────────────────────────
@@ -204,11 +204,11 @@ describe("createWorktree", () => {
 
   beforeEach(() => {
     resetAllMocks();
-    mockExecSync.mockReturnValue("abc123");
+    mockExecFileSync.mockReturnValue("abc123");
   });
 
   it("returns error if not a git repo", async () => {
-    mockExecSync.mockImplementation(() => {
+    mockExecFileSync.mockImplementation(() => {
       throw new Error("not a git repo");
     });
     pi = mockPi();
@@ -265,7 +265,7 @@ describe("createWorktree", () => {
       (c: any) => c[0] === registryPath
     );
     expect(registryCall).toBeDefined();
-    const registry = JSON.parse(registryCall[1]);
+    const registry = JSON.parse(registryCall![1]);
     expect(registry.worktrees["feature-abc123"]).toBeDefined();
     expect(registry.worktrees["feature-abc123"].baseRef).toBe("abc123");
 
@@ -282,10 +282,24 @@ describe("createWorktree", () => {
 
     const result = await createWorktree(pi, ctx, "feature", "develop");
     expect(result.worktreeName).toBe("feature-abc123");
-    expect(mockExecSync).toHaveBeenCalledWith(
-      "git rev-parse --short develop",
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--short", "develop"],
       expect.any(Object)
     );
+  });
+
+  it("passes refs as arguments, never through a shell", async () => {
+    mockFsExistsSync.mockReturnValue(false);
+    mockFsReadFileSync.mockReturnValue(JSON.stringify({ worktrees: {} }));
+    pi = mockPi();
+    ctx = mockCtx("/sessions/current.jsonl");
+
+    const hostile = "feat/$(touch pwned);rm -rf ~";
+    await createWorktree(pi, ctx, "feature", hostile);
+    // The ref is one argv element; no command string is ever assembled from it.
+    expect(mockExecFileSync).toHaveBeenCalledWith("git", ["rev-parse", "--short", hostile], expect.any(Object));
+    for (const [command] of mockExecFileSync.mock.calls) expect(command).toBe("git");
   });
 
   it("returns error if git worktree add fails", async () => {
@@ -359,6 +373,7 @@ describe("deleteWorktree", () => {
     mockSessionList.mockResolvedValue([]);
 
     pi = mockPi([
+      { code: 0, stdout: "", stderr: "" },  // git status --porcelain (clean)
       { code: 0, stdout: "", stderr: "" },  // git worktree remove
       { code: 0, stdout: "", stderr: "" },  // git branch -d
     ]);
@@ -373,6 +388,52 @@ describe("deleteWorktree", () => {
       "--force",
       worktreePath,
     ]);
+  });
+
+  describe("uncommitted changes", () => {
+    const worktreePath = "/wpi/.pi/worktrees/proj/feat-abc123";
+    const dirty = { code: 0, stdout: " M src/app.ts\n?? notes.md\n", stderr: "" };
+    beforeEach(() => {
+      mockFsReadFileSync.mockReturnValue(JSON.stringify({
+        worktrees: { "feat-abc123": { path: worktreePath, createdAt: "", baseRef: "main", originalCwd: TEST_CWD } },
+      }));
+      mockFsExistsSync.mockReturnValue(true);
+    });
+
+    it("asks before discarding them and keeps everything when declined", async () => {
+      pi = mockPi([dirty]);
+      ctx = mockCtx("/sessions/other.jsonl", TEST_CWD);
+      ctx.ui.confirm.mockResolvedValue(false);
+
+      const result = await deleteWorktree(pi, ctx, "feat-abc123");
+      expect(result).toEqual({ cancelled: true });
+      expect(ctx.ui.confirm).toHaveBeenCalledWith("Uncommitted Changes", expect.stringContaining("2 uncommitted change(s)"));
+      expect(ctx.ui.confirm.mock.calls[0][1]).toContain("?? notes.md");
+      // Only the status probe ran: no removal, no branch or session deletion, registry untouched.
+      expect(pi.exec).toHaveBeenCalledTimes(1);
+      expect(pi.exec).toHaveBeenCalledWith("git", ["-C", worktreePath, "status", "--porcelain"]);
+      expect(mockSessionList).not.toHaveBeenCalled();
+      expect(mockFsWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it("removes the worktree once the user confirms", async () => {
+      pi = mockPi([dirty]);
+      ctx = mockCtx("/sessions/other.jsonl", TEST_CWD);
+      ctx.ui.confirm.mockResolvedValue(true);
+
+      const result = await deleteWorktree(pi, ctx, "feat-abc123");
+      expect(result.error).toBeUndefined();
+      expect(result.cancelled).toBeUndefined();
+      expect(pi.exec).toHaveBeenCalledWith("git", ["worktree", "remove", "--force", worktreePath]);
+    });
+
+    it("does not prompt for a clean worktree", async () => {
+      pi = mockPi();
+      ctx = mockCtx("/sessions/other.jsonl", TEST_CWD);
+
+      await deleteWorktree(pi, ctx, "feat-abc123");
+      expect(ctx.ui.confirm).not.toHaveBeenCalled();
+    });
   });
 
   it("handles already-missing worktree directory", async () => {
@@ -397,8 +458,9 @@ describe("deleteWorktree", () => {
     mockSessionList.mockResolvedValue([]);
 
     pi = mockPi([
-      { code: 1, stdout: "", stderr: "fatal: not a git repository" },
-      { code: 0, stdout: "", stderr: "" },
+      { code: 128, stdout: "", stderr: "fatal: cannot change to directory" },  // git status --porcelain
+      { code: 1, stdout: "", stderr: "fatal: not a git repository" },          // git worktree remove
+      { code: 0, stdout: "", stderr: "" },                                      // git worktree prune
     ]);
     ctx = mockCtx("/sessions/current.jsonl", TEST_CWD);
 
@@ -428,6 +490,7 @@ describe("deleteWorktree", () => {
     mockSessionList.mockResolvedValue([session1, session2]);
 
     pi = mockPi([
+      { code: 0, stdout: "", stderr: "" },  // git status --porcelain (clean)
       { code: 0, stdout: "", stderr: "" },  // git worktree remove
       { code: 0, stdout: "", stderr: "" },  // git branch -d
     ]);
@@ -461,6 +524,7 @@ describe("deleteWorktree", () => {
     mockSessionList.mockResolvedValue([session1]);
 
     pi = mockPi([
+      { code: 0, stdout: "", stderr: "" },  // git status --porcelain (clean)
       { code: 0, stdout: "", stderr: "" },  // git worktree remove
       { code: 0, stdout: "", stderr: "" },  // git branch -d
     ]);
@@ -492,6 +556,7 @@ describe("deleteWorktree", () => {
     mockSessionList.mockRejectedValue(new Error("listing failed"));
 
     pi = mockPi([
+      { code: 0, stdout: "", stderr: "" },  // git status --porcelain (clean)
       { code: 0, stdout: "", stderr: "" },  // git worktree remove
       { code: 0, stdout: "", stderr: "" },  // git branch -d
     ]);
@@ -524,6 +589,7 @@ describe("deleteWorktree", () => {
     mockFsReaddirSync.mockReturnValue([]);
 
     pi = mockPi([
+      { code: 0, stdout: "", stderr: "" },  // git status --porcelain (clean)
       { code: 0, stdout: "", stderr: "" },  // git worktree remove
       { code: 0, stdout: "", stderr: "" },  // git branch -d
     ]);

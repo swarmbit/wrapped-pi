@@ -15,10 +15,14 @@
 
 docker:
   env:
-    # Point the web extension at your local Firecrawl instance
-    FIRECRAWL_BASE_URL: http://localhost:3002
+    # Point the web extension at your local Firecrawl instance. The agent runs
+    # in its own container, where "localhost" would be that container itself;
+    # host.docker.internal reaches ports published on the host (Docker Desktop,
+    # Colima). On a plain Linux Docker engine use the bridge address instead,
+    # usually http://172.17.0.1:3002.
+    FIRECRAWL_BASE_URL: http://host.docker.internal:3002
 
-    # No API key required for self-hosted (leave empty)
+    # No API key required for self-hosted (leave unset)
     # FIRECRAWL_API_KEY: ""
 
     # Optional: restrict which domains the agent can fetch

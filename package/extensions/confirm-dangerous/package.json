@@ -2,11 +2,14 @@
   "name": "confirm-dangerous",
   "version": "1.0.0",
   "private": true,
-  "description": "Prompts before destructive commands, system path writes, and pi config modifications",
+  "description": "Prompts before destructive commands and writes outside the workspace, /tmp, and the pi config directory",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

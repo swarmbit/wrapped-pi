@@ -11,7 +11,7 @@
 
 import * as path from "path";
 import * as fs from "fs";
-import { PI_VERSION } from "./config";
+import { PI_VERSION } from "./version";
 
 // Templates are in the templates/ directory, sibling to dist/
 const TEMPLATES_DIR = path.join(__dirname, "..", "templates");

@@ -6,29 +6,44 @@
 // workspace or /tmp do not require confirmation.
 //
 // Allowed paths outside the workspace:
-//   - /tmp            — temporary files (read, write, delete)
-//   - /home/pi-user/.pi — pi config directory (mounted from host)
+//   - /tmp     — temporary files (read, write, delete)
+//   - ~/.pi    — pi config directory (mounted from host; also
+//                holds the worktree extension's worktrees)
 //
 // Read operations (read tool) are always allowed — they are
 // never dangerous regardless of the target path.
 //
 // The workspace directory is determined by the WORKSPACE_DIR
-// environment variable, set by wpi based on the
-// project directory name.
+// environment variable, set by wpi to the mounted project
+// directory.
+//
+// Write/edit paths are judged the way Pi resolves them ("~",
+// "..", relative to the tool's cwd) and after following
+// symlinks, so the path the guard approves is the file that
+// actually gets written.
 // ============================================================
 
-import { lstatSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
-// Workspace directory — set by wpi from the CWD basename
+// Workspace directory — set by wpi to the mounted project directory
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || "/workspace";
+
+// The pi config directory lives under the container user's home. wpi mirrors
+// the host identity, so that is the host's home path (e.g. /Users/alice/.pi),
+// not a fixed location.
+function piConfigDir(): string {
+  return path.join(os.homedir(), ".pi");
+}
 
 // Paths that are always safe to write to (outside workspace)
 const ALLOWED_OUTSIDE_PATHS = [
-  "/tmp",                  // temporary files
-  "/home/pi-user/.pi",     // pi config directory
+  "/tmp",          // temporary files
+  piConfigDir(),   // pi config directory
 ];
 
 // Patterns that indicate a dangerous bash command.
@@ -81,10 +96,10 @@ export default function (pi: ExtensionAPI) {
     // ── Write/edit outside workspace ──────────────────────
     if (isToolCallEventType("write", event)) {
       const filePath: string = event.input.path ?? "";
-      if (isOutsideWorkspace(filePath) && !isAllowedPath(filePath)) {
+      if (isOutsideWorkspace(filePath, WORKSPACE_DIR, ctx.cwd) && !isAllowedPath(filePath, ctx.cwd)) {
         const ok = await ctx.ui.confirm(
           "Write Outside Workspace",
-          `Attempting to write to:\n\n${filePath}\n\nThis is outside ${WORKSPACE_DIR}. Allow?`
+          `Attempting to write to:\n\n${describeTarget(filePath, ctx.cwd)}\n\nThis is outside ${WORKSPACE_DIR}. Allow?`
         );
         if (!ok) {
           return { block: true, reason: `Blocked: write outside ${WORKSPACE_DIR}` };
@@ -94,10 +109,10 @@ export default function (pi: ExtensionAPI) {
 
     if (isToolCallEventType("edit", event)) {
       const filePath: string = event.input.path ?? "";
-      if (isOutsideWorkspace(filePath) && !isAllowedPath(filePath)) {
+      if (isOutsideWorkspace(filePath, WORKSPACE_DIR, ctx.cwd) && !isAllowedPath(filePath, ctx.cwd)) {
         const ok = await ctx.ui.confirm(
           "Edit Outside Workspace",
-          `Attempting to edit:\n\n${filePath}\n\nThis is outside ${WORKSPACE_DIR}. Allow?`
+          `Attempting to edit:\n\n${describeTarget(filePath, ctx.cwd)}\n\nThis is outside ${WORKSPACE_DIR}. Allow?`
         );
         if (!ok) {
           return { block: true, reason: `Blocked: edit outside ${WORKSPACE_DIR}` };
@@ -109,15 +124,75 @@ export default function (pi: ExtensionAPI) {
 
 // ── Helper functions (exported for testing) ──────────────────
 
-export function isOutsideWorkspace(filePath: string, workspaceDir: string = WORKSPACE_DIR): boolean {
-  // Resolve relative paths against the workspace directory
-  const normalized = filePath.startsWith("/") ? filePath : `${workspaceDir}/${filePath}`;
-  return !normalized.startsWith(`${workspaceDir}/`) && normalized !== workspaceDir;
+/** Resolve a file-tool path the way Pi's write/edit tools do, so the guard
+ * judges the file that will actually be touched: Unicode spaces become plain
+ * spaces, a leading "@" is dropped, "~" expands to the home directory,
+ * file:// URLs are accepted, and the rest resolves against the tool's cwd
+ * (which also collapses "." and ".." segments).
+ */
+export function resolveToolPath(filePath: string, cwd: string = WORKSPACE_DIR): string {
+  let normalized = filePath.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
+  if (normalized.startsWith("@")) normalized = normalized.slice(1);
+  if (normalized === "~") {
+    normalized = os.homedir();
+  } else if (normalized.startsWith("~/")) {
+    normalized = path.join(os.homedir(), normalized.slice(2));
+  } else if (/^file:\/\//.test(normalized)) {
+    try {
+      normalized = fileURLToPath(normalized);
+    } catch {
+      // Pi rejects a malformed file URL as well; judge the literal text.
+    }
+  }
+  return path.resolve(cwd, normalized);
 }
 
-export function isPiConfigDir(filePath: string): boolean {
+// Follow symlinks through the part of a path that exists. A dangling link
+// still decides where a new file would be created, so it is followed too;
+// components that do not exist yet cannot redirect anything.
+function canonicalize(target: string, depth = 0): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    // Not there yet, or a link whose destination is missing.
+  }
+  if (depth < 40) {
+    try {
+      if (lstatSync(target).isSymbolicLink()) {
+        return canonicalize(path.resolve(path.dirname(target), readlinkSync(target)), depth + 1);
+      }
+    } catch {
+      // Does not exist.
+    }
+  }
+  const parent = path.dirname(target);
+  return parent === target ? target : path.join(canonicalize(parent, depth), path.basename(target));
+}
+
+function resolvesWithin(filePath: string, cwd: string, directory: string): boolean {
+  return isWithin(canonicalize(resolveToolPath(filePath, cwd)), canonicalize(path.resolve(directory)));
+}
+
+// Show where the write lands; name the original spelling when it differs.
+function describeTarget(filePath: string, cwd: string): string {
+  const resolved = canonicalize(resolveToolPath(filePath, cwd));
+  return resolved === filePath ? resolved : `${resolved}\n(requested as: ${filePath})`;
+}
+
+/** True when a write/edit path lands outside the workspace. Relative paths
+ * resolve against `cwd`, the directory the tool call runs in.
+ */
+export function isOutsideWorkspace(
+  filePath: string,
+  workspaceDir: string = WORKSPACE_DIR,
+  cwd: string = workspaceDir
+): boolean {
+  return !resolvesWithin(filePath, cwd, workspaceDir);
+}
+
+export function isPiConfigDir(filePath: string, cwd: string = WORKSPACE_DIR): boolean {
   // Allow writes to the pi config directory (mounted from host)
-  return filePath.startsWith("/home/pi-user/.pi/");
+  return resolvesWithin(filePath, cwd, piConfigDir());
 }
 
 export function isTmpPath(filePath: string): boolean {
@@ -127,8 +202,9 @@ export function isTmpPath(filePath: string): boolean {
   return filePath.startsWith("/tmp/") || filePath === "/tmp";
 }
 
-export function isAllowedPath(filePath: string): boolean {
-  return isPiConfigDir(filePath) || isTmpPath(filePath);
+/** True when a write/edit path lands in a location that never needs confirmation. */
+export function isAllowedPath(filePath: string, cwd: string = WORKSPACE_DIR): boolean {
+  return isPiConfigDir(filePath, cwd) || resolvesWithin(filePath, cwd, "/tmp");
 }
 
 /** Allow only a standalone rm whose literal targets are inside the workspace

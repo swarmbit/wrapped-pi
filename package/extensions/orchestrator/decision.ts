@@ -237,7 +237,7 @@ export class SystemOneBackend implements DecisionBackend {
 export function shortlist(text: string, members: MemberSession[], lastId?: string): MemberSession[] {
   const words = new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) ?? []);
   const scored = members.map(member => ({ member, score: [...words].filter(word =>
-    decodeSessionContextSummary(member.summary).map(message => message.content).join("\\n").toLocaleLowerCase().includes(word)).length }));
+    decodeSessionContextSummary(member.summary).map(message => message.content).join("\n").toLocaleLowerCase().includes(word)).length }));
   scored.sort((a, b) => b.score - a.score || b.member.lastActivityAt.localeCompare(a.member.lastActivityAt));
   const recent = members.find(member => member.id === lastId);
   // Keep explicitly referenced members eligible even when recent-message overlap is low.

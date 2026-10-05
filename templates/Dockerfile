@@ -50,8 +50,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -m -s /bin/bash pi-user
+# Create non-root user. The base image's "node" account owns UID/GID 1000,
+# the usual IDs of the first user on a Linux host; remove it so the entrypoint
+# can give those IDs to pi-user.
+RUN (userdel -r node 2>/dev/null || true) \
+    && (groupdel node 2>/dev/null || true) \
+    && useradd -m -s /bin/bash pi-user
 
 # Copy pi from builder
 COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules

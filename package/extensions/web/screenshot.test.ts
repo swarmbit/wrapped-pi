@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@earendil-works/pi-coding-agent', () => ({}));
-vi.mock('@earendil-works/pi-ai', () => ({ completeSimple: vi.fn() }));
 vi.mock('typebox', () => ({ Type: {} }));
 import { requestLocalScreenshot } from './index';
 

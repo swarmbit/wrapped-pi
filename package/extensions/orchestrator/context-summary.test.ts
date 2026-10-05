@@ -34,4 +34,9 @@ describe("session context summary", () => {
     expect(readableSessionContextSummary(valid)).toContain("user: hello");
     expect(readableSessionContextSummary("invalid JSON")).toBe("");
   });
+  it("separates readable messages with real line breaks, newest first", () => {
+    const summary = sessionContextSummary([message("user", "Fix the bug"), message("assistant", [{ type: "text", text: "Done" }])]);
+    expect(readableSessionContextSummary(summary)).toBe("Latest message:\nassistant: Done\n\nEarlier message:\nuser: Fix the bug");
+    expect(readableSessionContextSummary(summary)).not.toContain("\\n");
+  });
 });

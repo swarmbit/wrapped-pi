@@ -10,6 +10,17 @@ import { execSync } from "child_process";
 
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
+// Some CI images (macOS runners) ship without Docker. Only the tests that talk
+// to the daemon depend on it; everything else, including dry-run, does not.
+const dockerAvailable = (() => {
+  try {
+    execSync("docker --version", { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 // Helper to run CLI with a temp home dir (avoids writing to real ~/.pi)
 function runCli(args: string, options: { cwd: string; env?: Record<string, string> }): string {
   const piDir = path.join(options.cwd, ".pi");
@@ -63,7 +74,7 @@ describe("CLI", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("accepts shell with container id (fails gracefully when container not found)", () => {
+  it.skipIf(!dockerAvailable)("accepts shell with container id (fails gracefully when container not found)", () => {
     try {
       execSync(`node ${CLI_PATH} shell nonexistent-container 2>&1`, { encoding: "utf-8" });
       expect.fail("Should have exited with error");
@@ -137,8 +148,20 @@ describe("CLI dry-run", () => {
     );
     const output = runCli("dry-run", { cwd: tmpDir });
 
-    expect(output).toContain("ANTHROPIC_API_KEY");
-    expect(output).toContain("sk-test");
+    // Keys are listed; values are credentials and must not be echoed anywhere.
+    expect(output).toContain("ANTHROPIC_API_KEY: *** (7 chars)");
+    expect(output).not.toContain("sk-test");
+    expect(output).toContain("--env-file <private env file>");
+  });
+
+  it("shows the content-addressed image and the pinned pi version in help", () => {
+    const output = runCli("dry-run", { cwd: tmpDir });
+    expect(output).toMatch(/image:\s+pi-agent:\d+\.\d+\.\d+-[a-f0-9]{12}/);
+
+    const help = execSync(`node ${CLI_PATH} --help`, { encoding: "utf-8" });
+    const version = execSync(`node ${CLI_PATH} --version`, { encoding: "utf-8" }).match(/pi v(\S+)\)/)![1];
+    expect(help).toContain(`version: ${version} `);
+    expect(help).not.toContain("pi-user");
   });
 
   it("shows mounts in dry-run", () => {

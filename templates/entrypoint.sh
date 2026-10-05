@@ -18,9 +18,25 @@ PI_HOME="${USER_HOME}/.pi"
 PI_AGENT_HOME="${PI_HOME}/agent"
 
 # ── Match pi-user UID/GID to host user ──────────────────
+# Files created in the mounted project and ~/.pi must belong to the host user.
+if [ "$(id -g pi-user)" != "${HOST_GID}" ]; then
+  if getent group "${HOST_GID}" >/dev/null; then
+    # The GID already belongs to a group in the image (macOS "staff" is 20,
+    # Debian's "dialout"): join that group instead of renumbering our own.
+    usermod -g "${HOST_GID}" pi-user || true
+  else
+    groupmod -g "${HOST_GID}" pi-user || true
+  fi
+fi
 if [ "$(id -u pi-user)" != "${HOST_UID}" ]; then
-  groupmod -g "${HOST_GID}" pi-user 2>/dev/null || true
-  usermod -u "${HOST_UID}" -g "${HOST_GID}" pi-user 2>/dev/null || true
+  # -o: the host UID may coincide with a system account in the image.
+  usermod -o -u "${HOST_UID}" pi-user || true
+fi
+# Check the result rather than trusting the commands: a silent mismatch shows
+# up later as wrong ownership or permission errors that are hard to trace.
+if [ "$(id -u pi-user)" != "${HOST_UID}" ] || [ "$(id -g pi-user)" != "${HOST_GID}" ]; then
+  echo "wpi: warning: container user is $(id -u pi-user):$(id -g pi-user), expected ${HOST_UID}:${HOST_GID}." \
+       "Files written to mounted directories may get the wrong owner." >&2
 fi
 
 # ── Rename user/group to match host username ────────────

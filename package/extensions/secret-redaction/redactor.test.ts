@@ -155,6 +155,98 @@ describe("credential detection", () => {
   });
 });
 
+describe("source code is not mistaken for credentials", () => {
+  it("leaves expressions assigned to credential-named variables readable", () => {
+    const redactor = new SecretRedactor();
+    const code = [
+      "const password = generatePassword();",
+      "const token = await lexer.nextToken();",
+      "auth = HTTPBasicAuth(username, pwd)",
+      "const secret = crypto.randomBytes(len).toString(encoding);",
+      "const token = req.headers.authorization?.split(separator)[index];",
+      "this.password = hash(password + salt)",
+      "$token = $this->createToken();",
+      "password: z.string().min(length),",
+      "let token = null; let secret = undefined; let auth = None",
+    ].join("\n");
+    expect(redactor.redact(code)).toBe(code);
+    expect(redactor.size).toBe(0);
+  });
+
+  it("does not read comparisons, arrows, scopes, or type annotations as assignments", () => {
+    const redactor = new SecretRedactor();
+    const code = [
+      "if (token == expected || password === other) return;",
+      "const check = token => verify(token);",
+      "let secret = Token::generate(); let ok = password::verify(input);",
+      "interface Login { token: string; password: String; secret: boolean }",
+      "def login(password: str, token: Optional[str] = None): ...",
+    ].join("\n");
+    expect(redactor.redact(code)).toBe(code);
+    expect(redactor.size).toBe(0);
+  });
+
+  it("masks an identifier-shaped value where it is assigned, without hunting for it elsewhere", () => {
+    const redactor = new SecretRedactor();
+    const code = "const token = accessToken;\nrefresh(accessToken);\nlog(req.headers.authorization);\nconst auth = req.headers.authorization;";
+    const result = redactor.redact(code);
+    // It may be a variable or a literal password; hiding the assignment is the safe reading...
+    expect(result).toMatch(/^const token = __WPI_SECRET_[a-f0-9_]+__;\n/);
+    expect(result).toMatch(/const auth = __WPI_SECRET_[a-f0-9_]+__;$/);
+    // ...but other uses of the same name stay readable.
+    expect(result).toContain("refresh(accessToken);");
+    expect(result).toContain("log(req.headers.authorization);");
+    expect(redactor.restore(result)).toBe(code);
+    // Redacting again is stable.
+    expect(redactor.redact(result)).toBe(result);
+  });
+
+  it("still masks an unquoted word used as a password at its assignment", () => {
+    const redactor = new SecretRedactor();
+    const yaml = "db:\n  user: admin\n  password: correcthorsebatterystaple\n";
+    const result = redactor.redact(yaml);
+    expect(result).not.toContain("correcthorsebatterystaple");
+    expect(result).toContain("user: admin");
+    expect(redactor.restore(result)).toBe(yaml);
+  });
+
+  it("treats a context-only value as a full secret once a definite source confirms it", () => {
+    const redactor = new SecretRedactor();
+    const word = "correcthorsebatterystaple";
+    const first = redactor.redact(`password: ${word}\nlogin failed for ${word}`);
+    expect(first).toContain(`login failed for ${word}`);
+    // The same value in a structured credential field is unambiguous.
+    redactor.discover({ password: word });
+    const second = redactor.redact(`login failed for ${word}`);
+    expect(second).not.toContain(word);
+    expect(redactor.restore(second)).toBe(`login failed for ${word}`);
+    // Placeholders handed out before the upgrade still resolve.
+    expect(redactor.restore(first)).toBe(`password: ${word}\nlogin failed for ${word}`);
+    expect(redactor.size).toBe(1);
+  });
+
+  it("keeps masking literals everywhere: quoted strings and anything with digits or punctuation", () => {
+    const redactor = new SecretRedactor();
+    for (const [assignment, value] of [
+      ['password = "onlylettersbutquoted"', "onlylettersbutquoted"],
+      ["PASSWORD=Summer2024x", "Summer2024x"],
+      ["api_token: a-hyphenated-value", "a-hyphenated-value"],
+      ["TOKEN := abc123def456", "abc123def456"],
+      ["secret=x7Gh(k2L)mq", "x7Gh(k2L)mq"],
+    ]) {
+      const result = redactor.redact(`${assignment}\nseen again: ${value}`);
+      expect(result, assignment).not.toContain(value);
+      expect(redactor.restore(result), assignment).toBe(`${assignment}\nseen again: ${value}`);
+    }
+  });
+
+  it("does not turn an authentication scheme name into a credential", () => {
+    const redactor = new SecretRedactor();
+    const code = 'headers: { Authorization: "Bearer " + token }';
+    expect(redactor.redact(code)).toBe(code);
+  });
+});
+
 describe("tool argument restoration", () => {
   it("restores nested execution arguments without changing model-facing arguments", () => {
     const redactor = new SecretRedactor();

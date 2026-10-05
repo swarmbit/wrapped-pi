@@ -43,6 +43,22 @@ describe("local mapping storage", () => {
     expect(reloaded.size).toBe(2);
   });
 
+  it("remembers across reloads which values are masked only where they are assigned", () => {
+    const first = redactor();
+    const masked = first.redact("const token = accessToken;");
+    expect(masked).not.toContain("accessToken");
+    // A new process, or a child agent, loading the same records.
+    const reloaded = redactor();
+    expect(reloaded.redact("refresh(accessToken);")).toBe("refresh(accessToken);");
+    expect(reloaded.restore(masked)).toBe("const token = accessToken;");
+    expect(redactor("child").restore(masked)).toBe("const token = accessToken;");
+    // Once confirmed as a credential it stays one, whichever record loads first.
+    reloaded.discover({ token: "accessToken" });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      expect(redactor().redact("refresh(accessToken);")).not.toContain("accessToken");
+    }
+  });
+
   it("reports missing and corrupt mappings without exposing file contents", () => {
     const first = redactor();
     const token = first.registerSecret("do-not-print-this-value");
@@ -112,6 +128,35 @@ describe("automatic discovery", () => {
     fs.writeFileSync(filename, "API_KEY=a-new-credential-value");
     session.scanFile(filename);
     expect(session.redactor.redact("a-new-credential-value")).toMatch(/^__WPI_SECRET_/);
+  });
+
+  it("learns dotenv values whole, whatever they look like", () => {
+    const session = new SessionSecrets(path.join(tmp, "agent"), "dotenv");
+    fs.writeFileSync(path.join(tmp, ".env"), [
+      "# comment",
+      "SMTP_PASSWORD=abcdefghijklmnop",            // letters only: looks like an identifier
+      "DB_PASSWORD=hunter(two)   # inline comment", // looks like a call
+      "export API_TOKEN=ab,cd#ef;gh\r",             // punctuation the free-text scan stops at
+      "PORT=3000",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(tmp, ".npmrc"), "//registry.npmjs.org/:_authToken=npmlegacytokenvalue\n");
+    session.refresh(tmp);
+    for (const value of ["abcdefghijklmnop", "hunter(two)", "ab,cd#ef;gh", "npmlegacytokenvalue"]) {
+      const text = `unlabeled ${value} in a log line`;
+      const result = session.redactor.redact(text);
+      expect(result, value).not.toContain(value);
+      expect(session.redactor.restore(result), value).toBe(text);
+    }
+    expect(session.redactor.redact("PORT=3000 # inline comment")).toBe("PORT=3000 # inline comment");
+  });
+
+  it("does not apply dotenv rules to source files", () => {
+    const session = new SessionSecrets(path.join(tmp, "agent"), "source");
+    const filename = path.join(tmp, "auth.ts");
+    fs.writeFileSync(filename, "const password = generatePassword();\nconst token = accessToken;\n");
+    session.scanFile(filename);
+    expect(session.redactor.redact("call generatePassword() then use accessToken")).toBe("call generatePassword() then use accessToken");
   });
 
   it("skips symlinks and oversized sources", () => {
