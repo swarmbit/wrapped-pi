@@ -3,8 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { complete } = vi.hoisted(() => ({ complete: vi.fn() }));
-vi.mock("@earendil-works/pi-ai", () => ({ completeSimple: complete }));
+const complete = vi.fn();
 vi.mock("@earendil-works/pi-coding-agent", () => ({}));
 vi.mock("typebox", () => ({ Type: {
   Object: vi.fn(() => ({})), String: vi.fn(() => ({})), Number: vi.fn(() => ({})),
@@ -26,7 +25,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
     success: true, data: { markdown: "Configuration: API_KEY=page-test-credential" },
   }), { headers: { "content-type": "application/json" } })));
-  complete.mockResolvedValue({ content: [{ type: "text", text: '{"safe":true,"reason":"ok"}' }] });
+  complete.mockResolvedValue({ stopReason: "stop", content: [{ type: "text", text: '{"safe":true,"reason":"ok"}' }] });
 });
 afterEach(() => {
   vi.unstubAllEnvs(); vi.unstubAllGlobals();
@@ -34,23 +33,23 @@ afterEach(() => {
 });
 
 describe("direct guard LLM redaction", () => {
-  it("redacts the structured request and final payload without replacing its authentication", async () => {
+  it("redacts the structured request and final payload, leaving authentication to Pi's registry", async () => {
     const web = await import("./index");
     const tools = new Map<string, any>();
     web.default({ registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: vi.fn() } as any);
+    const guard = { id: "guard-model" };
     const ctx = {
       cwd: tmp, sessionManager: { getSessionId: () => "web-test" },
-      modelRegistry: {
-        getAll: () => [{ id: "guard-model" }],
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "real-guard-auth-key" }),
-      },
+      modelRegistry: { getAll: () => [guard], hasConfiguredAuth: () => true, complete },
     };
     await tools.get("web_fetch").execute("test", { url: "https://example.invalid" }, undefined, undefined, ctx);
     expect(complete).toHaveBeenCalledOnce();
-    const [, content, options] = complete.mock.calls[0];
+    const [model, content, options] = complete.mock.calls[0];
+    expect(model).toBe(guard);
     expect(JSON.stringify(content)).not.toContain("page-test-credential");
     expect(JSON.stringify(content)).toContain("__WPI_SECRET_");
-    expect(options.apiKey).toBe("real-guard-auth-key");
+    // Credentials are resolved by the registry at request time, never supplied here.
+    expect(options).not.toHaveProperty("apiKey");
     expect(options.onPayload({ messages: [{ content: "page-test-credential" }] }).messages[0].content)
       .toMatch(/^__WPI_SECRET_/);
   });

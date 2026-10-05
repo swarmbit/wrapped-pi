@@ -41,6 +41,18 @@ describe("generateDockerfile", () => {
     expect(df).toContain("useradd -m -s /bin/bash pi-user");
   });
 
+  it("frees UID/GID 1000 from the base image's node account before creating pi-user", () => {
+    // node:*-slim ships "node" as 1000:1000, the IDs of the first user on most
+    // Linux hosts. While it exists the entrypoint cannot hand them to pi-user.
+    const df = generateDockerfile();
+    const removeUser = df.indexOf("userdel -r node");
+    const removeGroup = df.indexOf("groupdel node");
+    const create = df.indexOf("useradd -m -s /bin/bash pi-user");
+    expect(removeUser).toBeGreaterThan(-1);
+    expect(removeGroup).toBeGreaterThan(removeUser);
+    expect(create).toBeGreaterThan(removeGroup);
+  });
+
   it("copies pi from builder", () => {
     const df = generateDockerfile();
     expect(df).toContain("COPY --from=builder /usr/local/lib/node_modules");
@@ -124,6 +136,27 @@ describe("generateEntrypoint", () => {
     expect(sh).toContain("usermod");
     expect(sh).toContain("${HOST_UID:-1000}");
     expect(sh).toContain("${HOST_GID:-1000}");
+  });
+
+  it("can take a host UID or GID that the image already uses", () => {
+    const sh = generateEntrypoint();
+    // A GID owned by an existing group is joined, not renumbered onto.
+    expect(sh).toContain('getent group "${HOST_GID}"');
+    expect(sh).toContain('usermod -g "${HOST_GID}" pi-user');
+    expect(sh).toContain('groupmod -g "${HOST_GID}" pi-user');
+    // A UID owned by a system account is shared rather than refused.
+    expect(sh).toContain('usermod -o -u "${HOST_UID}" pi-user');
+    // ...except for root: -o would otherwise hand the agent UID 0.
+    expect(sh.indexOf('if [ "${HOST_UID}" = "0" ]')).toBeGreaterThan(-1);
+    expect(sh.indexOf('if [ "${HOST_UID}" = "0" ]')).toBeLessThan(sh.indexOf("usermod -o"));
+  });
+
+  it("reports a failed UID/GID mapping instead of hiding it", () => {
+    const sh = generateEntrypoint();
+    const remap = sh.slice(sh.indexOf("Match pi-user UID/GID"), sh.indexOf("Rename user/group"));
+    expect(remap).not.toContain("2>/dev/null");
+    expect(remap).toContain('[ "$(id -u pi-user)" != "${HOST_UID}" ] || [ "$(id -g pi-user)" != "${HOST_GID}" ]');
+    expect(remap).toMatch(/wpi: warning: .*>&2/s);
   });
 
   it("references pi config paths", () => {

@@ -2,6 +2,7 @@
   "name": "wpi",
   "version": "1.0.0",
   "description": "Run Pi Coding Agent in Docker with team-standard extensions and settings",
+  "license": "MIT",
   "workspaces": [
     "package/extensions/*"
   ],
@@ -12,12 +13,15 @@
     "dist/",
     "templates/",
     "package/",
-    "settings/"
+    "settings/",
+    "!dist/**/*.test.*",
+    "!package/**/*.test.ts"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && npm run typecheck --workspace wpi-orchestrator && npm run typecheck --workspace wpi-dynamic-system-prompts && vitest run",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run build && npm run typecheck && vitest run",
     "test:watch": "vitest",
     "install-app": "./install.sh"
   },
@@ -25,7 +29,10 @@
     "js-yaml": "^4.1.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",

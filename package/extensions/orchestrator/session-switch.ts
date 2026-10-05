@@ -2,6 +2,7 @@ import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-wor
 import { Type } from "typebox";
 import type { Orchestrator } from "./index";
 import { redactForLlm } from "../secret-redaction/state";
+import { readableSessionContextSummary } from "./context-summary";
 import { supportsDeferredCompaction, type DeferredActionGate } from "./compaction";
 
 export function installSessionSwitch(pi: ExtensionAPI, orchestrator: Orchestrator,
@@ -45,8 +46,10 @@ export function installSessionSwitch(pi: ExtensionAPI, orchestrator: Orchestrato
       const summaryLimit = args.session_id ? 12000 : 2000;
       const result = redactForLlm({ total: filtered.length,
         next_offset: offset + limit < filtered.length ? offset + limit : null,
-        sessions: filtered.slice(offset, offset + limit).map(member => ({ ...member,
-          summary: member.summary.slice(0, summaryLimit), summary_truncated: member.summary.length > summaryLimit })),
+        sessions: filtered.slice(offset, offset + limit).map(member => {
+          const summary = readableSessionContextSummary(member.summary);
+          return { ...member, summary: summary.slice(0, summaryLimit), summary_truncated: summary.length > summaryLimit };
+        }),
       }, ctx);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },

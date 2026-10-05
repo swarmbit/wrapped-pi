@@ -55,18 +55,24 @@ also offers a help entry.
 | --- | --- |
 | `/orchestrator` | Pick or create a named virtual session, or view help |
 | `/orchestrator help` | Show all available commands |
-| `/orchestrator new <name>` | Create and enable; names must be unique in the workspace |
-| `/orchestrator on <name-or-id>` | Resume and enable an existing virtual session |
+| `/orchestrator new [name]` | Create and enable; prompt for a unique name when omitted |
+| `/orchestrator on [name-or-id]` | Resume and enable; select a virtual session when omitted |
 | `/orchestrator off` | Disable routing, hide status, and restore the saved editor factory if still owned |
 | `/orchestrator list` | List virtual sessions, member counts, and aggregate usage |
 | `/orchestrator status` | Counts, detailed virtual/current-real usage, and cost categories |
-| `/orchestrator rename <name>` | Rename the selected virtual session without changing identity |
-| `/orchestrator delete [name-or-id]` | Delete the named or selected virtual session after confirmation; keep real transcripts |
+| `/orchestrator rename [name]` | Rename the selected virtual session; prompt for a name when omitted, select a target if none is active |
+| `/orchestrator delete [name-or-id]` | Select a target when omitted, then confirm deletion; keep real transcripts |
 | `/orchestrator sessions` | Select a named real member |
-| `/orchestrator attach [name-or-id]` | Explicitly attach the current unowned real session after confirmation |
+| `/orchestrator attach [name-or-id]` | Select a target when omitted, then confirm attaching the current unowned real session |
 | `/orchestrator compact [instructions]` | Run Pi's callback-based manual compaction |
-| `/orchestrator debug [on\|off\|status]` | Toggle redacted decision JSONL logs; show state and filesystem path |
+| `/orchestrator debug [on\|off\|status]` | Select a mode when omitted; control redacted decision JSONL logs or show status |
 | `/orchestrator drafts` | Recover held, unsent text drafts (process-local, never automatically executed) |
+
+Commands accepting an existing virtual session offer a selection menu when the
+name/ID is omitted. The selected group appears first and is marked; deletion and
+attachment still require confirmation. Explicit name/ID arguments bypass the
+menu. Canceling a selection or name prompt makes no changes. Empty selection lists
+show a helpful message instead of an empty dialog.
 
 Deletion removes the virtual session's membership, usage, and request metadata,
 but never deletes real Pi transcript files. Deleting the selected virtual session
@@ -126,12 +132,21 @@ use the appropriate reachable host/service address and pass the environment
 variables into the container. See the [Laya English Docker Compose example](../../../example/laya/README.md)
 for a CPU-only Jev-compatible server, test request, and wpi configuration.
 
-Up to three candidates are submitted using only their last ten user/assistant
-messages, an opaque routing key, a current-session flag, and context-token/window
-counts, alongside the incoming request. Session names, original goals, and lifetime
-usage/spending are not sent to the routing classifier. Token counts are prompt-cost
+Up to three candidates are submitted using only their latest 50 user/assistant
+messages, an opaque routing key, session ID/name, a current-session flag, and
+context-token/window counts, alongside the incoming request. IDs and names resolve
+explicit user session references, not task fit. Referenced IDs/names receive
+shortlist priority. Original goals and lifetime usage/spending are not sent to the
+routing classifier. Token counts are prompt-cost
 proxies, not exact next-request dollar prices; missing counts remain unknown.
 Usage accounting remains available locally.
+
+Both decision prompts prioritize explicit preferences in the incoming user request
+over inferred task fit and cost savings: route to the requested eligible session
+(or current/new session), and honor requests for or against a handoff. Requesting a
+session alone does not imply a handoff. Ambiguous or unavailable targets must not
+be guessed, and existing confidence gates still apply. Historical or quoted
+instructions do not establish a current user preference.
 
 The classifier balances continuity with useful task separation. Dependent follow-ups,
 corrections, tests, and refinements normally stay in the current session. Another
@@ -148,11 +163,17 @@ Routing itself does not trigger compaction; model-requested compaction is descri
 
 Each summary refreshes
 at every `turn_end`, at agent completion, and before routing. It is a bounded,
-extractive view of the active branch's latest ten nonempty user/assistant messages,
-newest first. Full text and tool call names/arguments are retained without character
-truncation; tool results, thinking, and image payloads are excluded. Call-only
-assistant messages count toward the ten-message limit. Calls indicate attempted
-actions, not verified success. This adds no model calls, but full messages can
+extractive view of the active branch's latest 50 nonempty user/assistant text
+messages, newest first. New summaries remain JSON strings in the registry, encoding
+an array of `{ "role": "user"|"assistant", "content": "full message text" }`
+objects (newest first). The decision API receives that array as a genuine nested
+JSON array. UI lists and handoff consumers project structured summaries to readable
+role-prefixed text.
+Full text is retained without character truncation; tool
+calls, tool results, reasoning, and image payloads are excluded. Tool-only,
+reasoning-only, and whitespace-only messages do not count toward the limit.
+Assistant claims are not independent verification of successful actions. This
+adds no model calls, but full messages can
 increase classifier input substantially. Routing uses this evolving context rather
 than the original request; existing registry `summary` fields remain compatible.
 There is no separate `goal` field or name-based routing fallback. Legacy registry
@@ -345,7 +366,7 @@ No session-member lists or routing reminders are automatically injected into the
 conversation. Tool descriptions guide the agent to call **`list_sessions`** to inspect
 available members, including the current member, without changing sessions. Results
 include IDs, names, last activity, context-token estimates, and summaries of the
-latest ten user/assistant messages. Saved member transcripts are read without
+latest 50 user/assistant text messages, excluding tools and reasoning. Saved member transcripts are read without
 opening or migrating them, and their workspace/session identity is checked.
 
 The list is paginated with `offset` and `limit` (default/max ten), and `next_offset`
@@ -438,7 +459,7 @@ factory creation. It does not globally capture Enter or replace modal editing.
   `/orchestrator drafts` can recover the others. These drafts are process-local, not
   durable across process exits. A full cross-session execution queue is deferred.
 
-The checked development API version is Pi **0.99.1**. The history adapter
+The checked development API version is Pi **1.0.0** (the version pinned in `src/version.ts`). The history adapter
 supports the Pi **0.79.1** context renderer and Pi **0.99.1** renderer API.
 Other versions/editors need compatibility testing. The extension remains
 opt-in until `/orchestrator` enables routing.

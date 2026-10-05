@@ -6,24 +6,43 @@ function messageContext(message: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.flatMap(item => {
     if (item.type === "text" && typeof item.text === "string") return [item.text];
-    if (item.type === "toolCall") return [`tool call: ${item.name} ${JSON.stringify(item.arguments ?? {})}`];
-    // Thinking, images, and tool outputs are not routing context.
+    // Tool calls/results, reasoning, and images are not routing context.
     return [];
   }).join("\n");
 }
 
-/** Extractive routing context: ten full user/assistant messages, newest first.
- * No model calls, text truncation, thinking, or tool results. Tool names and
- * arguments are retained, including assistant messages containing only calls.
- * Callers supply only the active branch.
- */
+/** Structured extractive context stored as a JSON string for registry compatibility. */
 export function sessionContextSummary(entries: SessionEntry[]): string {
-  const messages: string[] = [];
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const entry of entries) {
     if (entry.type !== "message" || !["user", "assistant"].includes(entry.message.role)) continue;
-    const text = messageContext(entry.message);
-    if (text) messages.push(`${entry.message.role}: ${text}`);
+    const content = messageContext(entry.message);
+    if (content.trim()) messages.push({ role: entry.message.role as "user" | "assistant", content });
   }
-  return messages.slice(-10).reverse().map((message, index) =>
-    `${index === 0 ? "Latest message" : "Earlier message"}:\n${message}`).join("\n\n");
+  return JSON.stringify(messages.slice(-50).reverse());
+}
+
+export type ContextMessage = { role: "user" | "assistant"; content: string };
+
+/** Summaries stored before the structured format: "Latest message:\nuser: …\n\nEarlier message:\n…". */
+function decodeLegacySummary(summary: string): ContextMessage[] {
+  return summary.split(/(?:^|\n\n)(?:Latest|Earlier) message:\n/).flatMap(block => {
+    const match = /^(user|assistant): ([\s\S]*)$/.exec(block);
+    return match && match[2].trim() ? [{ role: match[1] as ContextMessage["role"], content: match[2] }] : [];
+  });
+}
+
+/** Decode structured summaries; invalid or absent stored data yields an empty context. */
+export function decodeSessionContextSummary(summary: string): ContextMessage[] {
+  let value: unknown;
+  try { value = JSON.parse(summary); } catch { return decodeLegacySummary(summary); }
+  if (!Array.isArray(value) || value.some(item => !item || typeof item !== "object" || Array.isArray(item) ||
+      !["user", "assistant"].includes(item.role) || typeof item.content !== "string")) return [];
+  return value.map(item => ({ role: item.role, content: item.content }));
+}
+
+/** Human-readable projection for UI and text-only consumers. */
+export function readableSessionContextSummary(summary: string): string {
+  return decodeSessionContextSummary(summary).map((message, index) =>
+    `${index === 0 ? "Latest message" : "Earlier message"}:\n${message.role}: ${message.content}`).join("\n\n");
 }

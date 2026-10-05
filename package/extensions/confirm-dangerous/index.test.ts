@@ -8,9 +8,9 @@
 // at runtime inside the pi agent, not in this test environment.
 // ============================================================
 
-import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, symlinkSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 
 // Clear env var so the default /workspace is used in tests.
@@ -37,9 +37,18 @@ import confirmDangerous, {
   isAllowedPath,
   isTmpRmCommand,
   isSafeRmCommand,
+  resolveToolPath,
   DANGEROUS_PATTERNS,
   WORKSPACE_DIR,
 } from "./index";
+
+// wpi mirrors the host identity inside the container, so the home directory
+// is the host's (a macOS-style path here), never a fixed /home/pi-user.
+const HOME = "/Users/alice";
+const PI_DIR = `${HOME}/.pi`;
+const WORKTREE = `${PI_DIR}/worktrees/--Users-alice-project--/feature-abc123`;
+beforeEach(() => { vi.spyOn(os, "homedir").mockReturnValue(HOME); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 // ── isOutsideWorkspace ──────────────────────────────────────
 
@@ -79,29 +88,101 @@ describe("isOutsideWorkspace", () => {
     expect(isOutsideWorkspace("/workspace/file", "/myproject")).toBe(true);
     expect(isOutsideWorkspace("src/index.ts", "/myproject")).toBe(false);
   });
+
+  it("does not let parent-directory segments walk out of the workspace", () => {
+    for (const escape of [
+      "../../etc/passwd", "../outside.txt", "src/../../outside.txt",
+      "/workspace/../etc/passwd", "/workspace/src/../../../etc/hosts", "/workspace/..",
+    ]) {
+      expect(isOutsideWorkspace(escape), escape).toBe(true);
+    }
+    for (const inside of ["src/../README.md", "./src/./index.ts", "/workspace/a/../b.txt"]) {
+      expect(isOutsideWorkspace(inside), inside).toBe(false);
+    }
+  });
+
+  it("expands the forms Pi's file tools expand before judging a path", () => {
+    // "~" is the home directory, not a directory named "~" in the workspace.
+    expect(isOutsideWorkspace("~/.ssh/authorized_keys")).toBe(true);
+    expect(isOutsideWorkspace("~")).toBe(true);
+    // A leading "@" is dropped by Pi.
+    expect(isOutsideWorkspace("@/etc/passwd")).toBe(true);
+    expect(isOutsideWorkspace("@src/index.ts")).toBe(false);
+    // file:// URLs are converted to paths.
+    expect(isOutsideWorkspace("file:///etc/passwd")).toBe(true);
+    expect(isOutsideWorkspace("file:///workspace/src/index.ts")).toBe(false);
+    // Unicode spaces are normalized, so they cannot hide a "~/" prefix.
+    expect(resolveToolPath("~/My\u00A0Notes.md")).toBe(`${HOME}/My Notes.md`);
+  });
+
+  it("resolves relative paths against the tool's cwd, not the workspace root", () => {
+    expect(isOutsideWorkspace("notes.md", "/workspace", "/workspace/packages/app")).toBe(false);
+    expect(isOutsideWorkspace("../../notes.md", "/workspace", "/workspace/packages/app")).toBe(false);
+    expect(isOutsideWorkspace("../../../notes.md", "/workspace", "/workspace/packages/app")).toBe(true);
+    // A session running in a worktree is not inside the launch workspace.
+    expect(isOutsideWorkspace("src/index.ts", "/workspace", WORKTREE)).toBe(true);
+  });
+
+  it("follows symlinks, so a link inside the workspace cannot point a write elsewhere", () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "confirm-dangerous-")));
+    const workspace = path.join(root, "workspace");
+    const outside = path.join(root, "outside");
+    try {
+      mkdirSync(path.join(workspace, "src"), { recursive: true });
+      mkdirSync(outside);
+      writeFileSync(path.join(outside, "secret.txt"), "x");
+      symlinkSync(outside, path.join(workspace, "escape"));                         // directory link
+      symlinkSync(path.join(outside, "secret.txt"), path.join(workspace, "file"));  // file link
+      symlinkSync(path.join(outside, "new.txt"), path.join(workspace, "dangling")); // target not created yet
+      symlinkSync(path.join(workspace, "src"), path.join(workspace, "alias"));      // stays inside
+
+      expect(isOutsideWorkspace(`${workspace}/escape/secret.txt`, workspace)).toBe(true);
+      expect(isOutsideWorkspace("escape/brand-new.txt", workspace)).toBe(true);
+      expect(isOutsideWorkspace("file", workspace)).toBe(true);
+      expect(isOutsideWorkspace("dangling", workspace)).toBe(true);
+      expect(isOutsideWorkspace("alias/index.ts", workspace)).toBe(false);
+      expect(isOutsideWorkspace("src/not/created/yet.ts", workspace)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── isPiConfigDir ────────────────────────────────────────────
 
 describe("isPiConfigDir", () => {
-  it("allows paths inside the pi config directory", () => {
-    expect(isPiConfigDir("/home/pi-user/.pi/agent/settings.json")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/agent/extensions")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/agent/sessions/abc.jsonl")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/agent/auth.json")).toBe(true);
+  it("allows paths inside the pi config directory of the mirrored home", () => {
+    expect(isPiConfigDir(`${PI_DIR}/agent/settings.json`)).toBe(true);
+    expect(isPiConfigDir(`${PI_DIR}/agent/extensions`)).toBe(true);
+    expect(isPiConfigDir(`${PI_DIR}/agent/sessions/abc.jsonl`)).toBe(true);
+    expect(isPiConfigDir("~/.pi/agent/extensions/my-ext/index.ts")).toBe(true);
   });
 
-  it("allows paths under /home/pi-user/.pi/ (full mount point)", () => {
-    expect(isPiConfigDir("/home/pi-user/.pi/agent")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/wpi.yml")).toBe(true);
-    expect(isPiConfigDir("/home/pi-user/.pi/agent/extensions/my-ext/index.ts")).toBe(true);
+  it("does not cover the launcher config, which wpi applies on the host", () => {
+    expect(isPiConfigDir(`${PI_DIR}/wpi.yml`)).toBe(false);
+    expect(isPiConfigDir("~/.pi/wpi.yml")).toBe(false);
+    expect(isPiConfigDir(`${PI_DIR}/agent/../wpi.yml`)).toBe(false);
+    expect(isAllowedPath(`${PI_DIR}/wpi.yml`)).toBe(false);
+  });
+
+  it("covers worktrees, which the worktree extension keeps under ~/.pi", () => {
+    expect(isPiConfigDir(`${WORKTREE}/src/index.ts`)).toBe(true);
+    // Relative to a session whose cwd is the worktree.
+    expect(isPiConfigDir("src/index.ts", WORKTREE)).toBe(true);
+    expect(isPiConfigDir("../../../../.ssh/id_rsa", WORKTREE)).toBe(false);
+  });
+
+  it("is not tied to a fixed /home/pi-user location", () => {
+    expect(isPiConfigDir("/home/pi-user/.pi/agent/settings.json")).toBe(false);
   });
 
   it("blocks paths outside the pi config directory", () => {
     expect(isPiConfigDir("/etc/passwd")).toBe(false);
     expect(isPiConfigDir("/workspace/.env")).toBe(false);
-    expect(isPiConfigDir("/home/pi-user/.bashrc")).toBe(false);
-    expect(isPiConfigDir("/home/pi-user/.ssh/config")).toBe(false);
+    expect(isPiConfigDir(`${HOME}/.bashrc`)).toBe(false);
+    expect(isPiConfigDir(`${HOME}/.ssh/config`)).toBe(false);
+    expect(isPiConfigDir(`${HOME}/.pi-other/file`)).toBe(false);
+    expect(isPiConfigDir("~/.pi/../.ssh/id_rsa")).toBe(false);
   });
 });
 
@@ -128,7 +209,7 @@ describe("isTmpPath", () => {
     expect(isTmpPath("/etc/passwd")).toBe(false);
     expect(isTmpPath("/var/log")).toBe(false);
     expect(isTmpPath("/workspace/file")).toBe(false);
-    expect(isTmpPath("/home/pi-user/.pi/agent")).toBe(false);
+    expect(isTmpPath(`${PI_DIR}/agent`)).toBe(false);
   });
 
   it("does not match /tmp-like paths", () => {
@@ -141,13 +222,21 @@ describe("isTmpPath", () => {
 
 describe("isAllowedPath", () => {
   it("allows pi config dir paths", () => {
-    expect(isAllowedPath("/home/pi-user/.pi/agent/settings.json")).toBe(true);
-    expect(isAllowedPath("/home/pi-user/.pi/agent/extensions/my-ext")).toBe(true);
+    expect(isAllowedPath(`${PI_DIR}/agent/settings.json`)).toBe(true);
+    expect(isAllowedPath(`${PI_DIR}/agent/extensions/my-ext`)).toBe(true);
+    expect(isAllowedPath("src/index.ts", WORKTREE)).toBe(true);
   });
 
   it("allows /tmp paths", () => {
     expect(isAllowedPath("/tmp/build.log")).toBe(true);
     expect(isAllowedPath("/tmp")).toBe(true);
+  });
+
+  it("does not treat a path that merely starts in an allowed location as allowed", () => {
+    expect(isAllowedPath("/tmp/../etc/passwd")).toBe(false);
+    expect(isAllowedPath(`${PI_DIR}/../.ssh/id_rsa`)).toBe(false);
+    // Relative "tmp/..." is a workspace path, not /tmp.
+    expect(isAllowedPath("tmp/file")).toBe(false);
   });
 
   it("blocks other paths outside workspace", () => {
@@ -483,8 +572,8 @@ describe("write protection logic", () => {
   });
 
   it("allows writes to pi config dir even if outside workspace", () => {
-    expect(isOutsideWorkspace("/home/pi-user/.pi/agent/settings.json")).toBe(true);
-    expect(isAllowedPath("/home/pi-user/.pi/agent/settings.json")).toBe(true);
+    expect(isOutsideWorkspace(`${PI_DIR}/agent/settings.json`)).toBe(true);
+    expect(isAllowedPath(`${PI_DIR}/agent/settings.json`)).toBe(true);
   });
 
   it("allows writes to /tmp even if outside workspace", () => {
@@ -495,6 +584,78 @@ describe("write protection logic", () => {
   it("blocks writes that are outside workspace and not in allowed paths", () => {
     expect(isOutsideWorkspace("/etc/passwd")).toBe(true);
     expect(isAllowedPath("/etc/passwd")).toBe(false);
+  });
+});
+
+// ── Write/edit tool-call confirmation behavior ───────────────
+
+describe("write and edit tool-call confirmations", () => {
+  async function callFileTool(toolName: "write" | "edit" | "read", filePath: string, options: { cwd?: string; approve?: boolean } = {}) {
+    let handler: (event: any, ctx: any) => Promise<unknown> = async () => undefined;
+    confirmDangerous({ on: (_name: string, callback: typeof handler) => { handler = callback; } } as any);
+    const confirm = vi.fn().mockResolvedValue(options.approve ?? false);
+    const result = await handler({ toolName, input: { path: filePath } }, { cwd: options.cwd ?? "/workspace", ui: { confirm } });
+    return { confirm, result };
+  }
+
+  it("does not prompt inside the workspace, /tmp, or the pi config directory", async () => {
+    for (const tool of ["write", "edit"] as const) {
+      for (const filePath of [
+        "src/index.ts", "/workspace/src/index.ts", "src/../README.md",
+        "/tmp/scratch.txt", `${PI_DIR}/agent/notes.md`, "~/.pi/agent/notes.md",
+      ]) {
+        const { confirm, result } = await callFileTool(tool, filePath);
+        expect(confirm, `${tool} ${filePath}`).not.toHaveBeenCalled();
+        expect(result, `${tool} ${filePath}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("does not prompt for files of a worktree session", async () => {
+    for (const filePath of ["src/index.ts", `${WORKTREE}/src/index.ts`]) {
+      const { confirm, result } = await callFileTool("edit", filePath, { cwd: WORKTREE });
+      expect(confirm, filePath).not.toHaveBeenCalled();
+      expect(result, filePath).toBeUndefined();
+    }
+  });
+
+  it("prompts, and blocks when declined, however an outside path is spelled", async () => {
+    for (const tool of ["write", "edit"] as const) {
+      for (const filePath of [
+        "/etc/hosts", "../../etc/hosts", "/workspace/../etc/hosts", "~/.ssh/authorized_keys",
+        "@/etc/hosts", "file:///etc/hosts", `${HOME}/.bashrc`, "/tmp/../etc/hosts",
+      ]) {
+        const { confirm, result } = await callFileTool(tool, filePath);
+        expect(confirm, `${tool} ${filePath}`).toHaveBeenCalledOnce();
+        expect(result, `${tool} ${filePath}`).toEqual({ block: true, reason: `Blocked: ${tool} outside /workspace` });
+      }
+    }
+  });
+
+  it("shows where the write really lands, plus the spelling that was requested", async () => {
+    const { confirm } = await callFileTool("write", "~/.ssh/authorized_keys");
+    const [title, message] = confirm.mock.calls[0];
+    expect(title).toBe("Write Outside Workspace");
+    expect(message).toContain(`${HOME}/.ssh/authorized_keys`);
+    expect(message).toContain("(requested as: ~/.ssh/authorized_keys)");
+
+    // No symlinks and nothing to expand: the path is shown once, as given.
+    const literal = await callFileTool("edit", "/wpi-test-missing-dir/hosts");
+    expect(literal.confirm.mock.calls[0][0]).toBe("Edit Outside Workspace");
+    expect(literal.confirm.mock.calls[0][1]).toContain("\n\n/wpi-test-missing-dir/hosts\n\n");
+    expect(literal.confirm.mock.calls[0][1]).not.toContain("requested as");
+  });
+
+  it("lets the call through once the user approves", async () => {
+    const { confirm, result } = await callFileTool("write", "/etc/hosts", { approve: true });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(result).toBeUndefined();
+  });
+
+  it("never prompts for reads", async () => {
+    const { confirm, result } = await callFileTool("read", "~/.ssh/id_rsa");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(result).toBeUndefined();
   });
 });
 

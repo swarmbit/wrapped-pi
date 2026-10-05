@@ -17,7 +17,7 @@
 // ============================================================
 
 import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
-import { buildImage, runContainer, shellInContainer, execInContainer, buildDockerRunArgs } from "./docker";
+import { buildImage, cleanImages, runContainer, shellInContainer, execInContainer, buildDockerRunArgs, formatDockerArgs, partitionEnv } from "./docker";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
@@ -29,8 +29,12 @@ Usage: wpi [command] [options] [-- PI_ARGS...]
 
 Commands:
   (default)     Run pi in Docker (interactive session)
-  build         Build or rebuild the Docker image
+  build         Build or rebuild the Docker image (also happens automatically
+                when the image for the current config does not exist yet)
   shell [id]    Open a shell in a new container, or exec into an existing one by ID/name
+  clean         Remove pi-agent images other than the one the current config uses
+                (older wpi versions, changed docker.extension, other projects;
+                any that is still needed is rebuilt on its next run)
   dry-run       Print resolved config and docker commands without executing
 
 Options:
@@ -59,7 +63,7 @@ Port config precedence (highest wins):
 
 Config file schema:
   pi:
-    version: 0.76.0     # override the pi version used (default: baked-in)
+    version: ${PI_VERSION}      # override the pi version used (default: baked-in)
   docker:
     ports:
       - 3000        # dev server
@@ -67,7 +71,7 @@ Config file schema:
       - 8080:80     # host 8080 → container 80
     mounts:
       - /var/run/docker.sock:/var/run/docker.sock  # docker socket
-      - ~/.ssh:/home/pi-user/.ssh:ro                # ssh keys (read-only)
+      - ~/.ssh:~/.ssh:ro                            # ssh keys (read-only)
     env:
       CUSTOM_ENV: sk-xxx  # passed to the container
     memory: 4g
@@ -106,7 +110,7 @@ async function main(): Promise<void> {
   }
 
   // Parse our args
-  let command: "run" | "build" | "shell" | "dry-run" = "run";
+  let command: "run" | "build" | "shell" | "clean" | "dry-run" = "run";
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
   let cliDebug = false;
@@ -142,6 +146,8 @@ async function main(): Promise<void> {
         shellContainerId = nextArg;
         i++; // skip the container ID
       }
+    } else if (arg === "clean") {
+      command = "clean";
     } else if (arg === "dry-run") {
       command = "dry-run";
     } else {
@@ -230,6 +236,9 @@ async function main(): Promise<void> {
     case "shell":
       await shellInContainer(config);
       break;
+    case "clean":
+      cleanImages(config);
+      break;
     case "run":
       await runContainer(config, piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"]);
       break;
@@ -261,9 +270,10 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
   console.log(`  workspaceDir:   ${config.workspaceDir}`);
   console.log(`  configDir:      ${config.configDir}`);
   if (Object.keys(config.env).length > 0) {
+    // Values are often credentials: show which keys are set, never what they hold.
     console.log("  env:");
     for (const [key, value] of Object.entries(config.env)) {
-      console.log(`    ${key}: ${value}`);
+      console.log(`    ${key}: *** (${String(value).length} chars)`);
     }
   } else {
     console.log(`  env:            (none)`);
@@ -299,9 +309,11 @@ function printDryRun(config: ReturnType<typeof loadConfig>, piArgs: string[]): v
   console.log(`  Project config: ${config.containerDir ? config.containerDir + "/wpi.yml" : "(no .pi dir)"}`);
   console.log();
   const cmd = piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"];
-  const runArgs = buildDockerRunArgs(config, cmd);
+  // A real run writes docker.env to a private temp file; show a stand-in for it.
+  const hasEnvFile = Object.keys(partitionEnv(config.env).file).length > 0;
+  const runArgs = buildDockerRunArgs(config, cmd, { envFile: hasEnvFile ? "<private env file>" : undefined });
   console.log("Docker run command:");
-  console.log(`  docker ${runArgs.join(" ")}`);
+  console.log(`  docker ${formatDockerArgs(runArgs, config.env)}`);
   console.log();
   const buildArgs = [
     "docker",

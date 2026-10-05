@@ -2,17 +2,25 @@
 // wpi — Config discovery and loading
 // ============================================================
 // Configurable settings: ports, env, and mounts.
-// Pi version and image are baked into this npm package.
+// The default pi version is baked into this npm package.
 //
-// Config precedence (highest wins):
-//   1. CLI flags              (-p, --port)
-//   2. User config            (~/.pi/wpi.yml)
-//   3. Project config           (.pi/wpi.yml)
-//   4. (none — no built-in defaults for ports/env/mounts)
+// Config precedence depends on the kind of setting:
+//
+//   Personal runtime settings — the user's choice wins:
+//     ports             CLI flags (-p, --port) > user config > project config
+//     env               user config overrides project config per key
+//     mounts, volumes   merged; user entries win on the same container path
+//
+//   Settings that define the shared environment — the project's choice wins:
+//     pi.version, docker.extension, docker.memory, docker.memorySwap,
+//     git.user.*        project config > user config > default
+//
+//   User config:    ~/.pi/wpi.yml   (personal, not committed)
+//   Project config: .pi/wpi.yml     (team-committed)
 //
 // Config file schema:
 //   pi:
-//     version: 0.83.0      # override pi version (default: baked-in)
+//     version: 1.0.0       # override pi version (default: baked-in)
 //   docker:
 //     ports:
 //       - 3000
@@ -21,7 +29,7 @@
 //       ANTHROPIC_API_KEY: sk-xxx
 //     mounts:
 //       - /var/run/docker.sock:/var/run/docker.sock
-//       - ~/.ssh:/home/pi-user/.ssh:ro
+//       - ~/.ssh:~/.ssh:ro
 //     volumes:
 //       - cache-vol:/home/user/.cache
 //     memory: 4g
@@ -38,6 +46,8 @@ import * as path from "path";
 import * as fs from "fs";
 import { spawnSync } from "child_process";
 import yaml from "js-yaml";
+import { imageTag } from "./image";
+import { PI_VERSION } from "./version";
 
 // ── Debug logging ────────────────────────────────────────────
 
@@ -59,11 +69,7 @@ export function debugLog(...args: unknown[]): void {
 
 // ── Package constants ──────────────────────────────────────────
 
-/** Pi version shipped by this version of wpi. */
-export const PI_VERSION = "0.99.1";
-
-/** Docker image tag derived from the pi version. */
-export const PI_IMAGE = `pi-agent:${PI_VERSION}`;
+export { PI_VERSION };
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -120,7 +126,10 @@ export interface RuntimeContext {
   projectDir: string;     // absolute path — CWD
   workspaceDir: string;   // absolute path — CWD - inside container
   debug: boolean;         // debug mode enabled
-  /** Docker image tag derived from piVersion. Not user-configurable. */
+  /**
+   * Docker image tag: pi-agent:<piVersion>-<fingerprint of the build inputs>.
+   * Derived, not user-configurable. See image.ts.
+   */
   piImage: string;
 }
 
@@ -223,8 +232,9 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
     userConfig.pi?.version ??
     PI_VERSION;
 
-  // Docker image tag derived from the resolved pi version (not user-configurable)
-  const piImage = `pi-agent:${piVersion}`;
+  // Docker image tag derived from the resolved pi version and everything else
+  // that goes into the build (not user-configurable)
+  const piImage = imageTag(piVersion, dockerfileExtension);
 
   // Git user name: project config > user config > host git config
   const gitUserName: string | undefined =

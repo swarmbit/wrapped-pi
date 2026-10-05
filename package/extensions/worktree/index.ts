@@ -26,7 +26,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { type SessionInfo, SessionManager } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as os from "node:os";
 import { writeFileSync, unlinkSync, rmdirSync, readdirSync } from "node:fs";
 
@@ -72,7 +72,7 @@ function containerToHostPath(containerPath: string): string | undefined {
   const hostHome = process.env.PI_HOST_HOME;
   if (!hostHome) return undefined;
 
-  const containerHome = os.homedir(); // /home/pi-user
+  const containerHome = os.homedir(); // mirrors the host home under wpi
   if (containerPath.startsWith(containerHome + path.sep)) {
     return path.join(hostHome, containerPath.slice(containerHome.length));
   }
@@ -164,9 +164,15 @@ export function getWorktreePath(cwd: string, worktreeName: string): string {
 
 // ── Git helpers ──────────────────────────────────────────────
 
+// Branch names may contain shell metacharacters ($(...), ;, |). Always pass
+// refs as arguments, never interpolated into a shell command line.
+function git(args: string[]): string {
+  return execFileSync("git", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
 export function getCurrentBranch(): string {
   try {
-    return execSync("git rev-parse --abbrev-ref HEAD", { encoding: "utf-8" }).trim();
+    return git(["rev-parse", "--abbrev-ref", "HEAD"]);
   } catch {
     return "HEAD";
   }
@@ -174,7 +180,7 @@ export function getCurrentBranch(): string {
 
 export function getShortHash(ref: string = "HEAD"): string {
   try {
-    return execSync(`git rev-parse --short ${ref}`, { encoding: "utf-8" }).trim();
+    return git(["rev-parse", "--short", ref]);
   } catch {
     return "unknown";
   }
@@ -245,7 +251,7 @@ export async function createWorktree(
   // even if the current session is inside a worktree.
   const projectCwd = resolveProjectCwd(ctx.cwd);
   try {
-    execSync("git rev-parse --git-dir", { encoding: "utf-8", stdio: "pipe" });
+    git(["rev-parse", "--git-dir"]);
   } catch {
     return { error: "Not a git repository. Initialize git first." };
   }
@@ -303,6 +309,8 @@ export async function createWorktree(
 
 export interface DeleteResult {
   error?: string;
+  /** The user declined to discard uncommitted changes; nothing was deleted. */
+  cancelled?: boolean;
   deletedSessions?: number;
 }
 
@@ -341,6 +349,22 @@ export async function deleteWorktree(
         `Cannot delete worktree "${worktreeName}" while your session is inside it. ` +
         `Switch to a different session first.`,
     };
+  }
+
+  // `git worktree remove --force` discards modified and untracked files without
+  // asking. Make losing uncommitted work an explicit choice.
+  const status = await pi.exec("git", ["-C", entry.path, "status", "--porcelain"]);
+  const uncommitted = status.code === 0 ? (status.stdout || "").split("\n").filter((line) => line.trim()) : [];
+  if (uncommitted.length > 0) {
+    const preview = uncommitted.slice(0, 10).join("\n") + (uncommitted.length > 10 ? `\n… and ${uncommitted.length - 10} more` : "");
+    const discard = await ctx.ui.confirm(
+      "Uncommitted Changes",
+      `Worktree "${worktreeName}" has ${uncommitted.length} uncommitted change(s):\n\n${preview}\n\nDelete it anyway? These changes cannot be recovered.`
+    );
+    if (!discard) {
+      log(`deleteWorktree: cancelled, ${uncommitted.length} uncommitted change(s) in ${entry.path}`);
+      return { cancelled: true };
+    }
   }
 
   // Remove the git worktree (deletes directory and files)
@@ -580,6 +604,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       const result = await deleteWorktree(pi, ctx, worktreeName, { deleteSessions });
+      if (result.cancelled) {
+        ctx.ui.notify("Delete cancelled; the worktree and its changes were kept.", "info");
+        return;
+      }
       if (result.error) {
         ctx.ui.notify(result.error, "error");
         return;

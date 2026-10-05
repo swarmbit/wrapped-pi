@@ -134,6 +134,26 @@ export class SessionSecrets {
         this.redactor.registerSecret(match[2].replace(/\\n/g, "\n").replace(/\\r/g, "\r"));
       }
     }
+    // Dotenv-style files hold literals, never expressions. Learn each unquoted value
+    // whole, whatever it looks like: the free-text scan above stops at punctuation
+    // and treats identifier-shaped values (`SMTP_PASSWORD=abcdefghijklmnop`) as code.
+    const basename = path.basename(filename);
+    if (/^\.env(?:\.|$)/.test(basename) || basename.endsWith(".env") || basename === ".npmrc") {
+      for (const match of text.matchAll(/^[ \t]*(?:export[ \t]+)?([^\s=#]+)[ \t]*=[ \t]*([^\s"'#][^\r\n]*?)[ \t]*(?:[ \t]#[^\r\n]*)?\r?$/gm)) {
+        if (this.redactor.isCredentialName(match[1])) this.redactor.registerSecret(match[2]);
+      }
+    }
+    // Configuration files hold literals too. The free-text scan masks an unquoted
+    // letters-only value (`db_password: correcthorsebattery`) only where it is
+    // assigned, because in source code that shape is an identifier; here it is the
+    // credential itself and must be recognized wherever it turns up.
+    if (/\.(?:ya?ml|toml|ini|cfg|conf|properties)$/i.test(basename)) {
+      for (const match of text.matchAll(/^[ \t-]*["']?([A-Za-z_][\w.-]*)["']?[ \t]*[:=][ \t]*([^\s"'#|>&*!{[][^\r\n]*?)[ \t]*(?:[ \t]#[^\r\n]*)?\r?$/gm)) {
+        if (this.redactor.isCredentialName(match[1]) && !/^(?:true|false|null|yes|no|on|off|~)$/i.test(match[2])) {
+          this.redactor.registerSecret(match[2]);
+        }
+      }
+    }
     this.scanned.set(filename, stamp);
   }
 

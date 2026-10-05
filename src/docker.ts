@@ -13,6 +13,11 @@
 //   - Built-in package/ and settings/ are always copied from
 //     the installed module — pi install at runtime handles
 //     any additional packages
+//   - The image tag is a fingerprint of the build context
+//     (see image.ts), so a missing tag means "needs a build"
+//   - docker.env values reach the container through a private
+//     env file, not the docker command line, so they do not
+//     show up in process listings
 // ============================================================
 
 import * as path from "path";
@@ -20,10 +25,7 @@ import * as fs from "fs";
 import * as os from "os";
 import { spawnSync, spawn, SpawnSyncReturns } from "child_process";
 import { PiContainerConfig, RuntimeContext, debugLog, isDebug } from "./config";
-import { generateDockerfile, generateEntrypoint } from "./templates";
-
-// Module root (sibling to dist/)
-const MODULE_ROOT = path.join(__dirname, "..");
+import { collectBuildContext, IMAGE_REPOSITORY } from "./image";
 
 // ── Image management ────────────────────────────────────────
 
@@ -33,6 +35,39 @@ export function imageExists(tag: string): boolean {
   const exists = result.status === 0;
   debugLog(`Image ${tag} exists: ${exists}${exists ? "" : " (stderr: " + result.stderr.toString().trim() + ")"}`);
   return exists;
+}
+
+/**
+ * Tags of the images wpi built for other build inputs: earlier wpi versions,
+ * earlier docker.extension contents, or other projects. Each distinct set of
+ * inputs gets its own tag (see image.ts), and nothing replaces an old one.
+ */
+export function listOtherImages(keep: string): string[] {
+  const result = spawnSync("docker", ["image", "ls", IMAGE_REPOSITORY, "--format", "{{.Repository}}:{{.Tag}}"], { stdio: "pipe" });
+  if (result.status !== 0) return [];
+  return result.stdout.toString().split("\n").map((line) => line.trim())
+    .filter((tag) => tag && tag !== keep && !tag.endsWith(":<none>"));
+}
+
+/** Remove every wpi image except the one the current config uses. */
+export function cleanImages(config: { piImage: string }): void {
+  const others = listOtherImages(config.piImage);
+  if (others.length === 0) {
+    console.log("✅ No other pi-agent images to remove.");
+    return;
+  }
+  let removed = 0;
+  for (const tag of others) {
+    // No --force: an image a running container still uses is left alone.
+    const result = spawnSync("docker", ["image", "rm", tag], { stdio: "pipe" });
+    if (result.status === 0) {
+      removed++;
+      console.log(`🗑️  Removed ${tag}`);
+    } else {
+      console.log(`⏭️  Kept ${tag}: ${result.stderr.toString().trim() || "docker image rm failed"}`);
+    }
+  }
+  console.log(`✅ Removed ${removed} of ${others.length} image(s); kept ${config.piImage}.`);
 }
 
 // ── Build ───────────────────────────────────────────────────
@@ -73,6 +108,10 @@ export function buildImage(config: { piVersion: string; piImage: string; dockerf
     }
 
     console.log(`✅ Built ${config.piImage}`);
+    const others = listOtherImages(config.piImage).length;
+    if (others > 0) {
+      console.log(`ℹ️  ${others} other pi-agent image(s) are still stored. Run 'wpi clean' to remove them.`);
+    }
   } finally {
     // Clean up temp directory
     debugLog(`Cleaning up build context: ${buildCtx}`);
@@ -153,32 +192,42 @@ function spawnDocker(args: string[], debug: boolean): Promise<SpawnSyncReturns<B
   });
 }
 
-export async function runContainer(config: PiContainerConfig & RuntimeContext, piArgs: string[]): Promise<void> {
-  debugLog("runContainer called with piArgs:", piArgs);
-  buildIfNeeded(config);
-
-  // Ensure named docker volumes exist
-  if (config.volumes && config.volumes.length > 0) {
-    for (const v of config.volumes) {
-      debugLog(`Ensuring docker volume exists: ${v.name}`);
-      try {
-        // `docker volume create` is idempotent — it will succeed if the volume exists
-        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
-        if (isDebug() && res.stdout) {
-          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
-        }
-        if (isDebug() && res.stderr) {
-          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
-        }
-      } catch (e) {
-        debugLog(`Error creating docker volume ${v.name}: ${e}`);
+/** `docker volume create` is idempotent — it succeeds if the volume already exists. */
+function ensureVolumes(config: PiContainerConfig): void {
+  for (const v of config.volumes ?? []) {
+    debugLog(`Ensuring docker volume exists: ${v.name}`);
+    try {
+      const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
+      if (isDebug() && res.stdout) {
+        debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
       }
+      if (isDebug() && res.stderr) {
+        debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
+      }
+    } catch (e) {
+      debugLog(`Error creating docker volume ${v.name}: ${e}`);
     }
   }
+}
 
-  const args = buildDockerRunArgs(config, piArgs);
-  debugLog(`Running: docker ${args.join(" ")}`);
-  const result = await spawnDocker(args, config.debug);
+/** Run a command in a fresh container and return docker's result. */
+async function launch(config: PiContainerConfig & RuntimeContext, command: string[]): Promise<SpawnSyncReturns<Buffer>> {
+  buildIfNeeded(config);
+  ensureVolumes(config);
+
+  const envFile = writeEnvFile(config.env);
+  try {
+    const args = buildDockerRunArgs(config, command, { envFile: envFile?.path });
+    debugLog(`Running: docker ${formatDockerArgs(args, config.env)}`);
+    return await spawnDocker(args, config.debug);
+  } finally {
+    envFile?.remove();
+  }
+}
+
+export async function runContainer(config: PiContainerConfig & RuntimeContext, piArgs: string[]): Promise<void> {
+  debugLog("runContainer called with piArgs:", piArgs);
+  const result = await launch(config, piArgs);
 
   debugLog(`Docker run exited with status: ${result.status}${result.error ? ", error: " + result.error.message : ""}`);
   if (result.status !== 0 && result.status !== null) {
@@ -191,30 +240,8 @@ export async function runContainer(config: PiContainerConfig & RuntimeContext, p
 
 export async function shellInContainer(config: PiContainerConfig & RuntimeContext): Promise<void> {
   debugLog("shellInContainer called");
-  buildIfNeeded(config);
-
-  // Ensure named docker volumes exist
-  if (config.volumes && config.volumes.length > 0) {
-    for (const v of config.volumes) {
-      debugLog(`Ensuring docker volume exists: ${v.name}`);
-      try {
-        const res = spawnSync("docker", ["volume", "create", v.name], { stdio: isDebug() ? "pipe" : "ignore" });
-        if (isDebug() && res.stdout) {
-          debugLog(`docker volume create stdout: ${res.stdout.toString().trim()}`);
-        }
-        if (isDebug() && res.stderr) {
-          debugLog(`docker volume create stderr: ${res.stderr.toString().trim()}`);
-        }
-      } catch (e) {
-        debugLog(`Error creating docker volume ${v.name}: ${e}`);
-      }
-    }
-  }
-
   console.log("🐚 Opening shell in pi container...");
-  const args = buildDockerRunArgs(config, ["/bin/bash"]);
-  debugLog(`Running: docker ${args.join(" ")}`);
-  const result = await spawnDocker(args, config.debug);
+  const result = await launch(config, ["/bin/bash"]);
 
   debugLog(`Docker shell exited with status: ${result.status}${result.error ? ", error: " + result.error.message : ""}`);
   if (result.status !== 0 && result.status !== null) {
@@ -285,7 +312,81 @@ function resolvePath(p: string, homeDir: string, workspaceDir: string): string {
     .replace(/\$\{workspaceDir\}/g, workspaceDir);
 }
 
-export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, command: string[]): string[] {
+/**
+ * Split docker.env into the entries Docker's --env-file format can carry and
+ * the ones that must stay on the command line. The format is one KEY=value
+ * per line with the value taken verbatim, so only line breaks in a value, or
+ * a key the parser would misread, cannot be represented.
+ */
+export function partitionEnv(env: Record<string, string>): { file: Record<string, string>; inline: Record<string, string> } {
+  const file: Record<string, string> = {};
+  const inline: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(env)) {
+    const value = String(raw);
+    const representable = /^[^\s=#][^\s=]*$/.test(key) && !/[\r\n]/.test(value) &&
+      Buffer.byteLength(key) + Buffer.byteLength(value) < 32 * 1024;
+    (representable ? file : inline)[key] = value;
+  }
+  return { file, inline };
+}
+
+/**
+ * Write the env-file-safe part of docker.env to a private temp file
+ * (0600, inside a 0700 directory). Returns undefined when there is nothing
+ * to write. The caller removes the file once docker has exited.
+ */
+export function writeEnvFile(env: Record<string, string>): { path: string; remove(): void } | undefined {
+  const entries = Object.entries(partitionEnv(env).file);
+  if (entries.length === 0) return undefined;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-env-"));
+  const file = path.join(dir, "env");
+  fs.writeFileSync(file, entries.map(([key, value]) => `${key}=${value}\n`).join(""), { mode: 0o600 });
+  let removed = false;
+  const remove = () => {
+    if (removed) return;
+    removed = true;
+    for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+  // Also covers process.exit() paths that skip the caller's cleanup.
+  process.once("exit", remove);
+  // A signal's default action ends the process without an "exit" event, which
+  // would leave the values on disk: clean up first, then let the signal act.
+  const signalHandlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+    const handler = () => {
+      remove();
+      process.kill(process.pid, signal);
+    };
+    process.once(signal, handler);
+    return [signal, handler] as const;
+  });
+  return { path: file, remove };
+}
+
+/** Render docker arguments for logs, masking the values of docker.env entries. */
+export function formatDockerArgs(args: string[], env: Record<string, string>): string {
+  return args
+    .map((arg, index) => {
+      if (args[index - 1] !== "-e") return arg;
+      const key = arg.split("=", 1)[0];
+      return Object.hasOwn(env, key) && arg.includes("=") ? `${key}=***` : arg;
+    })
+    .join(" ");
+}
+
+export interface DockerRunOptions {
+  /**
+   * Env file holding docker.env (see writeEnvFile). Without it, every
+   * docker.env entry is passed as -e KEY=value on the command line.
+   */
+  envFile?: string;
+}
+
+export function buildDockerRunArgs(
+  config: PiContainerConfig & RuntimeContext,
+  command: string[],
+  options: DockerRunOptions = {}
+): string[] {
   const args: string[] = ["run", "--rm"];
 
   // TTY: allocate if we're connected to a terminal
@@ -310,9 +411,14 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
   args.push("-v", `${config.configDir}:${containerHome}/.pi`);
   debugLog(`Mount: ${config.configDir} -> ${containerHome}/.pi`);
 
-  // Environment variables from config
+  // Environment variables from config. Prefer the env file so values stay off
+  // the command line; only entries the file format cannot carry are inlined.
   debugLog(`Environment vars: ${Object.keys(config.env).length > 0 ? Object.keys(config.env).join(", ") : "(none)"}`);
-  for (const [key, value] of Object.entries(config.env)) {
+  const env = partitionEnv(config.env);
+  if (options.envFile && Object.keys(env.file).length > 0) {
+    args.push("--env-file", options.envFile);
+  }
+  for (const [key, value] of Object.entries(options.envFile ? env.inline : config.env)) {
     args.push("-e", `${key}=${value}`);
   }
 
@@ -394,9 +500,10 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
     }
   }
 
-  // Collect container paths for custom mounts so the entrypoint can adjust ownership
+  // Collect container paths for custom mounts so the entrypoint can adjust ownership.
+  // Resolved like the mount itself: the entrypoint sees no ~ or ${home} placeholders.
   for (const m of config.mounts) {
-    mountPaths.push(m.container);
+    mountPaths.push(resolvePath(m.container, hostHome, config.workspaceDir));
   }
 
   if (mountPaths.length > 0) {
@@ -416,89 +523,15 @@ export function buildDockerRunArgs(config: PiContainerConfig & RuntimeContext, c
 
 // ── Build context creation ───────────────────────────────────
 //
-// Creates a temp directory with everything needed for `docker build`:
-//   - Dockerfile (generated from template)
-//   - entrypoint.sh (generated from template)
-//   - package/ (built-in, from installed module)
-//   - settings/ (built-in, from installed module)
+// Writes the build inputs collected by image.ts to a temp directory
+// for `docker build`.
 
 function createBuildContext(piVersion: string, dockerfileExtension?: string): string {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wpi-build-"));
-
-  // Generate Dockerfile
-  const dockerfile = generateDockerfile(dockerfileExtension, piVersion);
-  fs.writeFileSync(path.join(tmpDir, "Dockerfile"), dockerfile);
-
-  // Generate entrypoint
-  const entrypoint = generateEntrypoint();
-  fs.writeFileSync(path.join(tmpDir, "entrypoint.sh"), entrypoint);
-
-  // Copy built-in package (always present in installed module)
-  const builtinPackageDir = path.join(MODULE_ROOT, "package");
-  if (fs.existsSync(builtinPackageDir)) {
-    copyDir(builtinPackageDir, path.join(tmpDir, "package"));
-  } else {
-    createPlaceholderPackage(tmpDir);
+  for (const file of collectBuildContext(piVersion, dockerfileExtension)) {
+    const target = path.join(tmpDir, file.path);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, file.content);
   }
-
-  // Copy built-in settings (always present in installed module)
-  const builtinSettingsDir = path.join(MODULE_ROOT, "settings");
-  if (fs.existsSync(builtinSettingsDir)) {
-    copyDir(builtinSettingsDir, path.join(tmpDir, "settings"));
-  } else {
-    createPlaceholderSettings(tmpDir);
-  }
-
   return tmpDir;
-}
-
-function createPlaceholderPackage(tmpDir: string): void {
-  fs.mkdirSync(path.join(tmpDir, "package", "extensions"), { recursive: true });
-  fs.mkdirSync(path.join(tmpDir, "package", "themes"), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, "package", "extensions", ".gitkeep"), "");
-  fs.writeFileSync(path.join(tmpDir, "package", "themes", ".gitkeep"), "");
-  fs.writeFileSync(
-    path.join(tmpDir, "package", "package.json"),
-    JSON.stringify(
-      {
-        name: "wpi-defaults",
-        version: "1.0.0",
-        private: true,
-        description: "No customizations",
-        keywords: ["pi-package"],
-        pi: {
-          extensions: ["./extensions"],
-          themes: ["./themes"],
-        },
-        peerDependencies: {
-          "@earendil-works/pi-coding-agent": "*",
-        },
-      },
-      null,
-      2
-    )
-  );
-}
-
-function createPlaceholderSettings(tmpDir: string): void {
-  fs.mkdirSync(path.join(tmpDir, "settings"), { recursive: true });
-  fs.writeFileSync(
-    path.join(tmpDir, "settings", "default-settings.json"),
-    JSON.stringify({ defaultThinkingLevel: "medium", autoCompact: true }, null, 2)
-  );
-}
-
-function copyDir(src: string, dst: string): void {
-  fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    // Skip node_modules — the Docker build runs npm install for the package
-    if (entry.name === "node_modules") continue;
-    const srcPath = path.join(src, entry.name);
-    const dstPath = path.join(dst, entry.name);
-    if (entry.isDirectory()) {
-      copyDir(srcPath, dstPath);
-    } else {
-      fs.copyFileSync(srcPath, dstPath);
-    }
-  }
 }

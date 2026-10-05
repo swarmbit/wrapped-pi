@@ -5,5 +5,8 @@
   "description": "Reversible credential redaction for model-visible content",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

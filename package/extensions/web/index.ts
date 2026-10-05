@@ -10,9 +10,9 @@
 // Configuration (environment variables):
 //   WEB_SCREENSHOT_URL      — Optional Playwright screenshot service base URL.
 //   WEB_SCREENSHOT_TOKEN    — Shared token for that service. Returns inline PNGs.
-//   FIRECRAWL_API_KEY        — API key (required for cloud; may be
-//                              optional for self-hosted). If missing,
-//                              tools return a helpful error.
+//   FIRECRAWL_API_KEY        — API key. Required for Firecrawl cloud (tools
+//                              return a helpful error without it); optional
+//                              when FIRECRAWL_BASE_URL points elsewhere.
 //   FIRECRAWL_BASE_URL       — Base URL for the Firecrawl API.
 //                              Defaults to https://api.firecrawl.dev
 //                              (cloud). Set to your self-hosted
@@ -58,7 +58,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { registerBrowserTool } from "./browser";
 import { redactForLlm } from "../secret-redaction/state";
 import { Type } from "typebox";
-import { completeSimple } from "@earendil-works/pi-ai";
 import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
 
 // ── Configuration ───────────────────────────────────────────
@@ -67,7 +66,10 @@ import type { Context, UserMessage, TextContent } from "@earendil-works/pi-ai";
 const SCREENSHOT_URL = (process.env.WEB_SCREENSHOT_URL ?? "").replace(/\/$/, "");
 const SCREENSHOT_TOKEN = process.env.WEB_SCREENSHOT_TOKEN ?? "";
 const API_KEY = process.env.FIRECRAWL_API_KEY ?? "";
-const BASE_URL = (process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev").replace(/\/$/, "");
+const CLOUD_BASE_URL = "https://api.firecrawl.dev";
+const BASE_URL = (process.env.FIRECRAWL_BASE_URL || CLOUD_BASE_URL).replace(/\/$/, "");
+// Firecrawl cloud always needs a key; self-hosted instances run unauthenticated by default.
+const API_KEY_REQUIRED = BASE_URL === CLOUD_BASE_URL;
 const CACHE_TTL_MS = (parseInt(process.env.FIRECRAWL_CACHE_TTL ?? "300", 10) || 0) * 1000;
 const ALLOWED_DOMAINS = (process.env.FIRECRAWL_ALLOWED_DOMAINS ?? "")
   .split(",")
@@ -200,14 +202,39 @@ export function sanitizeContent(content: string): string {
 }
 
 /**
+ * Sanitize a short single-line field from an external source (a search
+ * result title, for example) so it cannot carry tags or forge delimiters.
+ */
+export function sanitizeInline(value: string, maxChars = 300): string {
+  return sanitizeContent(value).replace(/\s+/g, " ").slice(0, maxChars);
+}
+
+/**
+ * Normalize an externally supplied URL for display. The parsed form
+ * percent-encodes quotes and angle brackets, so it cannot break out of
+ * the surrounding markup. Returns undefined for anything but http(s).
+ */
+export function safeDisplayUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Wrap sanitized content in delimiters that signal to the LLM
  * that this is external data, not instructions.
  *
  * Applied AFTER sanitizeContent() so the delimiters themselves
- * are not stripped.
+ * are not stripped. The source label is escaped so it cannot close
+ * the attribute or the tag.
  */
 export function wrapContent(content: string, source: string): string {
-  return `<web_content source="${source}">\n${content}\n</web_content>`;
+  const label = source.replace(/[\r\n]+/g, " ").replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<web_content source="${label}">\n${content}\n</web_content>`;
 }
 
 // Shared prompt injection defense guidelines for all web tools.
@@ -282,8 +309,8 @@ export function parseVerificationResponse(response: string): VerificationResult 
 
 /**
  * Send content to a guard LLM for prompt injection verification.
- * Uses Pi's built-in model registry and completeSimple() from pi-ai,
- * so authentication is handled by Pi — no separate API key needed.
+ * Uses Pi's model registry for the request, so provider selection and
+ * authentication are handled by Pi — no separate API key needed.
  *
  * Requires WEB_VERIFY_MODEL to be set to a model ID already configured
  * in Pi (via /login or models.json).
@@ -313,10 +340,13 @@ async function verifyContent(
     return { safe: true, reason: `model "${VERIFY_MODEL_ID}" not found in Pi registry` };
   }
 
-  // Resolve API key via Pi's auth system
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok || !auth.apiKey) {
-    return { safe: true, reason: `no API key for model "${VERIFY_MODEL_ID}"` };
+  // Provider-neutral registry calls arrived in Pi 0.99.1. Never substitute another client.
+  if (typeof ctx.modelRegistry.complete !== "function") {
+    return { safe: true, reason: "guard verification requires Pi 0.99.1+" };
+  }
+  // Pi resolves credentials at request time; report a missing login clearly.
+  if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
+    return { safe: true, reason: `no credentials configured for model "${VERIFY_MODEL_ID}"` };
   }
 
   // Sample first N chars — injections are usually at the top
@@ -342,13 +372,17 @@ async function verifyContent(
   }
 
   try {
-    const response = await completeSimple(model, redactForLlm(guardContext, ctx), {
-      apiKey: auth.apiKey,
+    // Direct registry calls do not pass through Pi's request hooks, so redact
+    // both the structured context and the final provider payload here.
+    const response = await ctx.modelRegistry.complete(model, redactForLlm(guardContext, ctx), {
       onPayload: (payload: unknown) => redactForLlm(payload, ctx),
       signal: timeoutController.signal,
       maxTokens: 200,
       temperature: 0,
     });
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      return { safe: true, reason: `guard request failed: ${response.errorMessage ?? response.stopReason}` };
+    }
 
     // Extract text from the assistant response
     const textBlock = response.content.find((c): c is TextContent => c.type === "text");
@@ -382,20 +416,18 @@ async function firecrawlRequest(
   body: Record<string, unknown>,
   signal: AbortSignal | undefined,
 ): Promise<FirecrawlResponse> {
-  if (!API_KEY) {
+  if (!API_KEY && API_KEY_REQUIRED) {
     return {
       success: false,
       error:
-        "FIRECRAWL_API_KEY is not set. Set it to use web tools, " +
-        "or configure FIRECRAWL_BASE_URL for a self-hosted instance.",
+        "FIRECRAWL_API_KEY is not set. Set it to use Firecrawl cloud, " +
+        "or point FIRECRAWL_BASE_URL at a self-hosted instance.",
     };
   }
 
   const url = `${BASE_URL}${endpoint}`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${API_KEY}`,
-  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (API_KEY) headers.Authorization = `Bearer ${API_KEY}`;
 
   try {
     const response = await fetch(url, {
@@ -443,7 +475,7 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.notify(
         `Web extension status:\n` +
-          `  API key: ${API_KEY ? "set" : "NOT SET"}\n` +
+          `  API key: ${API_KEY ? "set" : API_KEY_REQUIRED ? "NOT SET" : "not set (optional for self-hosted)"}\n` +
           `  Base URL: ${BASE_URL}\n` +
           `  Screenshots: ${SCREENSHOT_URL || "Firecrawl"}\n` +
           `  Allowed domains: ${domains}\n` +
@@ -477,13 +509,12 @@ export default function (pi: ExtensionAPI) {
     }),
     renderResult(result, { isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("muted", "Fetching…"), 0, 0);
-      if (result.details?.error) {
+      const details: WebToolDetails = result.details ?? {};
+      if (details.error) {
         const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
         return new Text(theme.fg("error", msg), 0, 0);
       }
-      const url = result.details?.url as string | undefined;
-      const chars = result.details?.chars as number | undefined;
-      const isCached = result.details?.cached as boolean | undefined;
+      const { url, chars, cached: isCached } = details;
       let text = theme.fg("success", "✓ ") + theme.fg("accent", url ?? "");
       if (chars !== undefined) text += theme.fg("muted", ` — ${chars.toLocaleString()} chars`);
       if (isCached) text += theme.fg("muted", " (cached)");
@@ -540,7 +571,7 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const wrapped = wrapContent(truncated, url);
+      const wrapped = wrapContent(truncated, safeDisplayUrl(url) ?? url);
       const suffix = verification.reason !== "verification disabled" && verification.reason !== "verification response unparseable"
         ? `(verified: ${verification.reason})`
         : "";
@@ -574,13 +605,12 @@ export default function (pi: ExtensionAPI) {
     }),
     renderResult(result, { isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("muted", "Searching…"), 0, 0);
-      if (result.details?.error) {
+      const details: WebToolDetails = result.details ?? {};
+      if (details.error) {
         const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
         return new Text(theme.fg("error", msg), 0, 0);
       }
-      const query = result.details?.query as string | undefined;
-      const count = result.details?.resultCount as number | undefined;
-      const isCached = result.details?.cached as boolean | undefined;
+      const { query, resultCount: count, cached: isCached } = details;
       let text = theme.fg("success", "✓ ") + theme.fg("muted", "Searched ") + theme.fg("accent", `'${query ?? ""}'`);
       if (count !== undefined && count >= 0) text += theme.fg("muted", ` — ${count} result${count !== 1 ? "s" : ""}`);
       if (isCached) text += theme.fg("muted", " (cached)");
@@ -615,9 +645,10 @@ export default function (pi: ExtensionAPI) {
 
       const formatted = results
         .map((r, i) => {
-          const title = r.title ?? "(untitled)";
-          const url = r.url ?? "";
-          // Sanitize content before including in result
+          // Titles and URLs are page-controlled too: sanitize every field, not
+          // only the body, so none of them can forge the wrapper's delimiters.
+          const title = sanitizeInline(r.title ?? "") || "(untitled)";
+          const url = safeDisplayUrl(r.url ?? "") ?? "(invalid URL)";
           const sanitized = sanitizeContent(r.markdown ?? "");
           const truncated =
             sanitized.length > MAX_SEARCH_RESULT_CHARS
@@ -633,7 +664,7 @@ export default function (pi: ExtensionAPI) {
           : "No results found.";
 
       // LLM verification (if enabled)
-      const verification = await verifyContent(rawOutput, `search: "${query}"`, signal, ctx);
+      const verification = await verifyContent(rawOutput, `search: ${query}`, signal, ctx);
       if (!verification.safe) {
         return errorResult(
           `Search results for "${query}" blocked by verification: ${verification.reason}. ` +
@@ -642,7 +673,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Wrap entire search output in delimiters
-      const wrapped = wrapContent(rawOutput, `search: "${query}"`);
+      const wrapped = wrapContent(rawOutput, `search: ${query}`);
       const suffix = verification.reason !== "verification disabled" && verification.reason !== "verification response unparseable"
         ? `(verified: ${verification.reason})`
         : "";
@@ -676,12 +707,12 @@ export default function (pi: ExtensionAPI) {
     }),
     renderResult(result, { isPartial }, theme) {
       if (isPartial) return new Text(theme.fg("muted", "Capturing screenshot…"), 0, 0);
-      if (result.details?.error) {
+      const details: WebToolDetails = result.details ?? {};
+      if (details.error) {
         const msg = (result.content[0] as { text?: string } | undefined)?.text ?? "Error";
         return new Text(theme.fg("error", msg), 0, 0);
       }
-      const url = result.details?.url as string | undefined;
-      const isCached = result.details?.cached as boolean | undefined;
+      const { url, cached: isCached } = details;
       let text = theme.fg("success", "✓ ") + theme.fg("muted", "Screenshot: ") + theme.fg("accent", url ?? "");
       if (isCached) text += theme.fg("muted", " (cached)");
       return new Text(text, 0, 0);
@@ -787,9 +818,20 @@ export async function requestLocalScreenshot(
 
 // ── Response helpers ────────────────────────────────────────
 
-function textResult(text: string, suffix = "", details: Record<string, unknown> = {}): {
+/** Display metadata attached to web tool results; never sent to the model. */
+interface WebToolDetails {
+  error?: boolean;
+  url?: string;
+  chars?: number;
+  cached?: boolean;
+  query?: string;
+  resultCount?: number;
+  screenshotUrl?: string;
+}
+
+function textResult(text: string, suffix = "", details: WebToolDetails = {}): {
   content: Array<{ type: "text"; text: string }>;
-  details: Record<string, unknown>;
+  details: WebToolDetails;
 } {
   const finalText = suffix ? `${text}\n\n_${suffix}_` : text;
   return {
@@ -800,7 +842,7 @@ function textResult(text: string, suffix = "", details: Record<string, unknown> 
 
 function errorResult(message: string): {
   content: Array<{ type: "text"; text: string }>;
-  details: { error: true };
+  details: WebToolDetails;
 } {
   return {
     content: [{ type: "text", text: `Error: ${message}` }],

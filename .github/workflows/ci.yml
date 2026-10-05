@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS as well as Linux: temp directories are symlinks there and file
+        # ownership works differently, and both have hidden bugs before.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Builds the CLI, typechecks every bundled extension, runs all tests.
+      - run: npm test
+
+  image:
+    name: Image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build the image
+        run: node dist/cli.js build
+      - name: The image can take the usual first-user IDs of a Linux host
+        run: |
+          image="$(node dist/cli.js dry-run | awk '$1 == "image:" { print $2 }')"
+          # The base image's "node" account used to hold 1000:1000.
+          test "$(docker run --rm --entrypoint id "$image" -u pi-user)" = "1000"
+          test "$(docker run --rm --entrypoint id "$image" -g pi-user)" = "1000"
+      - name: Files created in the container belong to the host user
+        run: |
+          mkdir -p "$RUNNER_TEMP/project"
+          cd "$RUNNER_TEMP/project"
+          echo 'id -u > uid.txt; id -g > gid.txt' | node "$GITHUB_WORKSPACE/dist/cli.js" shell
+          test "$(cat uid.txt)" = "$(id -u)"
+          test "$(cat gid.txt)" = "$(id -g)"
+          test "$(stat -c %u:%g uid.txt)" = "$(id -u):$(id -g)"

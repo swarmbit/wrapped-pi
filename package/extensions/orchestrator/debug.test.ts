@@ -1,4 +1,4 @@
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -11,7 +11,8 @@ import { SystemOneBackend } from "./decision";
 let dir: string;
 let ctx: any;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "orchestrator-debug-"));
+  // The runtime keys state by canonical workspace; macOS temp directories are symlinks.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "orchestrator-debug-")));
   vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
   ctx = { cwd: dir, sessionManager: { getSessionId: () => "source-session" }, ui: { notify: vi.fn() } };
 });

@@ -8,25 +8,22 @@ Running pi in Docker ensures every team member uses the same environment — sam
 
 `wpi` makes this simple:
 
-- **CWD-respect mounts**: uses `docker run` directly, so `$(pwd)/` is always mounted as `/<dirname>`
+- **CWD-respect mounts**: uses `docker run` directly, so `$(pwd)` is always mounted at the same absolute path inside the container
 - **Identity mirroring**: the container user and home directory match the host — paths are the same inside and outside the container
-- **One install**: `npm install -g wpi` works from any directory
+- **One install**: install once globally, then run `wpi` from any directory
 - **Baked-in defaults**: safety extension, github theme, and sensible settings — no setup required
 - **Port forwarding**: expose container ports for web dev with `-p`
 
 ## Install
 
-### From npm (recommended)
+wpi is installed from source.
 
-```bash
-npm install -g wpi
-```
-
-### From source
+> **Do not run `npm install -g wpi`.** The `wpi` name on the npm registry belongs to an
+> unrelated package; this project is not published there.
 
 ```bash
 git clone https://github.com/swarmbit/wrapped-pi.git
-cd wpi
+cd wrapped-pi
 
 # Required dependencies:
 #   - Node.js >= 22  (runtime + TypeScript compilation)
@@ -41,7 +38,7 @@ node dist/cli.js
 
 # Or install globally from the local checkout:
 npm install -g .
-wpi build
+wpi build          # optional: the first `wpi` run builds the image anyway
 
 # Alternatively, use the quick-install script:
 ./install.sh       # build, uninstall old, install globally, build image
@@ -65,6 +62,7 @@ wpi -p 8080:3000        # host 8080 → container 3000
 wpi build              # build/rebuild the image
 wpi shell              # open a shell in a new container
 wpi shell <id>         # exec into an existing container
+wpi clean              # remove images left over from other configs/versions
 wpi dry-run            # print config and docker commands (debugging)
 ```
 
@@ -103,8 +101,8 @@ wpi dry-run            # print config and docker commands (debugging)
 │  └─────────────────────────────────────────┘             │
 │                                                          │
 │  ┌─────────────────────────────────────────┐             │
-│  │  /<project-dir>/               ◄── CWD mount         │
-│  │    (your project directory)             │             │
+│  │  <project path>                ◄── CWD mount         │
+│  │    (same absolute path as on the host)  │             │
 │  └─────────────────────────────────────────┘             │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -113,7 +111,7 @@ wpi dry-run            # print config and docker commands (debugging)
 - **Installed on startup**: `pi install /opt/pi-package` registers the built-in package — extensions and themes are discovered by pi automatically
 - **Additional packages**: use `pi install` inside the container to add packages at runtime
 - **Mounted from host** (persists across runs): `~/.pi` (settings, auth, sessions, extensions) — mounted at `<host-home>/.pi` so the path is identical inside and outside the container
-- **Mounted from CWD** (your project): mounts `$(pwd)` as `/<dirname>` (e.g., `/myproject`)
+- **Mounted from CWD** (your project): mounts `$(pwd)` at the same absolute path (e.g., `/Users/alice/dev/myproject`), so file paths in tool output match the host
 - **Identity mirroring**: the container creates a user and home directory that match the host (username, UID/GID, and home path), so all paths are consistent between host and container
 - **Port forwarding** (optional): `-p` flags expose container ports on `localhost`
 
@@ -130,13 +128,26 @@ wpi reads config from two files (both in YAML format) and CLI flags. All setting
 | `.pi/wpi.yml` | Project-level defaults (team-shared) | Yes |
 | `~/.pi/wpi.yml` | Personal overrides (all projects) | No |
 
-### Precedence (highest wins)
+### Precedence
 
-1. CLI flags (`-p`, `--port`)
-2. User config (`~/.pi/wpi.yml`)
-3. Project config (`.pi/wpi.yml`)
+Which file wins depends on what the setting is for.
 
-For `docker.env`, user keys override project keys with the same name. For `docker.mounts` and `docker.volumes`, user entries override project entries on matching container paths and add new entries for different paths.
+**Personal runtime settings — your choice wins:**
+
+| Setting | Order (highest first) |
+|---------|-----------------------|
+| `docker.ports` | CLI flags (`-p`, `--port`) > user config > project config |
+| `docker.env` | User keys override project keys with the same name; the rest are merged |
+| `docker.mounts`, `docker.volumes` | Merged; a user entry replaces a project entry with the same container path |
+
+**Settings that define the shared environment — the project's choice wins:**
+
+| Setting | Order (highest first) |
+|---------|-----------------------|
+| `pi.version` | Project config > user config > version bundled with wpi |
+| `docker.extension` | Project config > user config (one block is used, they are not concatenated) |
+| `docker.memory`, `docker.memorySwap` | Project config > user config |
+| `git.user.name`, `git.user.email` | Project config > user config > host git config |
 
 ---
 
@@ -147,7 +158,7 @@ Here is every supported key in a `wpi.yml` file:
 ```yaml
 # ── Pi settings ────────────────────────────────────────────
 pi:
-  version: 0.99.1   # pin to a specific pi version (default: baked-in)
+  version: 1.0.0    # pin to a specific pi version (default: baked-in)
 
 # ── Docker settings ────────────────────────────────────────
 docker:
@@ -185,8 +196,8 @@ docker:
     NODE_ENV: development
 
   # Extra Dockerfile instructions appended at image build time.
-  # Use this to install system packages or tools. After changing
-  # this, rebuild the image with `wpi build`.
+  # Use this to install system packages or tools. Changing it
+  # produces a new image, built automatically on the next run.
   extension: |
     RUN apt-get update && apt-get install -y python3 pip
     ENV PYTHONUNBUFFERED=1
@@ -194,16 +205,30 @@ docker:
 # ── Git settings ───────────────────────────────────────────
 # Set the Git author identity for commits made inside the container.
 # If not set, wpi infers them from the host git config.
-# Precedence: project config > user config > host git config.
 git:
   user:
     name: John Doe
     email: john@example.com
 ```
 
-> **Important:** After changing `docker.extension` or updating wpi,
-> you must rebuild the image with `wpi build`. The image is not
-> rebuilt automatically on each run — it's only built when it doesn't exist yet.
+### Images
+
+Each image is tagged `pi-agent:<pi version>-<fingerprint>`. The fingerprint covers everything
+that goes into the build: the Dockerfile (including `docker.extension`), the entrypoint, and the
+bundled extensions and settings. So:
+
+- Changing `docker.extension`, changing `pi.version`, or updating wpi gives a tag that does not
+  exist yet, and the next `wpi` run builds it. No manual rebuild is needed.
+- Projects with different `docker.extension` blocks get separate images instead of overwriting
+  each other.
+- `wpi build` still forces a rebuild of the current image, for example to pick up newer base
+  image or OS packages.
+- Superseded images are not deleted automatically. `wpi clean` removes every `pi-agent` image
+  except the one the current configuration uses; an image another project still needs is rebuilt
+  on that project's next run, and one a running container uses is left alone.
+
+Images of earlier configurations are not removed automatically. List them with
+`docker images pi-agent` and delete the ones you no longer need with `docker rmi <tag>`.
 
 ### Settings reference
 
@@ -215,8 +240,8 @@ git:
 | `docker.volumes` | `list` | `[]` | Named Docker volumes created and mounted into the container. Each entry is `VOLUME_NAME:CONTAINER_PATH[:MODE]`. Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). Volumes persist across runs — useful for caches like `.m2`, `.gradle`, or `node_modules`. |
 | `docker.memory` | `string` | — | Maximum memory for the container (`docker run --memory`). Example: `4g`. |
 | `docker.memorySwap` | `string` | — | Memory+swap limit for the container (`docker run --memory-swap`). Example: `4g`. |
-| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables via `docker run -e`. User config overrides project config per-key. |
-| `docker.extension` | `string` | — | Extra Dockerfile content appended during `wpi build`. Use it to install system packages or set image-level `ENV` vars. Requires a manual rebuild. |
+| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables. Values are handed to Docker through a private temporary env file rather than the command line, so they do not appear in process listings. User config overrides project config per-key. |
+| `docker.extension` | `string` | — | Extra Dockerfile content appended at image build time. Use it to install system packages or set image-level `ENV` vars. Each distinct block gets its own image, built on the next run. |
 | `git.user.name` | `string` | *(host git config)* | Git author name for commits inside the container. Falls back to `git config user.name` from the host. |
 | `git.user.email` | `string` | *(host git config)* | Git author email for commits inside the container. Falls back to `git config user.email` from the host. |
 
@@ -225,17 +250,18 @@ git:
 | Flag | Description |
 |------|-------------|
 | `-p`, `--port PORT` | Publish a container port on localhost (repeatable). Formats: `3000` or `8080:3000`. Port ranges are not supported via CLI — use the config file. |
-| `--debug`, `-d` | Enable debug logging. Prints resolved config, docker commands, and container output to stderr. |
+| `--debug`, `-d` | Enable debug logging. Prints resolved config, docker commands, and container output to stderr. `docker.env` values are masked. |
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
 | *(default)* | Run pi interactively in a new container |
-| `build` | Build or rebuild the Docker image. Run this after changing `docker.extension` or updating wpi. |
+| `build` | Build or rebuild the Docker image for the current configuration. Optional: a missing image is built on first use. |
 | `shell` | Open a bash shell in a new container (useful for debugging or running arbitrary commands) |
 | `shell <id>` | Exec into an existing running container by ID or name. |
-| `dry-run` | Print the resolved config and the docker commands that would run, without executing anything. Useful for debugging config resolution. |
+| `clean` | Remove `pi-agent` images other than the one the current configuration uses. |
+| `dry-run` | Print the resolved config and the docker commands that would run, without executing anything. Useful for debugging config resolution. `docker.env` keys are listed with their values masked. |
 
 ### Port details
 
@@ -267,11 +293,7 @@ git:
     email: bot@example.com
 ```
 
-After adding `docker.extension`, rebuild the image:
-
-```bash
-wpi build
-```
+The first `wpi` run after adding or changing `docker.extension` builds the matching image.
 
 ### Example: personal override
 
@@ -295,7 +317,7 @@ If you need to run two agents on the same project simultaneously, that's a workf
 
 | Host path | Container path | Contents |
 |-----------|---------------|----------|
-| `$(pwd)` | `/<basename>` | Your project (CWD mount, named after directory) |
+| `$(pwd)` | `$(pwd)` | Your project (CWD mount, same absolute path) |
 | `~/.pi` | `<host-home>/.pi` | Full pi config (mounted at the same path as host) |
 | `~/.pi/agent/settings.json` | `<host-home>/.pi/agent/settings.json` | Model, thinking level, preferences |
 | `~/.pi/agent/auth.json` | `<host-home>/.pi/agent/auth.json` | OAuth tokens |
@@ -304,7 +326,7 @@ If you need to run two agents on the same project simultaneously, that's a workf
 | `~/.pi/agent/npm/` | `<host-home>/.pi/agent/npm/` | Installed package data |
 | `~/.pi/wpi.yml` | *(not mounted)* | User-level wpi config |
 
-> **Note:** `<host-home>` is the host user's home directory (e.g. `/Users/<user>` on macOS, `/home/<user>` on Linux). The container creates a user with the same username, UID/GID, and home path, so all paths are identical inside and outside the container.
+> **Note:** `<host-home>` is the host user's home directory (e.g. `/Users/<user>` on macOS, `/home/<user>` on Linux). The container creates a user with the same username, UID/GID, and home path, so all paths are identical inside and outside the container. If the entrypoint cannot assign the host UID/GID it prints a `wpi: warning:` line at startup.
 
 If you use pi both natively and in the container, they share the same config.
 
@@ -312,10 +334,11 @@ If you use pi both natively and in the container, they share the same config.
 
 The default package includes several extensions:
 
-- **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and writes outside allowed paths
+- **confirm-dangerous** — Allows simple standalone `rm` commands scoped to the workspace or `/tmp` without confirmation; prompts for other destructive commands (`sudo`, force push, forced/recursive removals elsewhere, etc.) and for writes or edits outside the workspace, `/tmp`, and `~/.pi`. Paths are judged where they really land: `~`, `..`, and symlinks are resolved first
 - **secret-redaction** — Automatically replaces detected credentials with reversible placeholders in model-visible content
 - **dynamic-system-prompts** — Select Markdown instructions from `.pi/system-prompts/` to append to the session system prompt (`/system-prompts`; see [extension README](package/extensions/dynamic-system-prompts/README.md))
 - **subagent** — Delegates work to isolated agents with live parallel/nested progress and reported cost (see `package/extensions/subagent/PLAN.md` for interactive controls)
+- **multiagent** — Persistent background agents with separate live Pi conversation views, steering, follow-ups, and individual stop controls (`/multiagents`; see `package/extensions/multiagent/README.md`)
 - **worktree** — Git worktree management with per-worktree sessions (`/worktree:create`, `/worktree:open`, etc.)
 - **orchestrator** — Experimental named virtual sessions, editor-based task routing, and aggregate usage (`/orchestrator`; see [extension README](package/extensions/orchestrator/README.md) and [local Laya Compose example](example/laya/README.md))
 - **tps** — Displays tokens-per-second metrics after each agent run
@@ -324,7 +347,7 @@ The default package includes several extensions:
 ### Secret redaction
 
 Enabled automatically with the bundled package; no configuration or proxy is needed.
-After installing an updated wpi, run `wpi build` and start a new container.
+After installing an updated wpi, start a new container; the image is rebuilt on that run.
 
 The extension learns credential values from environment variables, Pi `auth.json`
 and `models.json`, wpi configuration, and `.env`/`.env.*` and `.npmrc` files in the
@@ -334,6 +357,21 @@ never executes credential commands or sources shell files. Request and tool-resu
 text is inspected for credential field names, authorization headers, URL passwords,
 private keys, and common provider-token formats. Short/common values are masked only
 in credential contexts to avoid corrupting ordinary code.
+
+Source code assigns expressions to names like `password` and `token` far more often
+than literals, so the unquoted right-hand side of an assignment found in free text is
+judged by its shape:
+
+| Right-hand side | Example | Treatment |
+|-----------------|---------|-----------|
+| Unmistakably code | `generatePassword()`, `await`, `null`, `string` | Left as is |
+| Shaped like an identifier | `accessToken`, `req.headers.authorization`, `hunter` | Masked where it is assigned, not searched for elsewhere |
+| Anything else | `Summer2024x`, `a-hyphenated-value`, `sk-...` | Masked everywhere |
+
+Quoted strings, structured credential fields, environment variables, and values in
+`.env`/`.npmrc` files are literals and are always masked everywhere, whatever they look
+like. A value first seen as identifier-shaped becomes a full secret as soon as one of
+those sources confirms it.
 
 To add credential field or environment-variable names, set `secretRedaction.keys`
 in `~/.pi/wpi.yml` or the project's `.pi/wpi.yml`:
@@ -393,13 +431,13 @@ The **web** extension provides three LLM-callable tools backed by the [Firecrawl
 
 **Configuration** (environment variables, set via `docker.env` in `wpi.yml` or passed at runtime):
 
-- `FIRECRAWL_API_KEY` — API key (required for cloud). If missing, tools return a helpful error.
+- `FIRECRAWL_API_KEY` — API key. Required for Firecrawl cloud; without it the tools return a helpful error. Optional when `FIRECRAWL_BASE_URL` points at a self-hosted instance, where it is sent only if set.
 - `FIRECRAWL_BASE_URL` — Base URL for the Firecrawl API. Defaults to `https://api.firecrawl.dev` (cloud). Set to your self-hosted instance URL to use that instead.
 - `FIRECRAWL_ALLOWED_DOMAINS` — Comma-separated domain whitelist (e.g. `github.com,docs.firecrawl.dev`). If set, only these domains (and their subdomains) may be fetched/screenshotted. Empty/unset = all domains allowed.
 - `FIRECRAWL_CACHE_TTL` — Cache time-to-live in seconds for repeated fetches. Default 300 (5 min). Set to 0 to disable caching.
 
 **Prompt injection defenses** (always active):
-- Fetched content is sanitized — HTML/XML tags stripped, `<web_content>` delimiter tags removed to prevent forgery
+- Fetched content is sanitized — HTML/XML tags stripped, `<web_content>` delimiter tags removed to prevent forgery. Search result titles and URLs are sanitized the same way, since they are page-controlled too
 - Content truncated to 50KB (`web_fetch`) / 2KB per result (`web_search`)
 - Content wrapped in `<web_content>` delimiters signaling the LLM it's external data
 - System prompt guidelines explicitly tell the LLM to treat web content as untrusted
@@ -410,7 +448,7 @@ The **web** extension provides three LLM-callable tools backed by the [Firecrawl
 - `WEB_VERIFY_MAX_CHARS` — Max chars sent to guard (default 5000). Injections are usually at the top.
 - `WEB_VERIFY_TIMEOUT_MS` — Guard request timeout (default 10000).
 
-When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. Uses Pi's `completeSimple()` API and model registry for authentication — the guard model must already be configured in Pi. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
+When enabled, a tool-less guard LLM checks fetched/searched content for prompt injection before it reaches the main agent. The request goes through Pi's model registry, which selects the provider and supplies its credentials — the guard model must already be configured in Pi. If injection is detected, the content is blocked and a warning is returned instead. Fails open on guard errors (passes content through with a warning) to avoid blocking all web access when the guard is down.
 
 Check status at any time with the `/web:status` slash command.
 
@@ -451,13 +489,19 @@ Then point wpi at it — copy `wpi-firecrawl.yml` to your project as `.pi/wpi.ym
 ```yaml
 docker:
   env:
-    FIRECRAWL_BASE_URL: http://localhost:3002
+    # The agent runs in its own container, where "localhost" is that container.
+    # host.docker.internal reaches services published on the host.
+    FIRECRAWL_BASE_URL: http://host.docker.internal:3002
     # No API key needed for self-hosted
     FIRECRAWL_ALLOWED_DOMAINS: github.com,docs.firecrawl.dev
     FIRECRAWL_CACHE_TTL: 600
 ```
 
-Verify it's running:
+`host.docker.internal` is provided by Docker Desktop and Colima. On a plain Linux Docker
+engine, use the address of the host on the Docker bridge network instead (usually
+`172.17.0.1`), or the address of the machine running Firecrawl.
+
+Verify it's running, from the host:
 
 ```bash
 # Test Firecrawl scrape
@@ -520,8 +564,8 @@ binds to host loopback by default; for Docker Desktop or remote clients, set
 Restrict port 3003 with a firewall. Use TLS via a reverse proxy outside a trusted LAN:
 the bearer token and screenshots otherwise travel over plain HTTP.
 
-From the updated wrapped-pi checkout, run `npm run build && npm install -g .`,
-then `wpi build` to include the extension changes in the image; restart wpi.
+From the updated wrapped-pi checkout, run `npm run build && npm install -g .` and
+restart wpi; the image is rebuilt with the extension changes on that run.
 `web_screenshot` returns a PNG image directly when this backend is configured,
 honors `fullPage`, and retains the extension's domain whitelist. It does not cache
 local images. Unset `WEB_SCREENSHOT_URL` to use Firecrawl screenshots instead.
@@ -557,12 +601,17 @@ browser profile.
 ## Development
 
 ```bash
-cd wpi
+cd wrapped-pi
 npm install
 npm run build          # Compile TypeScript to dist/
-npm test               # Run tests
+npm run typecheck      # Typecheck every bundled extension
+npm test               # Build, typecheck, and run all tests
 node dist/cli.js dry-run  # Test config resolution
 ```
+
+The pi version wpi ships is set in `src/version.ts`. The `@earendil-works/*` devDependencies
+are pinned to the same version, so the extensions are typechecked and tested against the pi
+they run on; a test fails if the two drift apart. CI runs `npm test` on Linux and macOS.
 
 ## License
 

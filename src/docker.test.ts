@@ -2,13 +2,16 @@
 // Tests for docker.ts — Docker operations
 // ============================================================
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
-import { buildDockerRunArgs } from "./docker";
+import { buildDockerRunArgs, formatDockerArgs, partitionEnv, writeEnvFile } from "./docker";
 import { generateDockerfile, generateEntrypoint } from "./templates";
-import { PiContainerConfig, PI_VERSION, PI_IMAGE } from "./config";
+import { collectBuildContext, fingerprintBuildContext, imageTag } from "./image";
+import { PiContainerConfig, PI_VERSION } from "./config";
+
+const TEST_IMAGE = "pi-agent:test";
 
 function makeConfig(overrides: Partial<PiContainerConfig> = {}): PiContainerConfig {
   return {
@@ -27,14 +30,14 @@ interface FullConfig extends PiContainerConfig {
   projectDir: string;
   workspaceDir: string;
   debug: boolean;
-  /** Derived from piVersion — not user-configurable. */
+  /** Derived from the build inputs — not user-configurable. */
   piImage: string;
 }
 
 function makeFullConfig(overrides: Partial<FullConfig> = {}): FullConfig {
   return {
     piVersion: PI_VERSION,
-    piImage: PI_IMAGE,
+    piImage: TEST_IMAGE,
     ports: [],
     env: {},
     mounts: [],
@@ -126,11 +129,52 @@ describe("buildDockerRunArgs", () => {
     expect(envEntries).toHaveLength(0);
   });
 
-  it("uses the PI_IMAGE constant by default", () => {
+  it("runs the image named by the config", () => {
     const config = makeFullConfig();
     const args = buildDockerRunArgs(config, ["pi"]);
 
-    expect(args).toContain(PI_IMAGE);
+    expect(args).toContain(TEST_IMAGE);
+  });
+
+  it("passes env through the env file instead of the command line when one is given", () => {
+    const config = makeFullConfig({ env: { ANTHROPIC_API_KEY: "sk-test", PORT: "3000" } });
+    const args = buildDockerRunArgs(config, ["pi"], { envFile: "/private/env" });
+
+    expect(args[args.indexOf("--env-file") + 1]).toBe("/private/env");
+    expect(args.join(" ")).not.toContain("sk-test");
+    expect(args.some((a) => a.startsWith("ANTHROPIC_API_KEY") || a.startsWith("PORT="))).toBe(false);
+    // The option comes before the image, like every other docker flag.
+    expect(args.indexOf("--env-file")).toBeLessThan(args.indexOf(TEST_IMAGE));
+  });
+
+  it("keeps values an env file cannot carry on the command line", () => {
+    const pem = "-----BEGIN KEY-----\nabc\n-----END KEY-----";
+    const config = makeFullConfig({ env: { SIMPLE: "one", PEM: pem } });
+    const args = buildDockerRunArgs(config, ["pi"], { envFile: "/private/env" });
+
+    const inline = args.filter((_, i) => args[i - 1] === "-e");
+    expect(inline).toContain(`PEM=${pem}`);
+    expect(inline).not.toContain("SIMPLE=one");
+    expect(args).toContain("--env-file");
+  });
+
+  it("does not reference an env file when there is nothing to put in it", () => {
+    const args = buildDockerRunArgs(makeFullConfig({ env: {} }), ["pi"], { envFile: "/private/env" });
+    expect(args).not.toContain("--env-file");
+  });
+
+  it("hands the entrypoint resolved mount paths, without placeholders", () => {
+    const config = makeFullConfig({
+      mounts: [{ host: "~/.ssh", container: "~/.ssh", mode: "ro" }, { host: "/a", container: "${workspaceDir}/a" }],
+      volumes: [{ name: "wpi-m2", container: "${home}/.m2" }],
+    });
+    const args = buildDockerRunArgs(config, ["pi"]);
+
+    const entry = args.find((a) => a.startsWith("PI_MOUNT_PATHS="))!;
+    expect(entry.slice("PI_MOUNT_PATHS=".length).split(",")).toEqual([
+      `${os.homedir()}/.m2`, `${os.homedir()}/.ssh`, "/project/a",
+    ]);
+    expect(entry).not.toMatch(/~|\$\{/);
   });
 
   it("passes pi args as the command", () => {
@@ -343,6 +387,69 @@ describe("buildDockerRunArgs", () => {
   });
 });
 
+describe("docker.env handling", () => {
+  it("separates env-file-safe entries from the rest", () => {
+    const { file, inline } = partitionEnv({
+      PLAIN: "value", SPACED: "  keeps its spaces  ", QUOTED: '"double" and \'single\'', HASH: "a#b", EQUALS: "a=b", EMPTY: "",
+      MULTILINE: "a\nb", CARRIAGE: "a\rb", "BAD KEY": "x", "#COMMENT": "x",
+    });
+    expect(Object.keys(file)).toEqual(["PLAIN", "SPACED", "QUOTED", "HASH", "EQUALS", "EMPTY"]);
+    expect(Object.keys(inline)).toEqual(["MULTILINE", "CARRIAGE", "BAD KEY", "#COMMENT"]);
+  });
+
+  it("accepts non-string YAML scalars", () => {
+    const { file } = partitionEnv({ PORT: 3000 as unknown as string, DEBUG: true as unknown as string });
+    expect(file).toEqual({ PORT: "3000", DEBUG: "true" });
+  });
+
+  it("writes a private env file with verbatim values and removes it on request", () => {
+    const envFile = writeEnvFile({ TOKEN: "s3cr3t value", URL: "https://x/?a=1&b=2", PEM: "a\nb" })!;
+    try {
+      expect(fs.readFileSync(envFile.path, "utf-8")).toBe("TOKEN=s3cr3t value\nURL=https://x/?a=1&b=2\n");
+      expect(fs.statSync(envFile.path).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.dirname(envFile.path)).mode & 0o777).toBe(0o700);
+    } finally {
+      envFile.remove();
+    }
+    expect(fs.existsSync(path.dirname(envFile.path))).toBe(false);
+    expect(() => envFile.remove()).not.toThrow();
+  });
+
+  it("removes the env file when a terminating signal arrives, then lets the signal act", () => {
+    const before = process.listenerCount("SIGTERM");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      const envFile = writeEnvFile({ TOKEN: "s3cr3t" })!;
+      expect(process.listenerCount("SIGTERM")).toBe(before + 1);
+      process.emit("SIGTERM");
+      expect(fs.existsSync(path.dirname(envFile.path))).toBe(false);
+      expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM");
+      // Nothing of ours stays registered once the file is gone.
+      expect(process.listenerCount("SIGTERM")).toBe(before);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("writes no file when nothing can go in it", () => {
+    expect(writeEnvFile({})).toBeUndefined();
+    expect(writeEnvFile({ PEM: "a\nb" })).toBeUndefined();
+  });
+
+  it("masks docker.env values when a command is rendered for logs", () => {
+    const env = { TOKEN: "s3cr3t", PEM: "a\nb" };
+    const args = buildDockerRunArgs(makeFullConfig({ env, gitUserName: "Test User" }), ["pi"]);
+    const rendered = formatDockerArgs(args, env);
+
+    expect(rendered).not.toContain("s3cr3t");
+    expect(rendered).toContain("-e TOKEN=***");
+    expect(rendered).toContain("-e PEM=***");
+    // Values wpi sets itself are not secrets and stay readable.
+    expect(rendered).toContain("-e GIT_USER_NAME=Test User");
+    expect(rendered).toContain("-e WORKSPACE_DIR=/project");
+  });
+});
+
 describe("build context", () => {
   it("creates a build context with Dockerfile and entrypoint", () => {
     const dockerfile = generateDockerfile();
@@ -352,5 +459,54 @@ describe("build context", () => {
     expect(dockerfile).toContain(`ARG PI_VERSION=${PI_VERSION}`);
     expect(entrypoint).toContain("#!/usr/bin/env bash");
     expect(entrypoint).toContain('exec gosu "${USERNAME}" "$@"');
+  });
+
+  it("contains exactly what the Dockerfile copies, in a stable order", () => {
+    const files = collectBuildContext(PI_VERSION);
+    const paths = files.map((f) => f.path);
+
+    expect(paths).toEqual([...paths].sort());
+    expect(paths).toContain("Dockerfile");
+    expect(paths).toContain("entrypoint.sh");
+    expect(paths).toContain("package/package.json");
+    expect(paths).toContain("package/extensions/confirm-dangerous/index.ts");
+    expect(paths).toContain("settings/default-settings.json");
+    expect(files.find((f) => f.path === "Dockerfile")!.content.toString()).toBe(generateDockerfile(undefined, PI_VERSION));
+  });
+
+  it("leaves tests and installed dependencies out of the image", () => {
+    const paths = collectBuildContext(PI_VERSION).map((f) => f.path);
+
+    expect(paths.filter((p) => p.endsWith(".test.ts"))).toEqual([]);
+    expect(paths.filter((p) => p.includes("node_modules"))).toEqual([]);
+  });
+});
+
+describe("image tag", () => {
+  it("is the pi version plus a fingerprint of the build context", () => {
+    const fingerprint = fingerprintBuildContext(collectBuildContext(PI_VERSION));
+    expect(fingerprint).toMatch(/^[a-f0-9]{12}$/);
+    expect(imageTag(PI_VERSION)).toBe(`pi-agent:${PI_VERSION}-${fingerprint}`);
+  });
+
+  it("changes with the pi version and the Dockerfile extension", () => {
+    const base = imageTag(PI_VERSION);
+    expect(imageTag(PI_VERSION)).toBe(base);
+    expect(imageTag("0.50.0")).not.toBe(base);
+    expect(imageTag(PI_VERSION, "RUN echo one")).not.toBe(base);
+    expect(imageTag(PI_VERSION, "RUN echo one")).not.toBe(imageTag(PI_VERSION, "RUN echo two"));
+  });
+
+  it("changes when any file's content or path changes", () => {
+    const files = collectBuildContext(PI_VERSION);
+    const base = fingerprintBuildContext(files);
+    const edited = files.map((f, i) => (i === files.length - 1 ? { ...f, content: Buffer.concat([f.content, Buffer.from("\n")]) } : f));
+    const renamed = files.map((f, i) => (i === files.length - 1 ? { ...f, path: f.path + ".bak" } : f));
+
+    expect(fingerprintBuildContext(edited)).not.toBe(base);
+    expect(fingerprintBuildContext(renamed)).not.toBe(base);
+    // Moving bytes between a path and its content must not go unnoticed.
+    expect(fingerprintBuildContext([{ path: "ab", content: Buffer.from("c") }]))
+      .not.toBe(fingerprintBuildContext([{ path: "a", content: Buffer.from("bc") }]));
   });
 });
