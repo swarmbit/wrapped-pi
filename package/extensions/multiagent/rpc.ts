@@ -60,7 +60,11 @@ export class RpcTransport implements Transport {
         this.pending.delete(record.id); clearTimeout(request.timer);
         if (record.success) request.resolve(record.data);
         else request.reject(new Error(record.error || "RPC request failed"));
-      } else onEvent(record);
+      } else {
+        // A fault in a local event listener is not a protocol failure and must
+        // not take the child down with it.
+        try { onEvent(record); } catch { /* the child keeps running */ }
+      }
     });
     this.process.stdout.on("data", chunk => {
       try { lines.push(chunk); } catch (error) { fail(error as Error); this.process.kill("SIGTERM"); }

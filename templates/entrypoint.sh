@@ -19,6 +19,14 @@ PI_AGENT_HOME="${PI_HOME}/agent"
 
 # ── Match pi-user UID/GID to host user ──────────────────
 # Files created in the mounted project and ~/.pi must belong to the host user.
+# A root host user is the exception: the agent never runs as UID 0, so pi-user
+# keeps its own IDs and root on the host can still manage what it writes.
+if [ "${HOST_UID}" = "0" ]; then
+  echo "wpi: warning: started by root; the agent runs as $(id -u pi-user):$(id -g pi-user) instead." \
+       "Files it writes to mounted directories get that owner." >&2
+  HOST_UID="$(id -u pi-user)"
+  HOST_GID="$(id -g pi-user)"
+fi
 if [ "$(id -g pi-user)" != "${HOST_GID}" ]; then
   if getent group "${HOST_GID}" >/dev/null; then
     # The GID already belongs to a group in the image (macOS "staff" is 20,

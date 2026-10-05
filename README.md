@@ -62,6 +62,7 @@ wpi -p 8080:3000        # host 8080 → container 3000
 wpi build              # build/rebuild the image
 wpi shell              # open a shell in a new container
 wpi shell <id>         # exec into an existing container
+wpi clean              # remove images left over from other configs/versions
 wpi dry-run            # print config and docker commands (debugging)
 ```
 
@@ -222,6 +223,9 @@ bundled extensions and settings. So:
   each other.
 - `wpi build` still forces a rebuild of the current image, for example to pick up newer base
   image or OS packages.
+- Superseded images are not deleted automatically. `wpi clean` removes every `pi-agent` image
+  except the one the current configuration uses; an image another project still needs is rebuilt
+  on that project's next run, and one a running container uses is left alone.
 
 Images of earlier configurations are not removed automatically. List them with
 `docker images pi-agent` and delete the ones you no longer need with `docker rmi <tag>`.
@@ -256,6 +260,7 @@ Images of earlier configurations are not removed automatically. List them with
 | `build` | Build or rebuild the Docker image for the current configuration. Optional: a missing image is built on first use. |
 | `shell` | Open a bash shell in a new container (useful for debugging or running arbitrary commands) |
 | `shell <id>` | Exec into an existing running container by ID or name. |
+| `clean` | Remove `pi-agent` images other than the one the current configuration uses. |
 | `dry-run` | Print the resolved config and the docker commands that would run, without executing anything. Useful for debugging config resolution. `docker.env` keys are listed with their values masked. |
 
 ### Port details

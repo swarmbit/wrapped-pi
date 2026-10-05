@@ -151,6 +151,20 @@ describe("automatic discovery", () => {
     expect(session.redactor.redact("PORT=3000 # inline comment")).toBe("PORT=3000 # inline comment");
   });
 
+  it("learns unquoted letters-only values from configuration files as full secrets", () => {
+    const session = new SessionSecrets(path.join(tmp, "agent"), "config-files");
+    const yamlFile = path.join(tmp, "config.yml");
+    fs.writeFileSync(yamlFile, "db:\n  password: correcthorsebattery  # rotate me\n  - token: null\n  enabled_auth: true\n");
+    const iniFile = path.join(tmp, "app.ini");
+    fs.writeFileSync(iniFile, "[smtp]\nsecret = anotherlettersonly\n");
+    session.scanFile(yamlFile); session.scanFile(iniFile);
+    for (const value of ["correcthorsebattery", "anotherlettersonly"]) {
+      const text = `postgres://app:${value}@db/main`;
+      expect(session.redactor.redact(text), value).not.toContain(value);
+      expect(session.redactor.restore(session.redactor.redact(text)), value).toBe(text);
+    }
+  });
+
   it("does not apply dotenv rules to source files", () => {
     const session = new SessionSecrets(path.join(tmp, "agent"), "source");
     const filename = path.join(tmp, "auth.ts");

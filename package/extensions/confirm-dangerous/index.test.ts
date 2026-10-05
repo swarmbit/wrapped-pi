@@ -155,8 +155,14 @@ describe("isPiConfigDir", () => {
     expect(isPiConfigDir(`${PI_DIR}/agent/settings.json`)).toBe(true);
     expect(isPiConfigDir(`${PI_DIR}/agent/extensions`)).toBe(true);
     expect(isPiConfigDir(`${PI_DIR}/agent/sessions/abc.jsonl`)).toBe(true);
-    expect(isPiConfigDir(`${PI_DIR}/wpi.yml`)).toBe(true);
     expect(isPiConfigDir("~/.pi/agent/extensions/my-ext/index.ts")).toBe(true);
+  });
+
+  it("does not cover the launcher config, which wpi applies on the host", () => {
+    expect(isPiConfigDir(`${PI_DIR}/wpi.yml`)).toBe(false);
+    expect(isPiConfigDir("~/.pi/wpi.yml")).toBe(false);
+    expect(isPiConfigDir(`${PI_DIR}/agent/../wpi.yml`)).toBe(false);
+    expect(isAllowedPath(`${PI_DIR}/wpi.yml`)).toBe(false);
   });
 
   it("covers worktrees, which the worktree extension keeps under ~/.pi", () => {

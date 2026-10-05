@@ -146,6 +146,9 @@ describe("generateEntrypoint", () => {
     expect(sh).toContain('groupmod -g "${HOST_GID}" pi-user');
     // A UID owned by a system account is shared rather than refused.
     expect(sh).toContain('usermod -o -u "${HOST_UID}" pi-user');
+    // ...except for root: -o would otherwise hand the agent UID 0.
+    expect(sh.indexOf('if [ "${HOST_UID}" = "0" ]')).toBeGreaterThan(-1);
+    expect(sh.indexOf('if [ "${HOST_UID}" = "0" ]')).toBeLessThan(sh.indexOf("usermod -o"));
   });
 
   it("reports a failed UID/GID mapping instead of hiding it", () => {

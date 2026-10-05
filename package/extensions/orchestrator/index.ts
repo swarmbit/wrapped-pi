@@ -438,7 +438,7 @@ export class Orchestrator {
       const models = configured.filter(option => available.has(option.model));
       if (!models.length) throw new Error("No configured worker model is available.");
       const input = redactForLlm({ request: text,
-        context: sessionContextSummary(ctx.sessionManager.getBranch()).slice(0, 12000),
+        context: readableSessionContextSummary(sessionContextSummary(ctx.sessionManager.getBranch())).slice(0, 12000),
         currentModel: fallback ? `${fallback.provider}/${fallback.id}` : undefined, models }, ctx);
       called = true;
       result = await this.backend.evaluateModel(input, undefined, debug.trace);

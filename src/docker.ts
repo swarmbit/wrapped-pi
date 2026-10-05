@@ -25,7 +25,7 @@ import * as fs from "fs";
 import * as os from "os";
 import { spawnSync, spawn, SpawnSyncReturns } from "child_process";
 import { PiContainerConfig, RuntimeContext, debugLog, isDebug } from "./config";
-import { collectBuildContext } from "./image";
+import { collectBuildContext, IMAGE_REPOSITORY } from "./image";
 
 // ── Image management ────────────────────────────────────────
 
@@ -35,6 +35,39 @@ export function imageExists(tag: string): boolean {
   const exists = result.status === 0;
   debugLog(`Image ${tag} exists: ${exists}${exists ? "" : " (stderr: " + result.stderr.toString().trim() + ")"}`);
   return exists;
+}
+
+/**
+ * Tags of the images wpi built for other build inputs: earlier wpi versions,
+ * earlier docker.extension contents, or other projects. Each distinct set of
+ * inputs gets its own tag (see image.ts), and nothing replaces an old one.
+ */
+export function listOtherImages(keep: string): string[] {
+  const result = spawnSync("docker", ["image", "ls", IMAGE_REPOSITORY, "--format", "{{.Repository}}:{{.Tag}}"], { stdio: "pipe" });
+  if (result.status !== 0) return [];
+  return result.stdout.toString().split("\n").map((line) => line.trim())
+    .filter((tag) => tag && tag !== keep && !tag.endsWith(":<none>"));
+}
+
+/** Remove every wpi image except the one the current config uses. */
+export function cleanImages(config: { piImage: string }): void {
+  const others = listOtherImages(config.piImage);
+  if (others.length === 0) {
+    console.log("✅ No other pi-agent images to remove.");
+    return;
+  }
+  let removed = 0;
+  for (const tag of others) {
+    // No --force: an image a running container still uses is left alone.
+    const result = spawnSync("docker", ["image", "rm", tag], { stdio: "pipe" });
+    if (result.status === 0) {
+      removed++;
+      console.log(`🗑️  Removed ${tag}`);
+    } else {
+      console.log(`⏭️  Kept ${tag}: ${result.stderr.toString().trim() || "docker image rm failed"}`);
+    }
+  }
+  console.log(`✅ Removed ${removed} of ${others.length} image(s); kept ${config.piImage}.`);
 }
 
 // ── Build ───────────────────────────────────────────────────
@@ -75,6 +108,10 @@ export function buildImage(config: { piVersion: string; piImage: string; dockerf
     }
 
     console.log(`✅ Built ${config.piImage}`);
+    const others = listOtherImages(config.piImage).length;
+    if (others > 0) {
+      console.log(`ℹ️  ${others} other pi-agent image(s) are still stored. Run 'wpi clean' to remove them.`);
+    }
   } finally {
     // Clean up temp directory
     debugLog(`Cleaning up build context: ${buildCtx}`);
@@ -308,10 +345,21 @@ export function writeEnvFile(env: Record<string, string>): { path: string; remov
   const remove = () => {
     if (removed) return;
     removed = true;
+    for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
     fs.rmSync(dir, { recursive: true, force: true });
   };
   // Also covers process.exit() paths that skip the caller's cleanup.
   process.once("exit", remove);
+  // A signal's default action ends the process without an "exit" event, which
+  // would leave the values on disk: clean up first, then let the signal act.
+  const signalHandlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+    const handler = () => {
+      remove();
+      process.kill(process.pid, signal);
+    };
+    process.once(signal, handler);
+    return [signal, handler] as const;
+  });
   return { path: file, remove };
 }
 

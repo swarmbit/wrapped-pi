@@ -30,7 +30,7 @@ export class MultiagentRuntime {
   private boots = new Map<string, Promise<Child>>();
   constructor(private directory: string, private persist: (record: ChildRecord) => void,
     private dialog: DialogHandler, private factory: TransportFactory = (cwd, args, event, exit) => new RpcTransport(cwd, args, event, exit),
-    private onMail?: (child: Child, mail: OutgoingMail) => void) {}
+    private onMail?: (child: Child, mail: OutgoingMail, replayed: boolean) => void) {}
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private changed() { for (const listener of this.listeners) listener(); }
   restore(records: ChildRecord[]) {
@@ -101,7 +101,7 @@ export class MultiagentRuntime {
     try {
       await transport.request("get_state");
       child.messages = (await transport.request("get_messages")).messages;
-      for (const message of child.messages) this.receiveMail(child, message);
+      for (const message of child.messages) this.receiveMail(child, message, true);
       child.partial = undefined; child.tools.clear();
       child.status = "idle"; this.changed(); return child;
     } catch (error) {
@@ -146,9 +146,10 @@ export class MultiagentRuntime {
     await Promise.all([...this.children.keys()].map(id => this.close(id)));
     this.listeners.clear();
   }
-  private receiveMail(child: Child, message: any) {
+  /** `replayed` marks mail read back from saved history rather than sent just now. */
+  private receiveMail(child: Child, message: any, replayed = false) {
     if (!this.disposed && message?.role === "custom" && message.customType === OUTGOING_MAIL && validOutgoing(message.details))
-      this.onMail?.(child, message.details);
+      this.onMail?.(child, message.details, replayed);
   }
   private event(child: Child, event: any) {
     if (event.type === "extension_ui_request") {

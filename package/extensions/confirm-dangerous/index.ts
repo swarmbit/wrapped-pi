@@ -8,7 +8,11 @@
 // Allowed paths outside the workspace:
 //   - /tmp     — temporary files (read, write, delete)
 //   - ~/.pi    — pi config directory (mounted from host; also
-//                holds the worktree extension's worktrees)
+//                holds the worktree extension's worktrees),
+//                except ~/.pi/wpi.yml: wpi reads that file on
+//                the host to decide mounts, env, and image
+//                build steps, so changing it reaches outside
+//                the container
 //
 // Read operations (read tool) are always allowed — they are
 // never dangerous regardless of the target path.
@@ -191,8 +195,10 @@ export function isOutsideWorkspace(
 }
 
 export function isPiConfigDir(filePath: string, cwd: string = WORKSPACE_DIR): boolean {
-  // Allow writes to the pi config directory (mounted from host)
-  return resolvesWithin(filePath, cwd, piConfigDir());
+  // Allow writes to the pi config directory (mounted from host), but not to
+  // the launcher config: it is applied on the host at the next start.
+  const target = canonicalize(resolveToolPath(filePath, cwd));
+  return isWithin(target, canonicalize(piConfigDir())) && target !== canonicalize(path.join(piConfigDir(), "wpi.yml"));
 }
 
 export function isTmpPath(filePath: string): boolean {

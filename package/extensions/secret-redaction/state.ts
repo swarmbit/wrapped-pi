@@ -143,6 +143,17 @@ export class SessionSecrets {
         if (this.redactor.isCredentialName(match[1])) this.redactor.registerSecret(match[2]);
       }
     }
+    // Configuration files hold literals too. The free-text scan masks an unquoted
+    // letters-only value (`db_password: correcthorsebattery`) only where it is
+    // assigned, because in source code that shape is an identifier; here it is the
+    // credential itself and must be recognized wherever it turns up.
+    if (/\.(?:ya?ml|toml|ini|cfg|conf|properties)$/i.test(basename)) {
+      for (const match of text.matchAll(/^[ \t-]*["']?([A-Za-z_][\w.-]*)["']?[ \t]*[:=][ \t]*([^\s"'#|>&*!{[][^\r\n]*?)[ \t]*(?:[ \t]#[^\r\n]*)?\r?$/gm)) {
+        if (this.redactor.isCredentialName(match[1]) && !/^(?:true|false|null|yes|no|on|off|~)$/i.test(match[2])) {
+          this.redactor.registerSecret(match[2]);
+        }
+      }
+    }
     this.scanned.set(filename, stamp);
   }
 

@@ -24,10 +24,18 @@ export function sessionContextSummary(entries: SessionEntry[]): string {
 
 export type ContextMessage = { role: "user" | "assistant"; content: string };
 
+/** Summaries stored before the structured format: "Latest message:\nuser: …\n\nEarlier message:\n…". */
+function decodeLegacySummary(summary: string): ContextMessage[] {
+  return summary.split(/(?:^|\n\n)(?:Latest|Earlier) message:\n/).flatMap(block => {
+    const match = /^(user|assistant): ([\s\S]*)$/.exec(block);
+    return match && match[2].trim() ? [{ role: match[1] as ContextMessage["role"], content: match[2] }] : [];
+  });
+}
+
 /** Decode structured summaries; invalid or absent stored data yields an empty context. */
 export function decodeSessionContextSummary(summary: string): ContextMessage[] {
   let value: unknown;
-  try { value = JSON.parse(summary); } catch { return []; }
+  try { value = JSON.parse(summary); } catch { return decodeLegacySummary(summary); }
   if (!Array.isArray(value) || value.some(item => !item || typeof item !== "object" || Array.isArray(item) ||
       !["user", "assistant"].includes(item.role) || typeof item.content !== "string")) return [];
   return value.map(item => ({ role: item.role, content: item.content }));

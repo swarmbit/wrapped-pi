@@ -29,6 +29,9 @@ describe("session context summary", () => {
     const valid = JSON.stringify([{ role: "user", content: "hello", extra: "ignored" }]);
     expect(decodeSessionContextSummary(valid)).toEqual([{ role: "user", content: "hello" }]);
     expect(decodeSessionContextSummary("invalid JSON")).toEqual([]);
+    // Summaries stored before the structured format stay usable after an upgrade.
+    expect(decodeSessionContextSummary("Latest message:\nassistant: done\n\nwith a gap\n\nEarlier message:\nuser: fix the bug"))
+      .toEqual([{ role: "assistant", content: "done\n\nwith a gap" }, { role: "user", content: "fix the bug" }]);
     expect(decodeSessionContextSummary('[{"role":"system","content":"x"}]')).toEqual([]);
     expect(decodeSessionContextSummary('[{"role":"user","content":2}]')).toEqual([]);
     expect(readableSessionContextSummary(valid)).toContain("user: hello");

@@ -148,6 +148,14 @@ describe("multiagent mailbox integration", () => {
     expect(h.sendMessage).not.toHaveBeenCalled();
     await h.events.session_shutdown();
   });
+  it("files mail replayed from a child's history as unread without starting a parent turn", async () => {
+    const h = harness(); await h.events.session_start({}, h.ctx);
+    mocks.runtimes[0].onMail({ id: "child", agent: "runner" }, outgoing, true);
+    expect(h.sendMessage).not.toHaveBeenCalled();
+    const result = await h.tools.multiagent.execute("call", { action: "inbox" }, undefined, undefined, h.ctx);
+    expect(result.details.unread).toBe(1);
+    await h.events.session_shutdown();
+  });
   it("loads only the parent-mail tool in children, never fleet-management tools", () => {
     const h = harness(); vi.stubEnv("WPI_MULTIAGENT_CHILD", "1");
     const tools: any[] = [];

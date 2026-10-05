@@ -17,7 +17,7 @@
 // ============================================================
 
 import { loadConfig, getUserConfigPath, PI_VERSION, checkPortAvailable, setDebug, debugLog } from "./config";
-import { buildImage, runContainer, shellInContainer, execInContainer, buildDockerRunArgs, formatDockerArgs, partitionEnv } from "./docker";
+import { buildImage, cleanImages, runContainer, shellInContainer, execInContainer, buildDockerRunArgs, formatDockerArgs, partitionEnv } from "./docker";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
@@ -32,6 +32,9 @@ Commands:
   build         Build or rebuild the Docker image (also happens automatically
                 when the image for the current config does not exist yet)
   shell [id]    Open a shell in a new container, or exec into an existing one by ID/name
+  clean         Remove pi-agent images other than the one the current config uses
+                (older wpi versions, changed docker.extension, other projects;
+                any that is still needed is rebuilt on its next run)
   dry-run       Print resolved config and docker commands without executing
 
 Options:
@@ -107,7 +110,7 @@ async function main(): Promise<void> {
   }
 
   // Parse our args
-  let command: "run" | "build" | "shell" | "dry-run" = "run";
+  let command: "run" | "build" | "shell" | "clean" | "dry-run" = "run";
   let shellContainerId: string | undefined;
   const cliPorts: string[] = [];
   let cliDebug = false;
@@ -143,6 +146,8 @@ async function main(): Promise<void> {
         shellContainerId = nextArg;
         i++; // skip the container ID
       }
+    } else if (arg === "clean") {
+      command = "clean";
     } else if (arg === "dry-run") {
       command = "dry-run";
     } else {
@@ -230,6 +235,9 @@ async function main(): Promise<void> {
       break;
     case "shell":
       await shellInContainer(config);
+      break;
+    case "clean":
+      cleanImages(config);
       break;
     case "run":
       await runContainer(config, piArgs.length > 0 ? ["pi", ...piArgs] : ["pi"]);

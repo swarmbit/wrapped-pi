@@ -2,7 +2,7 @@
 // Tests for docker.ts — Docker operations
 // ============================================================
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -413,6 +413,22 @@ describe("docker.env handling", () => {
     }
     expect(fs.existsSync(path.dirname(envFile.path))).toBe(false);
     expect(() => envFile.remove()).not.toThrow();
+  });
+
+  it("removes the env file when a terminating signal arrives, then lets the signal act", () => {
+    const before = process.listenerCount("SIGTERM");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      const envFile = writeEnvFile({ TOKEN: "s3cr3t" })!;
+      expect(process.listenerCount("SIGTERM")).toBe(before + 1);
+      process.emit("SIGTERM");
+      expect(fs.existsSync(path.dirname(envFile.path))).toBe(false);
+      expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM");
+      // Nothing of ours stays registered once the file is gone.
+      expect(process.listenerCount("SIGTERM")).toBe(before);
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it("writes no file when nothing can go in it", () => {
