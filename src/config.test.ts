@@ -76,6 +76,20 @@ describe("loadConfig", () => {
     expect(config.env).toEqual({ ANTHROPIC_API_KEY: "sk-test" });
   });
 
+  it("expands ${home} and ${workspaceDir} in env values", () => {
+    const containerDir = path.join(tmpDir, ".pi");
+    fs.mkdirSync(containerDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(containerDir, "wpi.yml"),
+      "docker:\n  env:\n    CLAUDE_CONFIG_DIR: ${home}/.claude\n    WS: ${workspaceDir}/x"
+    );
+    process.chdir(tmpDir);
+
+    const config = loadConfig({ homeDir: "/Users/alice" });
+    expect(config.env.CLAUDE_CONFIG_DIR).toBe("/Users/alice/.claude");
+    expect(config.env.WS).toBe(`${config.workspaceDir}/x`);
+  });
+
   it("returns empty env when no config exists", () => {
     process.chdir(tmpDir);
     const config = loadConfig({ homeDir: tmpDir });

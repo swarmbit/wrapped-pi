@@ -10,4 +10,4 @@
 // ============================================================
 
 /** Pi version shipped by this version of wpi. */
-export const PI_VERSION = "1.0.0";
+export const PI_VERSION = "1.0.3";
