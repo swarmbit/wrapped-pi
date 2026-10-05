@@ -185,6 +185,7 @@ docker:
   volumes:
     - wpi-m2:${home}/.m2
     - wpi-gradle:${home}/.gradle
+    - wpi-claude:${home}/.claude                 # Claude Code login and state (pair with CLAUDE_CONFIG_DIR)
 
   # Limit container memory (docker run --memory / --memory-swap).
   memory: 4g
@@ -194,6 +195,9 @@ docker:
   env:
     CUSTOM_VAR: some-value
     NODE_ENV: development
+    # Keeps ~/.claude.json inside the wpi-claude volume so the login survives restarts.
+    # ${home} and ${workspaceDir} are expanded in env values.
+    CLAUDE_CONFIG_DIR: ${home}/.claude
 
   # Extra Dockerfile instructions appended at image build time.
   # Use this to install system packages or tools. Changing it
@@ -201,6 +205,7 @@ docker:
   extension: |
     RUN apt-get update && apt-get install -y python3 pip
     ENV PYTHONUNBUFFERED=1
+    # Claude Code: see example/wpi.yml for the full install block
 
 # ── Git settings ───────────────────────────────────────────
 # Set the Git author identity for commits made inside the container.
@@ -240,7 +245,7 @@ Images of earlier configurations are not removed automatically. List them with
 | `docker.volumes` | `list` | `[]` | Named Docker volumes created and mounted into the container. Each entry is `VOLUME_NAME:CONTAINER_PATH[:MODE]`. Placeholders: `~` or `${home}` (host home dir), `${workspaceDir}` (project dir). Volumes persist across runs — useful for caches like `.m2`, `.gradle`, or `node_modules`. |
 | `docker.memory` | `string` | — | Maximum memory for the container (`docker run --memory`). Example: `4g`. |
 | `docker.memorySwap` | `string` | — | Memory+swap limit for the container (`docker run --memory-swap`). Example: `4g`. |
-| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables. Values are handed to Docker through a private temporary env file rather than the command line, so they do not appear in process listings. User config overrides project config per-key. |
+| `docker.env` | `map` | `{}` | Key-value pairs injected as environment variables. `${home}` and `${workspaceDir}` are expanded in values. Values are handed to Docker through a private temporary env file rather than the command line, so they do not appear in process listings. User config overrides project config per-key. |
 | `docker.extension` | `string` | — | Extra Dockerfile content appended at image build time. Use it to install system packages or set image-level `ENV` vars. Each distinct block gets its own image, built on the next run. |
 | `git.user.name` | `string` | *(host git config)* | Git author name for commits inside the container. Falls back to `git config user.name` from the host. |
 | `git.user.email` | `string` | *(host git config)* | Git author email for commits inside the container. Falls back to `git config user.email` from the host. |
@@ -282,6 +287,9 @@ docker:
 
   env:
     NODE_ENV: development
+    # Keeps ~/.claude.json inside the wpi-claude volume so the login survives restarts.
+    # ${home} and ${workspaceDir} are expanded in env values.
+    CLAUDE_CONFIG_DIR: ${home}/.claude
     CUSTOM_API_URL: https://api.example.com
 
   extension: |

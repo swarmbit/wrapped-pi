@@ -82,7 +82,7 @@ Config file schema:
       name: John Doe
       email: john@example.com
 
-Path placeholders (usable in docker.mounts and docker.volumes):
+Path placeholders (usable in docker.mounts, docker.volumes and docker.env values):
   ~ or \${home}          host home directory  (e.g. /Users/alice)
   \${workspaceDir}        mounted project directory
 `.trim());

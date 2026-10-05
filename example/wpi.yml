@@ -3,6 +3,7 @@ docker:
     ORG_GRADLE_PROJECT_artifactoryUser: user
     ORG_GRADLE_PROJECT_artifactoryPassword: password
     TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    CLAUDE_CONFIG_DIR: ${home}/.claude
 
   mounts:
     - /var/run/docker.sock:/var/run/docker.sock
@@ -12,6 +13,7 @@ docker:
   volumes:
     - wpi-m2:${home}/.m2
     - wpi-gradle:${home}/.gradle
+    - wpi-claude:${home}/.claude
 
   # Memory limits for the container
   # even though we give a higher limit here colima still needs more memory to run gradle
@@ -46,3 +48,17 @@ docker:
 
     ENV KOTLIN_HOME=/opt/kotlinc
     ENV PATH="$KOTLIN_HOME/bin:$PATH"
+
+    # ── Claude Code ─────────────────────────────────────────────────────────────
+    # The installer writes under $HOME, but the entrypoint moves the user's home
+    # to the host path at startup, so install into a throwaway home and copy the
+    # binary to /usr/local/bin. The auto-updater can't write there as the
+    # non-root user; rebuild the image to upgrade.
+    ARG CLAUDE_CODE_VERSION=latest
+    ENV DISABLE_AUTOUPDATER=1
+    RUN export HOME=/tmp/claude-install \
+        && curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}" \
+        && cp -L "${HOME}/.local/bin/claude" /usr/local/bin/claude \
+        && chmod 0755 /usr/local/bin/claude \
+        && rm -rf /tmp/claude-install \
+        && claude --version

@@ -201,11 +201,17 @@ export function loadConfig(options?: LoadConfigOptions): PiContainerConfig & Run
   const projectPorts: PortMapping[] = parseConfigPorts(projectConfig.docker?.ports);
   const ports = mergePorts(cliPorts, userPorts, projectPorts);
 
-  // Resolve env: user config overrides project config
-  const env: Record<string, string> = {
+  // Resolve env: user config overrides project config. ${home} and
+  // ${workspaceDir} expand like they do in mounts and volumes.
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries({
     ...(projectConfig.docker?.env ?? {}),
     ...(userConfig.docker?.env ?? {}),
-  };
+  })) {
+    env[key] = typeof value === "string"
+      ? value.replace(/\$\{home\}/g, homeDir).replace(/\$\{workspaceDir\}/g, projectDir)
+      : value;
+  }
 
   // Dockerfile extension: project config overrides user config
   const dockerfileExtension =
